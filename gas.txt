@@ -1515,11 +1515,12 @@ function runFetchOHLCVForNewAlertsAs20260428() {
 function runFetchOHLCVForNewAlertsAsDate_(dateValue) {
   const dateKey = normalizeBusinessDateKey_(dateValue);
   const expiresAt = Date.now() + OHLCV_MANUAL_BUSINESS_TTL_MS;
+  resetProcessProperties_();
   PropertiesService.getScriptProperties().setProperties({
     [OHLCV_MANUAL_BUSINESS_DATE_KEY]: dateKey,
     [OHLCV_MANUAL_BUSINESS_EXPIRES_KEY]: String(expiresAt)
   });
-  writeProcessLog_("手動実行", `今回のOHLCV取得チェーンでは、基準日を ${dateKey} として扱います。`, {
+  writeProcessLog_("手動実行", `OHLCV取得の進捗状態をリセットし、今回のOHLCV取得チェーンでは基準日を ${dateKey} として扱います。`, {
     businessDate: dateKey,
     expiresAt: new Date(expiresAt).toISOString()
   });

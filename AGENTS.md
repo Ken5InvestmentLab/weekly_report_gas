@@ -111,6 +111,7 @@ PHASE4: 重複排除・ソート・完了通知 → runDailyMaintenanceTrigger �
 通常の未指定取得窓は `OHLCV_DEFAULT_LOOKBACK_DAYS = 120` 日。`lastTs` がない銘柄や `OHLCV_REPAIR_SYMBOLS` に入った強制再取得銘柄も120日を標準とする。120日より古い補填は通常処理に混ぜず、`refetchSymbolGap(symbol, startDate, endDate)` などで銘柄・期間を明示して実行する。
 
 祝日などに前営業日扱いで `fetchOHLCVForNewAlerts` 起点のチェーンを手動実行する場合は、日付別の公開ラッパーから `runFetchOHLCVForNewAlertsAsDate_("yyyy-mm-dd")` を呼ぶ。手動基準日は日次メンテナンス・GAP修復にも引き継がれ、GAP修復完了時または `clearManualOhlcvBusinessDate()` で解除する。
+手動基準日の公開ラッパーは、開始時に既存のOHLCVフェーズ進捗・保存済み銘柄リスト・再開トリガーをリセットしてから基準日を設定し、古い途中状態を引き継がないようにする。
 
 空/無効 timestamp 行は日付推定で修正しない。`repairEmptyTimestampRows(false)` は対象行を削除し、対象銘柄を `OHLCV_REPAIR_SYMBOLS` に記録して正規取得で補填する。
 
