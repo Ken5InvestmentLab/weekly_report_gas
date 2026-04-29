@@ -2947,7 +2947,7 @@ function repairEmptyTimestampRows(dryRun) {
   const samples = [];
   for (let i = 0; i < values.length; i++) {
     const ts = values[i][0];
-    if (isValidOhlcvTimestamp_(ts)) continue;
+    if (isValidOhlcvTimestamp_(ts) && isOhlcvSessionTimestamp_(ts)) continue;
     const sheetRow = DATA_ROW + i;
     const sym = String(values[i][2] || "").trim();
     deleteRowNums.push(sheetRow);
@@ -3006,6 +3006,8 @@ function repairEmptyTimestampRows(dryRun) {
     setOhlcvRepairSymbols_(repairSymbols);
     console.log(`[repair] ${repairSymbols.length}銘柄を OHLCV_REPAIR_SYMBOLS に記録しました`);
   }
+  PropertiesService.getScriptProperties().deleteProperty(QUICK_REPAIR_STATE_KEY);
+  PropertiesService.getScriptProperties().deleteProperty(QUICK_REPAIR_CLEANUP_STATE_KEY);
  
   console.log(`[repair] 完了`);
   return summary;
@@ -3196,13 +3198,13 @@ function refetchSymbolRange(options) {
 // ============================================================
 
 const QUICK_REPAIR_STATE_KEY = "QUICK_REPAIR_STATE";
-const QUICK_REPAIR_BATCH_SYMBOLS = 20;
+const QUICK_REPAIR_BATCH_SYMBOLS = 40;
 const QUICK_REPAIR_MAX_RUN_MS = 3.5 * 60 * 1000;
 const QUICK_REPAIR_RESUME_AFTER_MS = 60 * 1000;
 const QUICK_REPAIR_SAFETY_AFTER_MS = 10 * 60 * 1000;
 const QUICK_REPAIR_LOCK_WAIT_MS = 5000;
 const QUICK_REPAIR_STATE_VERSION = 6;
-const QUICK_REPAIR_SCAN_BUDGET_MS = 90 * 1000;
+const QUICK_REPAIR_SCAN_BUDGET_MS = 75 * 1000;
 const QUICK_REPAIR_SCAN_ROWS_PER_SYMBOL_DAY = 3;
 const QUICK_REPAIR_SCAN_MIN_ROWS = 20000;
 const QUICK_REPAIR_SCAN_MAX_ROWS = 90000;
@@ -4386,7 +4388,7 @@ function maybePurgeInvalidOhlcvTimestampRows_(sheet, context, maxRows, businessD
   try {
     const raw = props.getProperty(QUICK_REPAIR_CLEANUP_STATE_KEY);
     const state = raw ? JSON.parse(raw) : null;
-    if (state && state.businessDate === key && state.checked === true) {
+    if (state && state.businessDate === key && state.checked === true && Number(state.lastRow || 0) === lastRow && Number(state.maxRows || 0) >= Number(maxRows || 0)) {
       return { skipped: true, deletedRows: 0, repairSymbols: 0, lastCheckedRow: state.lastRow || 0 };
     }
   } catch (e) {}
@@ -4416,6 +4418,16 @@ function dedupeAndSortOhlcv_(sheet) {
     sheet.getRange(2, 1, afterDedup - 1, 8)
       .sort([{ column: 1, ascending: true }, { column: 3, ascending: true }]);
   }
+}
+
+function prepareOhlcvSheetForQuickRepairPause_(sheet, context, rowsAddedThisRun) {
+  if (!sheet || (Number(rowsAddedThisRun) || 0) <= 0) return;
+  writeProcessLog_("ギャップ修復", "再開前提を壊さないため、追記済みOHLCVを重複排除してtimestamp昇順に戻します。", {
+    context: context || "",
+    rowsAddedThisRun: rowsAddedThisRun
+  });
+  dedupeAndSortOhlcv_(sheet);
+  SpreadsheetApp.flush();
 }
 
 function scheduleQuickRepairResume_(delayMs) {
@@ -4938,12 +4950,15 @@ function quickRepairRecentGaps(options) {
     };
     props.setProperty(QUICK_REPAIR_STATE_KEY, JSON.stringify(state));
 
-    const DEDUPE_GUARD_MS = 60 * 1000;
+    const DEDUPE_GUARD_MS = 90 * 1000;
     const scanDeadlineMs = Math.min(
       startTime + QUICK_REPAIR_SCAN_BUDGET_MS,
       startTime + QUICK_REPAIR_MAX_RUN_MS - DEDUPE_GUARD_MS
     );
-    maybePurgeInvalidOhlcvTimestampRows_(ohlcvSh, "quickRepairRecentGaps.entry", QUICK_REPAIR_ENTRY_CLEANUP_ROWS, businessDateKey);
+    const entryCleanup = maybePurgeInvalidOhlcvTimestampRows_(ohlcvSh, "quickRepairRecentGaps.entry", QUICK_REPAIR_ENTRY_CLEANUP_ROWS, businessDateKey);
+    if ((entryCleanup.deletedRows || 0) > 0) {
+      writeProcessLog_("ギャップ修復", "入口で空・無効timestamp行を削除したため、今回のスキャンはクリーンな状態で続行します。", entryCleanup);
+    }
     const scan = quickScanMissingSessions(daysBack, minSessions, { deadlineMs: scanDeadlineMs });
     if (scan.incomplete) {
       state.deferredDates += 1;
@@ -5016,6 +5031,7 @@ function quickRepairRecentGaps(options) {
         parseErrors: result.parseErrors || 0
       });
       if ((result.deferredDates || 0) > 0) {
+        prepareOhlcvSheetForQuickRepairPause_(ohlcvSh, "deferred_dates", state.totalRows);
         scheduleQuickRepairResume_(QUICK_REPAIR_RESUME_AFTER_MS);
         return { ok: true, incomplete: true, reason: "deferred_dates", processedGroups: state.processedGroups, processedTasks: state.processedTasks, rows: state.totalRows, deferredDates: state.deferredDates };
       }
@@ -5024,6 +5040,7 @@ function quickRepairRecentGaps(options) {
     }
 
     if (groupIndex < groups.length) {
+      prepareOhlcvSheetForQuickRepairPause_(ohlcvSh, "time_guard_pause", state.totalRows);
       scheduleQuickRepairResume_(QUICK_REPAIR_RESUME_AFTER_MS);
       writeProcessLog_("ギャップ修復", `実行時間が近づいたため、${groupIndex}/${groups.length} 銘柄グループまで保存して再開します。`, {
         rowsAddedThisRun: state.totalRows
@@ -5466,6 +5483,44 @@ function purgeBogusGapRepairRows() {
   return { ok: true, deleted: deleteRows.length };
 }
 
+
+const CLEANUP_LEGACY_AUTO_QUICK_REPAIR_KEY = "CLEANUP_LEGACY_AUTO_QUICK_REPAIR_V1";
+const CLEANUP_LEGACY_QUICK_REPAIR_DELAY_MS = 60 * 1000;
+
+function scheduleQuickRepairTriggerAfterCleanup_(cleanupSummary) {
+  const props = PropertiesService.getScriptProperties();
+  if (props.getProperty(CLEANUP_LEGACY_AUTO_QUICK_REPAIR_KEY) !== "1") {
+    return { scheduled: false, reason: "not_requested" };
+  }
+
+  props.deleteProperty(QUICK_REPAIR_STATE_KEY);
+  props.deleteProperty(QUICK_REPAIR_CLEANUP_STATE_KEY);
+  deleteTriggersByHandler_("resumeQuickRepair");
+  deleteTriggersByHandler_("quickRepairTrigger");
+
+  try {
+    ScriptApp.newTrigger("quickRepairTrigger")
+      .timeBased()
+      .after(CLEANUP_LEGACY_QUICK_REPAIR_DELAY_MS)
+      .create();
+    props.deleteProperty(CLEANUP_LEGACY_AUTO_QUICK_REPAIR_KEY);
+    const payload = {
+      handlerName: "quickRepairTrigger",
+      delayMs: CLEANUP_LEGACY_QUICK_REPAIR_DELAY_MS,
+      deletedRows: cleanupSummary && cleanupSummary.deletedRows ? cleanupSummary.deletedRows : 0,
+      invalidSessionTimestamp: cleanupSummary && cleanupSummary.invalidSessionTimestamp ? cleanupSummary.invalidSessionTimestamp : 0,
+      emptyTimestamp: cleanupSummary && cleanupSummary.emptyTimestamp ? cleanupSummary.emptyTimestamp : 0
+    };
+    writeProcessLog_("緊急OHLCV整理", "OHLCV整理が完了したため、ギャップ修復を1分後に自動起動します。", payload);
+    console.log(`[cleanupLegacy] quickRepairTrigger scheduled: ${JSON.stringify(payload)}`);
+    return { scheduled: true, handlerName: "quickRepairTrigger", delayMs: CLEANUP_LEGACY_QUICK_REPAIR_DELAY_MS };
+  } catch (e) {
+    const message = e && e.message ? e.message : String(e);
+    writeProcessLog_("緊急OHLCV整理", "OHLCV整理後のギャップ修復トリガー作成に失敗しました。", { message: message });
+    return { scheduled: false, error: message };
+  }
+}
+
 /**
  * 旧ロジック由来の残骸を安全に整理する one-shot（再開可能バッチ版）。
  * - 空timestamp行を削除
@@ -5534,6 +5589,15 @@ function cleanupLegacyGapFailedAndEmptyTimestamps(dryRun) {
         deletedRows: state.deletedRows,
         chunks: state.chunks
       };
+      if (!isDryRun && (state.deletedRows || 0) > 0) {
+        dedupeAndSortOhlcv_(sh);
+        SpreadsheetApp.flush();
+        PropertiesService.getScriptProperties().deleteProperty(QUICK_REPAIR_STATE_KEY);
+        PropertiesService.getScriptProperties().deleteProperty(QUICK_REPAIR_CLEANUP_STATE_KEY);
+      }
+      if (!isDryRun) {
+        summary.autoQuickRepair = scheduleQuickRepairTriggerAfterCleanup_(summary);
+      }
       console.log(`[cleanupLegacy] 完了: ${JSON.stringify(summary)}`);
       return summary;
     }
@@ -5599,11 +5663,39 @@ function cleanupLegacyGapFailedAndEmptyTimestamps(dryRun) {
   deleteTriggersByHandler_(RESUME_HANDLER);
   ScriptApp.newTrigger(RESUME_HANDLER).timeBased().after(RESUME_DELAY_MS).create();
   props.setProperty(STATE_KEY, JSON.stringify(state));
+  const autoQuickRepairPending = !isDryRun && props.getProperty(CLEANUP_LEGACY_AUTO_QUICK_REPAIR_KEY) === "1";
   console.log(`[cleanupLegacy] 中断: scanned=${state.scannedRows} nextRow=${state.nextRow} 1分後に再開`);
-  return { ok: true, incomplete: true, scannedRows: state.scannedRows, nextRow: state.nextRow };
+  return { ok: true, incomplete: true, scannedRows: state.scannedRows, nextRow: state.nextRow, autoQuickRepairPending: autoQuickRepairPending };
 }
 
 function resumeCleanupLegacyGapFailedAndEmptyTimestamps() {
   deleteTriggersByHandler_("resumeCleanupLegacyGapFailedAndEmptyTimestamps");
-  cleanupLegacyGapFailedAndEmptyTimestamps();
+  let dryRun = true;
+  try {
+    const raw = PropertiesService.getScriptProperties().getProperty("CLEANUP_LEGACY_STATE_V1");
+    const state = raw ? JSON.parse(raw) : null;
+    dryRun = !(state && state.dryRun === false);
+  } catch (e) {
+    dryRun = true;
+  }
+  cleanupLegacyGapFailedAndEmptyTimestamps(dryRun);
+}
+
+function emergencyStopQuickRepairAndCleanOhlcv() {
+  const props = PropertiesService.getScriptProperties();
+  deleteTriggersByHandler_("resumeQuickRepair");
+  deleteTriggersByHandler_("quickRepairTrigger");
+  props.deleteProperty(QUICK_REPAIR_STATE_KEY);
+  props.deleteProperty(QUICK_REPAIR_CLEANUP_STATE_KEY);
+  props.setProperty(CLEANUP_LEGACY_AUTO_QUICK_REPAIR_KEY, "1");
+
+  const result = cleanupLegacyGapFailedAndEmptyTimestamps(false);
+  if (result && result.incomplete) {
+    result.autoQuickRepairPending = true;
+    writeProcessLog_("緊急OHLCV整理", "OHLCV整理が未完了のため、整理完了後にギャップ修復を自動起動します。", {
+      nextRow: result.nextRow || "",
+      scannedRows: result.scannedRows || 0
+    });
+  }
+  return result;
 }
