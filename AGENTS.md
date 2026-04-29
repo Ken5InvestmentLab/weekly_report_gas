@@ -115,7 +115,7 @@ PHASE4: 重複排除・ソート・完了通知 → runDailyMaintenanceTrigger �
 
 空/無効 timestamp 行は日付推定で修正しない。`repairEmptyTimestampRows(false)` は対象行を削除し、対象銘柄を `OHLCV_REPAIR_SYMBOLS` に記録して正規取得で補填する。
 
-Yahoo Finance 1h足は JPX の時間足を区間末尾側の時刻で返すため、`13:00 JST` 足は前場（9:00〜13:00）バケットに含める。`15:30 JST` の `volume=0` かつ `O=H=L=C` バーは後場の終値スナップショットとして扱う。`parseIntraResponse_` では PM バケットの `close` だけを更新し、`open/high/low/volume` には混ぜない。OHLCV は生価格保存のため、通常取得・GAP修復・過去出来高補正では Yahoo Finance の `1h` だけを取得し、`1d` はデバッグや分割情報確認など必要な場合に限る。
+Yahoo Finance 1h足は JPX の時間足を区間末尾側の時刻で返すため、`13:00 JST` 足は前場（9:00〜13:00）バケットに含める。`15:30 JST` の `volume=0` かつ `O=H=L=C` バーは後場の終値スナップショットとして扱う。`parseIntraResponse_` では PM バケットの `close` だけを更新し、`open/high/low/volume` には混ぜない。OHLCV は生価格保存のため、通常取得・GAP修復・過去出来高補正では Yahoo Finance の `1h` だけを取得し、`1d` はデバッグや分割情報確認など必要な場合に限る。`ohlcv_4h` に保存する timestamp はセッション代表時刻の `09:00 JST` / `13:00 JST` の2種類だけにする。Yahooの生1h足時刻（10:00/11:00/12:00/14:00/15:00/15:30など）や `GAP_FAILED` の `00:00` マーカーは保存しない。
 
 ### 一時的サーバーエラーのリトライ
 
@@ -143,7 +143,7 @@ Yahoo Finance 1h足は JPX の時間足を区間末尾側の時刻で返すた�
 
 - 時間主導トリガーから呼ばれる処理では `SpreadsheetApp.getActiveSpreadsheet()` に依存せず、`SPREADSHEET_ID` から `SpreadsheetApp.openById()` で対象ブックを開く。重い初期化より前に `console.log` / `Logger.log` で入口ログを出し、再開可能な長時間処理は入口直後に保険の再開トリガーを先行予約してから `LockService` で二重起動を避ける
 - `ohlcv_4h` は A列（timestamp）昇順ソート前提。先頭から連続削除する処理は `sheet.deleteRows(firstDataRow, N)` で高速に行える
-- `ohlcv_4h` に新規行を追記する場合は `appendRowsToSheet_` を通し、A列 timestamp を `Date` に正規化してから書く。補填・手動修復でも空 timestamp のまま直接 `setValues` しない
+- `ohlcv_4h` に新規行を追記する場合は `appendRowsToSheet_` を通し、A列 timestamp を `Date` に正規化してから書く。補填・手動修復でも空 timestamp や 09:00/13:00 以外の時刻のまま直接 `setValues` しない
 - GAP修復・監査は A列 timestamp 昇順を前提に末尾から直近分だけを読む。GAP系処理で `getRange(2, 1, lastRow - 1, ...)` の全行読みを追加しない
 - デバッグ・進捗ログは `debug_webhook` に書き込まず、原則 `console.log` のみに統一する。`console.log` と `Logger.log` に同じ内容を二重出力しない。`debugLogToSheet_` は互換用の名前だが、実装はコンソール出力のみとする
 - OHLCV取得の正常系ログは銘柄ごとに出さず、バッチ/チャンク単位に集約する。銘柄別のYahoo Finance取得期間・結果ログが必要な場合だけ、スクリプトプロパティ `OHLCV_VERBOSE_FETCH_LOGS=true` で詳細ログを有効化する
