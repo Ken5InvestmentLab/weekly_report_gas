@@ -2649,7 +2649,7 @@ function sendCompletionNotice_(newCount, totalCount, tag) {
     color: 0x2ecc71,  // 緑色
     fields: [
       {
-        name: "📌 備考",
+        name: "🤖 スコアリングBot",
         value: "最新の分析結果は `/scan` でご確認いただけます。",
         inline: false
       }
