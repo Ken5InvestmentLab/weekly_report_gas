@@ -131,11 +131,11 @@ Yahoo Finance 1h足は JPX の時間足を区間末尾側の時刻で返すた�
 
 ### GAP 修復の仕組み
 
-`quickRepairRecentGaps` は巨大な `ohlcv_4h` 全行スキャンと全銘柄再取得を避けるため、まず `quickScanMissingSessions(daysBack, minSessions)` で未処理のセッション不足だけを抽出し、対象銘柄・日付グループだけを Yahoo Finance から再取得する。取得は `UrlFetchApp.fetchAll` を使い、進捗集計は `QUICK_REPAIR_STATE` v4 に保存する。再開時は直近スキャンをやり直し、既に埋まったグループや `GAP_FAILED` / `GAP_REPAIR` マーカー付きの未充足日は再取得対象から外す。
+`quickRepairRecentGaps` は巨大な `ohlcv_4h` 全行スキャンと全銘柄再取得を避けるため、まず `quickScanMissingSessions(daysBack, minSessions)` で未処理のセッション不足だけを抽出し、対象銘柄・日付グループだけを Yahoo Finance から再取得する。取得は `UrlFetchApp.fetchAll` を使い、進捗集計は `QUICK_REPAIR_STATE` v6 に保存する。再開時は直近スキャンをやり直し、既に埋まったグループや `GAP_FAILED` / `GAP_REPAIR` マーカー付きの未充足日は再取得対象から外す。
 
 修復行は B列に `GAP_REPAIR` を入れて追記し、最後に `timestamp + symbol` で重複排除・A列 timestamp 昇順ソートする。`refetchSymbolGap(symbol, startDate, endDate)` は手動用の単一補填関数で、前後3日マージンで取得しても、成功判定は対象日付範囲内の行だけに限定する（対象日以外が取れただけで成功扱いしない）。
 
-`quickScanMissingSessions` と `auditGapRepairCoverage` は `ohlcv_4h` のA列 timestamp 昇順を前提に、末尾から直近日数ぶんだけ読む。全行読み込みに戻すと、行数が大きい環境でログを出す前に6分タイムアウトするので禁止。
+`quickScanMissingSessions` と `auditGapRepairCoverage` は `ohlcv_4h` のA列 timestamp 昇順を前提に、timestamp列で直近範囲の開始位置を絞ってから読む。全行読み込みに戻すと、行数が大きい環境でログを出す前に6分タイムアウトするので禁止。`quickRepairRecentGaps` のバッチ処理では、初回スキャンで返る `sessionInfo` を使い回し、バッチごとに同じ直近範囲を再スキャンしない。
 
 補填後の確認は `auditGapRepairCoverage(daysBack, minSessions)` を使う。`untreatedShort` が実際の未処理不足、`attemptedButShort` は `GAP_FAILED` / `GAP_REPAIR` などのマーカーがあるが2セッション未満のもの。
 
@@ -148,7 +148,7 @@ Yahoo Finance 1h足は JPX の時間足を区間末尾側の時刻で返すた�
 - デバッグ・進捗ログは `debug_webhook` に書き込まず、原則 `console.log` のみに統一する。`console.log` と `Logger.log` に同じ内容を二重出力しない。`debugLogToSheet_` は互換用の名前だが、実装はコンソール出力のみとする
 - OHLCV取得の正常系ログは銘柄ごとに出さず、バッチ/チャンク単位に集約する。銘柄別のYahoo Finance取得期間・結果ログが必要な場合だけ、スクリプトプロパティ `OHLCV_VERBOSE_FETCH_LOGS=true` で詳細ログを有効化する
 - 株式分割調整で `ohlcv_4h` を更新する場合は全行走査を避け、C列 `symbol` を `TextFinder` などで絞って対象銘柄の行だけ処理する
-- **バルク読み込み**: `getRange(row,col).getValue()` の繰り返しは高コスト。末尾から `(daysBack + 7) * 1000` 行を一括読み込みする
+- **バルク読み込み**: `getRange(row,col).getValue()` の大量ループは高コスト。A列 timestamp の境界探索のような少数プローブに留め、データ本体は必要範囲を一括 `getValues()` で読む
 - **書き戻し**: 全行一括書き戻しは避け、変更した行のみ個別に `setValues` する
 - 過去OHLCV全履歴補正のような大規模修復でも、実行冒頭に `ohlcv_4h` 全行を読んで対象マップを作らない。行チャンク単位で読み、チャンク内の銘柄を小分け fetch して、進捗をスクリプトプロパティに保存する
 

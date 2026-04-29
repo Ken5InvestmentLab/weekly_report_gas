@@ -3201,14 +3201,17 @@ const QUICK_REPAIR_MAX_RUN_MS = 3.5 * 60 * 1000;
 const QUICK_REPAIR_RESUME_AFTER_MS = 60 * 1000;
 const QUICK_REPAIR_SAFETY_AFTER_MS = 10 * 60 * 1000;
 const QUICK_REPAIR_LOCK_WAIT_MS = 5000;
-const QUICK_REPAIR_STATE_VERSION = 5;
+const QUICK_REPAIR_STATE_VERSION = 6;
 const QUICK_REPAIR_SCAN_BUDGET_MS = 90 * 1000;
 const QUICK_REPAIR_SCAN_ROWS_PER_SYMBOL_DAY = 3;
 const QUICK_REPAIR_SCAN_MIN_ROWS = 20000;
 const QUICK_REPAIR_SCAN_MAX_ROWS = 90000;
 const QUICK_REPAIR_TAIL_CLEANUP_ROWS = 12000;
+const QUICK_REPAIR_ENTRY_CLEANUP_ROWS = 1500;
 const QUICK_REPAIR_READ_CHUNK_ROWS = 1000;
 const QUICK_REPAIR_MIN_READ_REMAINING_MS = 15000;
+const QUICK_REPAIR_SCAN_BOUNDARY_PADDING_ROWS = 500;
+const QUICK_REPAIR_CLEANUP_STATE_KEY = "QUICK_REPAIR_TAIL_CLEANUP_STATE";
 const EVAL_OHLCV_COVERAGE_STATE_KEY = "EVAL_OHLCV_COVERAGE_REPAIR_STATE_V1";
 const EVAL_OHLCV_COVERAGE_RESUME_HANDLER = "resumeEvaluationOhlcvCoverageRepair";
 const EVAL_OHLCV_COVERAGE_BATCH_GROUPS = 12;
@@ -4036,6 +4039,7 @@ function quickScanMissingSessions(daysBack = 14, minSessions = 2, options) {
   const countMap = {};
   const periodMap = {};
   const hasGapMarker = {};
+  const dateStrByDayKey = {};
 
   for (const row of values) {
     const ts = row[0];
@@ -4043,7 +4047,9 @@ function quickScanMissingSessions(daysBack = 14, minSessions = 2, options) {
     const sym = String(row[2] || "").trim();
     if (!(ts instanceof Date) || !sym || !symbolLookup[sym]) continue;
 
-    const dateStr = Utilities.formatDate(ts, CONFIG.TIMEZONE, "yyyy/MM/dd");
+    const dayKey = toJstDayKeyFromDate_(ts);
+    const dateStr = dateStrByDayKey[dayKey] || Utilities.formatDate(ts, CONFIG.TIMEZONE, "yyyy/MM/dd");
+    dateStrByDayKey[dayKey] = dateStr;
     if (dateStr < cutoffDateKey || dateStr > nowDateKey) continue;
     const key = sym + "|" + dateStr;
 
@@ -4090,7 +4096,16 @@ function quickScanMissingSessions(daysBack = 14, minSessions = 2, options) {
     targetSymbols: symbols.length,
     missingSymbols: symList.length
   });
-  return { count: symList.length, details: missing };
+  return {
+    count: symList.length,
+    details: missing,
+    sessionInfo: {
+      countMap: countMap,
+      periodMap: periodMap,
+      markerMap: hasGapMarker
+    },
+    scanStats: scanStats
+  };
 }
 
 /**
@@ -4364,6 +4379,33 @@ function purgeInvalidOhlcvTimestampRows_(sheet, context, maxRows) {
   return { deletedRows: deleteRows.length, repairSymbols: repairSymbols.length };
 }
 
+function maybePurgeInvalidOhlcvTimestampRows_(sheet, context, maxRows, businessDateKey) {
+  const props = PropertiesService.getScriptProperties();
+  const lastRow = sheet.getLastRow();
+  const key = String(businessDateKey || getOhlcvBusinessDateKey_());
+  try {
+    const raw = props.getProperty(QUICK_REPAIR_CLEANUP_STATE_KEY);
+    const state = raw ? JSON.parse(raw) : null;
+    if (state && state.businessDate === key && state.checked === true) {
+      return { skipped: true, deletedRows: 0, repairSymbols: 0, lastCheckedRow: state.lastRow || 0 };
+    }
+  } catch (e) {}
+
+  const result = purgeInvalidOhlcvTimestampRows_(sheet, context, maxRows);
+  if ((result.deletedRows || 0) === 0) {
+    props.setProperty(QUICK_REPAIR_CLEANUP_STATE_KEY, JSON.stringify({
+      businessDate: key,
+      checked: true,
+      lastRow: lastRow,
+      maxRows: maxRows,
+      checkedAt: new Date().toISOString()
+    }));
+  } else {
+    props.deleteProperty(QUICK_REPAIR_CLEANUP_STATE_KEY);
+  }
+  return result;
+}
+
 function dedupeAndSortOhlcv_(sheet) {
   purgeInvalidOhlcvTimestampRows_(sheet, "dedupeAndSortOhlcv_", QUICK_REPAIR_TAIL_CLEANUP_ROWS);
   const lastRow = sheet.getLastRow();
@@ -4611,16 +4653,98 @@ function readRecentOhlcvRowsByTimestamp_(sheet, cutoffDateKey, nowDateKey, numCo
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) {
     const emptyRows = [];
-    emptyRows.scanStats = { complete: true, scannedRows: 0, maxRows: 0, stoppedBy: "" };
+    emptyRows.scanStats = { complete: true, scannedRows: 0, maxRows: 0, stoppedBy: "", mode: "empty" };
     return emptyRows;
   }
   const chunkSize = Math.max(100, Number(opts.chunkSize) || QUICK_REPAIR_READ_CHUNK_ROWS);
   const rows = [];
+  const maxRows = Math.max(0, Number(opts.maxRows) || 0);
+  const deadlineMs = Math.max(0, Number(opts.deadlineMs) || 0);
+  const cutoffDayKey = toJstDayKeyFromDateStr_(cutoffDateKey);
+  const nowDayKey = toJstDayKeyFromDateStr_(nowDateKey);
+
+  if (cutoffDayKey !== null && nowDayKey !== null && opts.forceChunked !== true) {
+    const boundary = findFirstOhlcvRowOnOrAfterDayKey_(sheet, cutoffDayKey, lastRow, deadlineMs);
+    if (boundary.incomplete) {
+      rows.scanStats = {
+        complete: false,
+        scannedRows: 0,
+        chunkSize: chunkSize,
+        maxRows: maxRows,
+        stoppedBy: boundary.stoppedBy || "deadline",
+        lastRow: lastRow,
+        probes: boundary.probes || 0,
+        mode: "binary_bulk"
+      };
+      return rows;
+    }
+
+    if (boundary.row > lastRow) {
+      rows.scanStats = {
+        complete: true,
+        scannedRows: 0,
+        chunkSize: 0,
+        maxRows: maxRows,
+        stoppedBy: "",
+        lastRow: lastRow,
+        startRow: boundary.row,
+        probes: boundary.probes || 0,
+        mode: "binary_bulk"
+      };
+      return rows;
+    }
+
+    let startRow = Math.max(2, boundary.row - QUICK_REPAIR_SCAN_BOUNDARY_PADDING_ROWS);
+    let readRows = lastRow - startRow + 1;
+    let stoppedBy = "";
+    const effectiveMaxRows = maxRows ? maxRows + QUICK_REPAIR_SCAN_BOUNDARY_PADDING_ROWS : 0;
+    if (effectiveMaxRows && readRows > effectiveMaxRows) {
+      startRow = lastRow - effectiveMaxRows + 1;
+      readRows = effectiveMaxRows;
+      stoppedBy = "maxRows";
+    }
+
+    if (deadlineMs && deadlineMs - Date.now() < QUICK_REPAIR_MIN_READ_REMAINING_MS) {
+      rows.scanStats = {
+        complete: false,
+        scannedRows: 0,
+        chunkSize: readRows,
+        maxRows: maxRows,
+        stoppedBy: "deadline",
+        lastRow: lastRow,
+        startRow: startRow,
+        probes: boundary.probes || 0,
+        mode: "binary_bulk"
+      };
+      return rows;
+    }
+
+    const values = sheet.getRange(startRow, 1, readRows, numCols).getValues();
+    for (let i = 0; i < values.length; i++) {
+      const ts = values[i][0];
+      if (!(ts instanceof Date) || isNaN(ts.getTime())) continue;
+      const dayKey = toJstDayKeyFromDate_(ts);
+      if (dayKey < cutoffDayKey || dayKey > nowDayKey) continue;
+      rows.push(values[i]);
+    }
+
+    rows.scanStats = {
+      complete: !stoppedBy,
+      scannedRows: readRows,
+      chunkSize: readRows,
+      maxRows: maxRows,
+      stoppedBy: stoppedBy,
+      lastRow: lastRow,
+      startRow: startRow,
+      probes: boundary.probes || 0,
+      mode: "binary_bulk"
+    };
+    return rows;
+  }
+
   let row = lastRow;
   let scannedRows = 0;
   let stoppedBy = "";
-  const maxRows = Math.max(0, Number(opts.maxRows) || 0);
-  const deadlineMs = Math.max(0, Number(opts.deadlineMs) || 0);
 
   while (row >= 2) {
     if (deadlineMs && deadlineMs - Date.now() < QUICK_REPAIR_MIN_READ_REMAINING_MS) {
@@ -4646,12 +4770,15 @@ function readRecentOhlcvRowsByTimestamp_(sheet, cutoffDateKey, nowDateKey, numCo
     for (let i = values.length - 1; i >= 0; i--) {
       const ts = values[i][0];
       if (!(ts instanceof Date) || isNaN(ts.getTime())) continue;
-      const dateStr = Utilities.formatDate(ts, CONFIG.TIMEZONE, "yyyy/MM/dd");
-      if (dateStr < cutoffDateKey) {
+      const dayKey = cutoffDayKey !== null ? toJstDayKeyFromDate_(ts) : null;
+      const dateStr = dayKey === null ? Utilities.formatDate(ts, CONFIG.TIMEZONE, "yyyy/MM/dd") : "";
+      if ((dayKey !== null && dayKey < cutoffDayKey) || (dayKey === null && dateStr < cutoffDateKey)) {
         sawOlderThanCutoff = true;
         break;
       }
-      if (dateStr <= nowDateKey) rows.push(values[i]);
+      if ((dayKey !== null && (nowDayKey === null || dayKey <= nowDayKey)) || (dayKey === null && dateStr <= nowDateKey)) {
+        rows.push(values[i]);
+      }
     }
 
     if (sawOlderThanCutoff) break;
@@ -4668,9 +4795,37 @@ function readRecentOhlcvRowsByTimestamp_(sheet, cutoffDateKey, nowDateKey, numCo
     chunkSize: chunkSize,
     maxRows: maxRows,
     stoppedBy: stoppedBy,
-    lastRow: lastRow
+    lastRow: lastRow,
+    mode: "chunked"
   };
   return rows;
+}
+
+function findFirstOhlcvRowOnOrAfterDayKey_(sheet, cutoffDayKey, lastRow, deadlineMs) {
+  let lo = 2;
+  let hi = lastRow;
+  let answer = lastRow + 1;
+  let probes = 0;
+
+  while (lo <= hi) {
+    if (deadlineMs && deadlineMs - Date.now() < QUICK_REPAIR_MIN_READ_REMAINING_MS) {
+      return { incomplete: true, stoppedBy: "deadline", probes: probes };
+    }
+
+    const mid = Math.floor((lo + hi) / 2);
+    const value = sheet.getRange(mid, 1).getValue();
+    probes++;
+    const dayKey = (value instanceof Date && !isNaN(value.getTime())) ? toJstDayKeyFromDate_(value) : null;
+
+    if (dayKey === null || dayKey >= cutoffDayKey) {
+      answer = mid;
+      hi = mid - 1;
+    } else {
+      lo = mid + 1;
+    }
+  }
+
+  return { row: answer, probes: probes };
 }
 
 /**
@@ -4788,7 +4943,7 @@ function quickRepairRecentGaps(options) {
       startTime + QUICK_REPAIR_SCAN_BUDGET_MS,
       startTime + QUICK_REPAIR_MAX_RUN_MS - DEDUPE_GUARD_MS
     );
-    purgeInvalidOhlcvTimestampRows_(ohlcvSh, "quickRepairRecentGaps.entry", QUICK_REPAIR_TAIL_CLEANUP_ROWS);
+    maybePurgeInvalidOhlcvTimestampRows_(ohlcvSh, "quickRepairRecentGaps.entry", QUICK_REPAIR_ENTRY_CLEANUP_ROWS, businessDateKey);
     const scan = quickScanMissingSessions(daysBack, minSessions, { deadlineMs: scanDeadlineMs });
     if (scan.incomplete) {
       state.deferredDates += 1;
@@ -4828,31 +4983,13 @@ function quickRepairRecentGaps(options) {
       return { ok: true, complete: true, processedGroups: state.processedGroups, processedTasks: state.processedTasks, rows: state.totalRows, deferredDates: state.deferredDates, parseErrors: state.parseErrors };
     }
 
+    const sessionInfo = scan.sessionInfo || { countMap: {}, periodMap: {}, markerMap: {} };
     let groupIndex = 0;
     while (groupIndex < groups.length) {
       if (Date.now() - startTime > QUICK_REPAIR_MAX_RUN_MS - DEDUPE_GUARD_MS) break;
 
       const batchGroups = groups.slice(groupIndex, groupIndex + batchSymbols);
       const batchTasks = flattenQuickRepairGroupsToTasks_(batchGroups);
-      const sessionInfo = buildRecentSessionInfoForTasks_(ohlcvSh, batchTasks, daysBack, {
-        deadlineMs: startTime + QUICK_REPAIR_MAX_RUN_MS - DEDUPE_GUARD_MS
-      });
-      if (sessionInfo.incomplete) {
-        state.deferredDates += batchTasks.length;
-        state.updatedAt = new Date().toISOString();
-        props.setProperty(QUICK_REPAIR_STATE_KEY, JSON.stringify(state));
-        scheduleQuickRepairResume_(QUICK_REPAIR_RESUME_AFTER_MS);
-        writeProcessLog_("ギャップ修復", "バッチ処理前の既存セッション確認が時間内に終わらなかったため、次回へ回します。", {
-          tasks: batchTasks.length,
-          scanStats: sessionInfo.scanStats || {}
-        });
-        return {
-          ok: true,
-          incomplete: true,
-          reason: "session_info_scan_incomplete",
-          scanStats: sessionInfo.scanStats || {}
-        };
-      }
       writeProcessLog_("ギャップ修復", `不足セッションを補填中です。銘柄グループ ${groupIndex + 1}〜${groupIndex + batchGroups.length} / ${groups.length} を処理します。`, {
         tasks: batchTasks.length
       });
@@ -4955,6 +5092,7 @@ function resumeQuickRepair() {
  */
 function resetQuickRepairState() {
   PropertiesService.getScriptProperties().deleteProperty(QUICK_REPAIR_STATE_KEY);
+  PropertiesService.getScriptProperties().deleteProperty(QUICK_REPAIR_CLEANUP_STATE_KEY);
   deleteTriggersByHandler_("resumeQuickRepair");
   deleteTriggersByHandler_("quickRepairTrigger");
   console.log("クイック修復の状態をリセットしました。");
