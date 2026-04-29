@@ -144,7 +144,8 @@ Yahoo Finance 1h足は JPX の時間足を区間末尾側の時刻で返すた�
 - `ohlcv_4h` は A列（timestamp）昇順ソート前提。先頭から連続削除する処理は `sheet.deleteRows(firstDataRow, N)` で高速に行える
 - `ohlcv_4h` に新規行を追記する場合は `appendRowsToSheet_` を通し、A列 timestamp を `Date` に正規化してから書く。補填・手動修復でも空 timestamp のまま直接 `setValues` しない
 - GAP修復・監査は A列 timestamp 昇順を前提に末尾から直近分だけを読む。GAP系処理で `getRange(2, 1, lastRow - 1, ...)` の全行読みを追加しない
-- デバッグ・進捗ログは `debug_webhook` に書き込まず、`console.log` / `Logger.log` を使う。`debugLogToSheet_` は互換用の名前だが、実装はコンソール出力のみとする
+- デバッグ・進捗ログは `debug_webhook` に書き込まず、原則 `console.log` のみに統一する。`console.log` と `Logger.log` に同じ内容を二重出力しない。`debugLogToSheet_` は互換用の名前だが、実装はコンソール出力のみとする
+- OHLCV取得の正常系ログは銘柄ごとに出さず、バッチ/チャンク単位に集約する。銘柄別のYahoo Finance取得期間・結果ログが必要な場合だけ、スクリプトプロパティ `OHLCV_VERBOSE_FETCH_LOGS=true` で詳細ログを有効化する
 - 株式分割調整で `ohlcv_4h` を更新する場合は全行走査を避け、C列 `symbol` を `TextFinder` などで絞って対象銘柄の行だけ処理する
 - **バルク読み込み**: `getRange(row,col).getValue()` の繰り返しは高コスト。末尾から `(daysBack + 7) * 1000` 行を一括読み込みする
 - **書き戻し**: 全行一括書き戻しは避け、変更した行のみ個別に `setValues` する

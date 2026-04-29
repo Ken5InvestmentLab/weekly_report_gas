@@ -951,7 +951,7 @@ function setupAllTriggers() {
     .inTimezone(tz)
     .create();
 
-  Logger.log("すべてのトリガーをリセットし、必要なトリガーのみ再登録しました。");
+  console.log("すべてのトリガーをリセットし、必要なトリガーのみ再登録しました。");
 }
 
 // =====================================
@@ -1385,7 +1385,17 @@ function writeProcessLog_(section, message, data) {
   const detail = data == null ? "" : " " + JSON.stringify(data);
   const text = `[${section}] ${message}${detail}`;
   try { console.log(text); } catch (e) {}
-  try { Logger.log(text); } catch (e) {}
+}
+let OHLCV_VERBOSE_FETCH_LOGS_CACHE_ = null;
+function isVerboseOhlcvFetchLogEnabled_() {
+  if (OHLCV_VERBOSE_FETCH_LOGS_CACHE_ !== null) return OHLCV_VERBOSE_FETCH_LOGS_CACHE_;
+  try {
+    OHLCV_VERBOSE_FETCH_LOGS_CACHE_ =
+      String(PropertiesService.getScriptProperties().getProperty("OHLCV_VERBOSE_FETCH_LOGS") || "").toLowerCase() === "true";
+  } catch (e) {
+    OHLCV_VERBOSE_FETCH_LOGS_CACHE_ = false;
+  }
+  return OHLCV_VERBOSE_FETCH_LOGS_CACHE_;
 }
 function describeDebugStage_(stage, data) {
   const d = data || {};
@@ -1402,7 +1412,7 @@ function describeDebugStage_(stage, data) {
   if (stage === "ohlcv.phase.summary") return describeOhlcvPhaseSummary_(d);
   if (stage === "ohlcv.phase.error") return `${d.phase || "OHLCV"}: 外部取得または処理中にエラーが発生しました。`;
   if (stage === "ohlcv.phase1.batch") return "PHASE1: Yahoo FinanceからのOHLCV取得バッチが終わりました。";
-  if (stage === "ohlcv.phase2.chunk") return "PHASE2: alerts_rawの分割調整チェックを1チャンク処理しました。";
+  if (stage === "ohlcv.phase2.chunk") return d.adjustedRows > 0 ? "PHASE2: 株式分割調整を適用しました。対象銘柄はログ詳細を確認してください。" : "PHASE2: alerts_rawの分割調整チェックを1チャンク処理しました。";
   if (stage === "ohlcv.phase4.start") return "PHASE4: OHLCVシートの重複排除と並べ替えを開始します。";
   if (stage === "ohlcv.phase4.sort_before_dedupe.start") return "PHASE4: 重複排除前に、銘柄と日時で並べ替えています。";
   if (stage === "ohlcv.phase4.remove_duplicates.start") return "PHASE4: timestampと銘柄が同じOHLCV行を重複として削除しています。";
@@ -1491,7 +1501,6 @@ function traceOhlcv_(event, extra) {
 
   try { PropertiesService.getScriptProperties().setProperty(OHLCV_TRACE_PROP_KEY, JSON.stringify(data).slice(0, 8000)); } catch (e) {}
   try { console.log(text); } catch (e) {}
-  try { Logger.log(text); } catch (e) {}
 }
 
 function logOhlcvRuntime_(event, extra) {
@@ -1821,6 +1830,12 @@ function fetchOHLCVForNewAlertsInternal_(outerStartedAt) {
       batchNo++;
       let responses = null;
       let parseErrCount = 0;
+      let fetchedRowsInBatch = 0;
+      let fetchedSymbolsInBatch = 0;
+      let batchFirstTs = null;
+      let batchLastTs = null;
+      const noRowsSymbols = [];
+      const sparseResultSamples = [];
       try {
         responses = UrlFetchApp.fetchAll(requests);
       } catch (e) {
@@ -1846,7 +1861,20 @@ function fetchOHLCVForNewAlertsInternal_(outerStartedAt) {
             const validRows = applyPhase1ResultRows_(meta.symbol, result, refreshId, lastTsMap);
             if (validRows.length > 0) {
               allFetchedData = allFetchedData.concat(validRows);
+              fetchedRowsInBatch += validRows.length;
+              fetchedSymbolsInBatch++;
+              validRows.forEach(row => {
+                const ts = row && row.length ? row[0] : null;
+                if (!(ts instanceof Date)) return;
+                if (!batchFirstTs || ts.getTime() < batchFirstTs.getTime()) batchFirstTs = ts;
+                if (!batchLastTs || ts.getTime() > batchLastTs.getTime()) batchLastTs = ts;
+              });
+              if (validRows.length < 2 && sparseResultSamples.length < 5) {
+                sparseResultSamples.push({ symbol: meta.symbol, rows: validRows.length });
+              }
               newAlertCount++;
+            } else if (noRowsSymbols.length < 5) {
+              noRowsSymbols.push(meta.symbol);
             }
           } catch (e) {
             parseErrCount++;
@@ -1859,6 +1887,12 @@ function fetchOHLCVForNewAlertsInternal_(outerStartedAt) {
         startIndex: i,
         symbolsInBatch: batch.length,
         requestCount: requests.length,
+        fetchedRows: fetchedRowsInBatch,
+        symbolsWithRows: fetchedSymbolsInBatch,
+        symbolsWithoutRows: reqMeta.length - fetchedSymbolsInBatch,
+        noRowsSamples: noRowsSymbols,
+        sparseResultSamples: sparseResultSamples,
+        dateRange: batchFirstTs && batchLastTs ? `${batchFirstTs.toISOString()} ~ ${batchLastTs.toISOString()}` : "none",
         parseErrCount: parseErrCount,
         elapsedMs: Date.now() - batchStart
       });
@@ -2005,6 +2039,7 @@ function fetchOHLCVForNewAlertsInternal_(outerStartedAt) {
       }
       const modifiedRows = [];
       let adjustedRows = 0;
+      const adjustedSymbolMap = {};
       rawData.forEach((row, idx) => {
         const symbol = String(row[RAW_IDX.symbol_code] || "").trim();
         if (!symbol) return;
@@ -2014,6 +2049,17 @@ function fetchOHLCVForNewAlertsInternal_(outerStartedAt) {
           addSplitQueueItem_(props, symbol, splitInfo.splitRatio, splitInfo.splitDate);
           modifiedRows.push(idx);
           adjustedRows++;
+          const splitKey = `${symbol}|${splitInfo.splitDate}|${splitInfo.splitRatio}`;
+          if (!adjustedSymbolMap[splitKey]) {
+            adjustedSymbolMap[splitKey] = {
+              symbol: symbol,
+              splitDate: splitInfo.splitDate,
+              splitDateKey: splitInfo.splitDate ? Utilities.formatDate(new Date(splitInfo.splitDate * 1000), CONFIG.TIMEZONE, "yyyy-MM-dd") : "",
+              ratio: splitInfo.splitRatio,
+              adjustedRows: 0
+            };
+          }
+          adjustedSymbolMap[splitKey].adjustedRows++;
         }
       });
       modifiedRows.forEach(idx => {
@@ -2022,6 +2068,7 @@ function fetchOHLCVForNewAlertsInternal_(outerStartedAt) {
       const nextCursor = chunkEndRow + 1;
       props.setProperty(STATE_KEY, nextCursor.toString());
       chunkNo++;
+      const adjustedSymbols = Object.keys(adjustedSymbolMap).sort().map(key => adjustedSymbolMap[key]);
       debugLogToSheet_("ohlcv.phase2.chunk", {
         chunkNo: chunkNo,
         rowStart: chunkStartRow,
@@ -2030,6 +2077,8 @@ function fetchOHLCVForNewAlertsInternal_(outerStartedAt) {
         splitFetchBatches: fetchBatches,
         splitFetchMs: Date.now() - fetchStart,
         adjustedRows: adjustedRows,
+        adjustedSymbolCount: adjustedSymbols.length,
+        adjustedSymbols: adjustedSymbols,
         nextCursor: nextCursor,
         elapsedMs: Date.now() - startTime
       });
@@ -2374,7 +2423,6 @@ function diagnoseOhlcvResumeState() {
     triggers: triggers,
     lastTrace: props.getProperty(OHLCV_TRACE_PROP_KEY) || ""
   };
-  Logger.log("[diagnoseOhlcvResumeState] " + JSON.stringify(out));
   console.log("[diagnoseOhlcvResumeState] " + JSON.stringify(out));
   return out;
 }
@@ -2416,7 +2464,9 @@ function buildOhlcvRequestPair_(tvSymbol, lastTs, optStartSec, optEndSec) {
       const p1 = nowSec - lookbackSec;
       const p2 = nowSec;
       timeParam = `period1=${p1}&period2=${p2}`;
-      debugLogToSheet_("fetchOHLCVRecent.fullRefresh", { symbol: tvSymbol, diffDays: diffDays.toFixed(1), lookbackDays: OHLCV_DEFAULT_LOOKBACK_DAYS });
+      if (isVerboseOhlcvFetchLogEnabled_()) {
+        debugLogToSheet_("fetchOHLCVRecent.fullRefresh", { symbol: tvSymbol, diffDays: diffDays.toFixed(1), lookbackDays: OHLCV_DEFAULT_LOOKBACK_DAYS });
+      }
     } else {
       const minBackSec = 7 * 24 * 60 * 60;
       const maxBackSec = lookbackSec;
@@ -2425,13 +2475,17 @@ function buildOhlcvRequestPair_(tvSymbol, lastTs, optStartSec, optEndSec) {
       if (p1 < p1Limit) p1 = p1Limit;
       const p2 = nowSec;
       timeParam = `period1=${p1}&period2=${p2}`;
-      debugLogToSheet_("fetchOHLCVRecent.period", { symbol: tvSymbol, lastTs: new Date(lastTs).toISOString(), p1: new Date(p1*1000).toISOString(), p2: new Date(p2*1000).toISOString(), lookbackDays: OHLCV_DEFAULT_LOOKBACK_DAYS });
+      if (isVerboseOhlcvFetchLogEnabled_()) {
+        debugLogToSheet_("fetchOHLCVRecent.period", { symbol: tvSymbol, lastTs: new Date(lastTs).toISOString(), p1: new Date(p1*1000).toISOString(), p2: new Date(p2*1000).toISOString(), lookbackDays: OHLCV_DEFAULT_LOOKBACK_DAYS });
+      }
     }
   } else {
     const p2 = Math.floor(getOhlcvRunEndMillis_() / 1000);
     const p1 = p2 - OHLCV_DEFAULT_LOOKBACK_DAYS * 24 * 60 * 60;
     timeParam = `period1=${p1}&period2=${p2}`;
-    debugLogToSheet_("fetchOHLCVRecent.period", { symbol: tvSymbol, p1: new Date(p1*1000).toISOString(), p2: new Date(p2*1000).toISOString(), lookbackDays: OHLCV_DEFAULT_LOOKBACK_DAYS });
+    if (isVerboseOhlcvFetchLogEnabled_()) {
+      debugLogToSheet_("fetchOHLCVRecent.period", { symbol: tvSymbol, p1: new Date(p1*1000).toISOString(), p2: new Date(p2*1000).toISOString(), lookbackDays: OHLCV_DEFAULT_LOOKBACK_DAYS });
+    }
   }
   const dailyUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooSymbol}?interval=1d&${timeParam}`;
   const intraUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooSymbol}?interval=1h&${timeParam}`;
@@ -2551,7 +2605,9 @@ function parseIntraResponse_(tvSymbol, intraRes, factorMap) {
     }
   }
   const resultCandles = Object.values(candlesByPeriod).sort((a,b) => a.timestamp - b.timestamp).map(p => [p.timestamp, "", p.symbol, p.open, p.high, p.low, p.close, p.volume]);
-  debugLogToSheet_("fetchOHLCVRecent.result", { symbol: tvSymbol, candlesCount: resultCandles.length, dateRange: resultCandles.length ? `${resultCandles[0][0].toISOString()} ~ ${resultCandles[resultCandles.length-1][0].toISOString()}` : "none" });
+  if (isVerboseOhlcvFetchLogEnabled_()) {
+    debugLogToSheet_("fetchOHLCVRecent.result", { symbol: tvSymbol, candlesCount: resultCandles.length, dateRange: resultCandles.length ? `${resultCandles[0][0].toISOString()} ~ ${resultCandles[resultCandles.length-1][0].toISOString()}` : "none" });
+  }
   return resultCandles;
 }
 
@@ -2581,7 +2637,7 @@ function notifyDiscord_(message) {
   const props = PropertiesService.getScriptProperties();
   const webhookUrl = props.getProperty("DISCORD_WEBHOOK");
   if (!webhookUrl) return;
-  try { UrlFetchApp.fetch(webhookUrl, { method: "post", contentType: "application/json", payload: JSON.stringify({ content: message }), muteHttpExceptions: true }); } catch(e) { Logger.log("Discord通知失敗: " + e.message); }
+  try { UrlFetchApp.fetch(webhookUrl, { method: "post", contentType: "application/json", payload: JSON.stringify({ content: message }), muteHttpExceptions: true }); } catch(e) { console.log("Discord通知失敗: " + e.message); }
 }
 function sendCompletionNotice_(newCount, totalCount, tag) {
   const webhookUrl = PropertiesService.getScriptProperties().getProperty("DISCORD_WEBHOOK");
@@ -2643,10 +2699,10 @@ function safeSetSplitCache_(props, obj, keepKeys) {
     });
     const keepJson = JSON.stringify(keep);
     if (keepJson.length <= 8192 && keepKeys && keepKeys.length > 0) {
-      Logger.log(`[OHLCV_SPLIT_CACHE] ${json.length}B > 8192B - current chunk cache only (${keepJson.length}B)`);
+      console.log(`[OHLCV_SPLIT_CACHE] ${json.length}B > 8192B - current chunk cache only (${keepJson.length}B)`);
       props.setProperty("OHLCV_SPLIT_CACHE", keepJson);
     } else {
-      Logger.log(`[OHLCV_SPLIT_CACHE] ${json.length}B > 8192B - cache dropped`);
+      console.log(`[OHLCV_SPLIT_CACHE] ${json.length}B > 8192B - cache dropped`);
       props.deleteProperty("OHLCV_SPLIT_CACHE");
     }
   }
@@ -2675,7 +2731,7 @@ function debugWeekly5bdCandidates() {
     out.finalCandidates++;
     if (out.samples.length < 10) out.samples.push({ rowNum: r.rowNum, symbolCode: r.symbolCode, symbolName: r.symbolName, signalType: r.signalType, evalDate5: formatYmd_(c.evalDate), evalClose5: c.evalClose, perf5: c.perf, reported5: c.reported });
   });
-  Logger.log(JSON.stringify(out, null, 2));
+  console.log(JSON.stringify(out, null, 2));
   return out;
 }
 function getLastCompletedBusinessWeekRangeJst_(now) { return getClosedBusinessWeekRangeJst_(now); }
@@ -2849,7 +2905,7 @@ function fixMissingReportedFlags() {
       updated++;
     }
   });
-  Logger.log(`補修完了: ${updated}行をTRUEに更新`);
+  console.log(`補修完了: ${updated}行をTRUEに更新`);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -2872,14 +2928,14 @@ function repairEmptyTimestampRows(dryRun) {
     PropertiesService.getScriptProperties().getProperty("SPREADSHEET_ID")
   );
   const sh = ss.getSheetByName(CONFIG.OHLCV_SHEET);
-  if (!sh) { Logger.log("ERROR: ohlcv_4h が見つかりません"); return; }
+  if (!sh) { console.log("ERROR: ohlcv_4h が見つかりません"); return; }
  
   const DATA_ROW  = 2;  // ohlcv_4h は1行目ヘッダー、2行目からデータ
   const NUM_COLS  = 8;
   const lastRow   = sh.getLastRow();
-  if (lastRow < DATA_ROW) { Logger.log("データなし"); return; }
+  if (lastRow < DATA_ROW) { console.log("データなし"); return; }
  
-  Logger.log(`[repair] 開始 lastRow=${lastRow} dryRun=${dryRun}`);
+  console.log(`[repair] 開始 lastRow=${lastRow} dryRun=${dryRun}`);
  
   const numDataRows = lastRow - DATA_ROW + 1;
   const values = sh.getRange(DATA_ROW, 1, numDataRows, NUM_COLS).getValues();
@@ -2917,15 +2973,15 @@ function repairEmptyTimestampRows(dryRun) {
     sampleSymbols: repairSymbols.slice(0, 20),
     samples: samples
   };
-  Logger.log(`[repair] 空/無効timestamp行: ${deleteRowNums.length}, 対象銘柄: ${repairSymbols.length}`);
+  console.log(`[repair] 空/無効timestamp行: ${deleteRowNums.length}, 対象銘柄: ${repairSymbols.length}`);
   if (deleteRowNums.length === 0) {
-    Logger.log("[repair] 修正不要");
+    console.log("[repair] 修正不要");
     return summary;
   }
 
   if (dryRun) {
-    Logger.log("[repair] DryRun: 削除と再取得キュー登録をスキップ");
-    Logger.log(`[repair] DryRun summary: ${JSON.stringify(summary)}`);
+    console.log("[repair] DryRun: 削除と再取得キュー登録をスキップ");
+    console.log(`[repair] DryRun summary: ${JSON.stringify(summary)}`);
     return summary;
   }
 
@@ -2933,7 +2989,7 @@ function repairEmptyTimestampRows(dryRun) {
     const uniqueDeleteRows = [...new Set(deleteRowNums)];
     deleteRowsByRowNums_(sh, uniqueDeleteRows);
     SpreadsheetApp.flush();
-    Logger.log(`[repair] ${uniqueDeleteRows.length}行を削除しました`);
+    console.log(`[repair] ${uniqueDeleteRows.length}行を削除しました`);
     summary.deletedRows = uniqueDeleteRows.length;
   }
  
@@ -2941,15 +2997,15 @@ function repairEmptyTimestampRows(dryRun) {
   if (newLastRow > DATA_ROW) {
     sh.getRange(DATA_ROW, 1, newLastRow - DATA_ROW + 1, NUM_COLS)
       .sort([{ column: 1, ascending: true }, { column: 3, ascending: true }]);
-    Logger.log("[repair] ソート完了");
+    console.log("[repair] ソート完了");
   }
 
   if (repairSymbols.length > 0) {
     setOhlcvRepairSymbols_(repairSymbols);
-    Logger.log(`[repair] ${repairSymbols.length}銘柄を OHLCV_REPAIR_SYMBOLS に記録しました`);
+    console.log(`[repair] ${repairSymbols.length}銘柄を OHLCV_REPAIR_SYMBOLS に記録しました`);
   }
  
-  Logger.log(`[repair] 完了`);
+  console.log(`[repair] 完了`);
   return summary;
 }
  
@@ -2960,7 +3016,7 @@ function repairEmptyTimestampRows(dryRun) {
 function refetchTodayOhlcv() {
   // Properties をリセットして fetchOHLCVForNewAlerts を新鮮な状態で実行
   resetAllOhlcvProperties();
-  Logger.log("[refetchTodayOhlcv] Propertiesリセット完了。fetchOHLCVForNewAlerts を実行します");
+  console.log("[refetchTodayOhlcv] Propertiesリセット完了。fetchOHLCVForNewAlerts を実行します");
   fetchOHLCVForNewAlerts();
 }
  
@@ -2973,9 +3029,9 @@ function diagOhlcvTimestamps() {
     PropertiesService.getScriptProperties().getProperty("SPREADSHEET_ID")
   );
   const sh = ss.getSheetByName(CONFIG.OHLCV_SHEET);
-  if (!sh) { Logger.log("ohlcv_4h が見つかりません"); return; }
+  if (!sh) { console.log("ohlcv_4h が見つかりません"); return; }
   const lastRow = sh.getLastRow();
-  if (lastRow < 2) { Logger.log("データなし"); return; }
+  if (lastRow < 2) { console.log("データなし"); return; }
   const values = sh.getRange(2, 1, lastRow - 1, 4).getValues();
   const MIN_VALID_DATE = new Date("1990-01-01T00:00:00Z");
   const empty = [];
@@ -2984,8 +3040,8 @@ function diagOhlcvTimestamps() {
     const isInvalid = !(ts instanceof Date) || isNaN(ts.getTime()) || ts < MIN_VALID_DATE;
     if (isInvalid) empty.push({ sheetRow: i+2, sym: values[i][2], price: values[i][3] });
   }
-  Logger.log(`タイムスタンプ空欄行数: ${empty.length}`);
-  empty.slice(0, 10).forEach(r => Logger.log(JSON.stringify(r)));
+  console.log(`タイムスタンプ空欄行数: ${empty.length}`);
+  empty.slice(0, 10).forEach(r => console.log(JSON.stringify(r)));
   return { total: empty.length, samples: empty.slice(0, 10) };
 }
 
@@ -2998,7 +3054,7 @@ function diagOneSessionDays(options) {
     PropertiesService.getScriptProperties().getProperty("SPREADSHEET_ID")
   );
   const sh = ss.getSheetByName(CONFIG.OHLCV_SHEET);
-  if (!sh) { Logger.log("ohlcv_4h が見つかりません"); return; }
+  if (!sh) { console.log("ohlcv_4h が見つかりません"); return; }
  
   const now = new Date();
   const cutoff = new Date(now.getTime() - daysBack * 24 * 60 * 60 * 1000);
@@ -3030,8 +3086,8 @@ function diagOneSessionDays(options) {
   }
  
   const symList = Object.keys(missing).sort();
-  Logger.log(`[diagOneSessionDays] 直近${daysBack}日で片方セッション欠落: ${symList.length}銘柄`);
-  symList.forEach(sym => Logger.log(`  ${sym}: ${missing[sym].join(", ")}`));
+  console.log(`[diagOneSessionDays] 直近${daysBack}日で片方セッション欠落: ${symList.length}銘柄`);
+  symList.forEach(sym => console.log(`  ${sym}: ${missing[sym].join(", ")}`));
   return { count: symList.length, details: missing };
 }
 
@@ -3044,7 +3100,7 @@ function refetchSymbolRange(options) {
   );
   const rawSh  = ss.getSheetByName(CONFIG.RAW_SHEET);
   const ohlcvSh = ss.getSheetByName(CONFIG.OHLCV_SHEET);
-  if (!rawSh || !ohlcvSh) { Logger.log("シートが見つかりません"); return; }
+  if (!rawSh || !ohlcvSh) { console.log("シートが見つかりません"); return; }
  
   // 対象銘柄の決定
   let symbols;
@@ -3065,7 +3121,7 @@ function refetchSymbolRange(options) {
     symbols = Array.from(symSet);
   }
  
-  Logger.log(`[refetchSymbolRange] 対象: ${symbols.length}銘柄 / 直近${daysBack}日`);
+  console.log(`[refetchSymbolRange] 対象: ${symbols.length}銘柄 / 直近${daysBack}日`);
  
   const nowSec = Math.floor(Date.now() / 1000);
   const p1 = nowSec - daysBack * 24 * 60 * 60;
@@ -3080,7 +3136,7 @@ function refetchSymbolRange(options) {
  
   for (const sym of symbols) {
     if (Date.now() - startMs > LIMIT_MS) {
-      Logger.log(`[refetchSymbolRange] タイムアウト。${fetchedSyms}/${symbols.length}件完了`);
+      console.log(`[refetchSymbolRange] タイムアウト。${fetchedSyms}/${symbols.length}件完了`);
       break;
     }
  
@@ -3098,16 +3154,16 @@ function refetchSymbolRange(options) {
         }
       }
     } catch(e) {
-      Logger.log(`[refetchSymbolRange] ${sym}: エラー ${e.message}`);
+      console.log(`[refetchSymbolRange] ${sym}: エラー ${e.message}`);
     }
  
     Utilities.sleep(300);
   }
  
-  Logger.log(`[refetchSymbolRange] 取得完了: ${fetchedSyms}銘柄 / ${allData.length}行`);
+  console.log(`[refetchSymbolRange] 取得完了: ${fetchedSyms}銘柄 / ${allData.length}行`);
  
   if (allData.length === 0) {
-    Logger.log("[refetchSymbolRange] 追加データなし");
+    console.log("[refetchSymbolRange] 追加データなし");
     return { ok: true, fetched: 0 };
   }
  
@@ -3125,10 +3181,10 @@ function refetchSymbolRange(options) {
       ohlcvSh.getRange(2, 1, afterDedup - 1, 8)
         .sort([{ column: 1, ascending: true }, { column: 3, ascending: true }]);
     }
-    Logger.log(`[refetchSymbolRange] 重複削除後: ${afterDedup - 1}行`);
+    console.log(`[refetchSymbolRange] 重複削除後: ${afterDedup - 1}行`);
   }
  
-  Logger.log("[refetchSymbolRange] 完了");
+  console.log("[refetchSymbolRange] 完了");
   return { ok: true, fetched: fetchedSyms, rows: allData.length };
 }
 
@@ -3176,7 +3232,7 @@ function refetchSymbolGap(symbol, startDate, endDate) {
   const startSec = Math.floor(fetchStart.getTime() / 1000);
   const endSec   = Math.floor(fetchEnd.getTime() / 1000);
 
-  Logger.log(`[refetchSymbolGap] ${symbol} : 指定=${Utilities.formatDate(start, "JST", "MM/dd")}～${Utilities.formatDate(end, "JST", "MM/dd")} / 取得範囲=${Utilities.formatDate(fetchStart, "JST", "MM/dd")}～${Utilities.formatDate(fetchEnd, "JST", "MM/dd")}`);
+  console.log(`[refetchSymbolGap] ${symbol} : 指定=${Utilities.formatDate(start, "JST", "MM/dd")}～${Utilities.formatDate(end, "JST", "MM/dd")} / 取得範囲=${Utilities.formatDate(fetchStart, "JST", "MM/dd")}～${Utilities.formatDate(fetchEnd, "JST", "MM/dd")}`);
 
   // fetchOHLCVRecent を直接呼び出し
   const result = fetchOHLCVRecent(symbol, null, startSec, endSec);
@@ -3211,7 +3267,7 @@ function refetchSymbolGap(symbol, startDate, endDate) {
       }
     }
 
-    Logger.log(`[refetchSymbolGap] ${symbol} : ${validRows.length}行を追記・重複排除完了`);
+    console.log(`[refetchSymbolGap] ${symbol} : ${validRows.length}行を追記・重複排除完了`);
     return { ok: true, symbol, rows: validRows.length };
   } else {
     // 失敗：ダミー行を追加（B列に "GAP_FAILED"）
@@ -3225,7 +3281,7 @@ function refetchSymbolGap(symbol, startDate, endDate) {
     if (appended === 0) throw new Error("GAP_FAILED行のタイムスタンプ生成に失敗しました");
     SpreadsheetApp.flush();
     
-    Logger.log(`[refetchSymbolGap] ${symbol} : データなし → ダミー行を追加しました`);
+    console.log(`[refetchSymbolGap] ${symbol} : データなし → ダミー行を追加しました`);
     return { ok: false, symbol, rows: 0, dummy: true };
   }
 }
@@ -3345,7 +3401,7 @@ function repairCloseSnapshotRowsSilent_(targets) {
     summary.dedupedAndSorted = true;
   }
 
-  Logger.log("[repairCloseSnapshotRowsSilent] " + JSON.stringify(summary));
+  console.log("[repairCloseSnapshotRowsSilent] " + JSON.stringify(summary));
   return summary;
 }
 
@@ -3651,7 +3707,7 @@ function fetchHistoricalVolumeRepairRowsForSymbols_(symbols, ranges) {
       if (added > 0) summary.fetchedSymbols++;
     } catch (e) {
       summary.parseErrors++;
-      Logger.log(`[historicalVolumeRepair] parse error: ${meta.symbol} - ${e.message}`);
+      console.log(`[historicalVolumeRepair] parse error: ${meta.symbol} - ${e.message}`);
     }
   });
 
@@ -4697,7 +4753,7 @@ function resetQuickRepairState() {
   PropertiesService.getScriptProperties().deleteProperty(QUICK_REPAIR_STATE_KEY);
   deleteTriggersByHandler_("resumeQuickRepair");
   deleteTriggersByHandler_("quickRepairTrigger");
-  Logger.log("クイック修復の状態をリセットしました。");
+  console.log("クイック修復の状態をリセットしました。");
 }
 
 /**
@@ -4793,7 +4849,7 @@ function auditGapRepairCoverage(daysBack, minSessions) {
     });
   }
 
-  Logger.log(`[auditGapRepair] ${JSON.stringify(summary)}`);
+  console.log(`[auditGapRepair] ${JSON.stringify(summary)}`);
   return summary;
 }
 
@@ -4813,7 +4869,7 @@ function auditEvaluationOhlcvCoverage(options) {
     pendingTasks: pendingTasks.length,
     pendingSamples: pendingTasks.slice(0, 20)
   });
-  Logger.log(`[auditEvaluationOhlcvCoverage] ${JSON.stringify(summary)}`);
+  console.log(`[auditEvaluationOhlcvCoverage] ${JSON.stringify(summary)}`);
   return summary;
 }
 
@@ -4879,7 +4935,7 @@ function repairEvaluationOhlcvCoverageInternal_(options) {
         props.deleteProperty(EVAL_OHLCV_COVERAGE_STATE_KEY);
         deleteTriggersByHandler_(EVAL_OHLCV_COVERAGE_RESUME_HANDLER);
         const complete = buildEvaluationOhlcvCoverageSummary_(state, true, { remainingTasks: 0 });
-        Logger.log(`[repairEvaluationOhlcvCoverage] 完了: ${JSON.stringify(complete)}`);
+        console.log(`[repairEvaluationOhlcvCoverage] 完了: ${JSON.stringify(complete)}`);
         return complete;
       }
 
@@ -4902,7 +4958,7 @@ function repairEvaluationOhlcvCoverageInternal_(options) {
       state.updatedAt = new Date().toISOString();
       props.setProperty(EVAL_OHLCV_COVERAGE_STATE_KEY, JSON.stringify(state));
 
-      Logger.log(`[repairEvaluationOhlcvCoverage] batch=${state.batches} groups=${batchGroups.length} result=${JSON.stringify(result)}`);
+      console.log(`[repairEvaluationOhlcvCoverage] batch=${state.batches} groups=${batchGroups.length} result=${JSON.stringify(result)}`);
       if ((result.deferredDates || 0) > 0) {
         scheduleEvaluationOhlcvCoverageResume_(EVAL_OHLCV_COVERAGE_RESUME_AFTER_MS);
         return buildEvaluationOhlcvCoverageSummary_(state, false, { reason: "deferred_dates" });
@@ -5039,9 +5095,9 @@ function purgeBogusGapRepairRows() {
     PropertiesService.getScriptProperties().getProperty("SPREADSHEET_ID")
   );
   const sh = ss.getSheetByName(CONFIG.OHLCV_SHEET);
-  if (!sh) { Logger.log("ohlcv_4h が見つかりません"); return; }
+  if (!sh) { console.log("ohlcv_4h が見つかりません"); return; }
   const lastRow = sh.getLastRow();
-  if (lastRow < 2) { Logger.log("データなし"); return; }
+  if (lastRow < 2) { console.log("データなし"); return; }
   const values = sh.getRange(2, 1, lastRow - 1, 8).getValues();
   const deleteRows = [];
   values.forEach((r, i) => {
@@ -5052,9 +5108,9 @@ function purgeBogusGapRepairRows() {
     const ohlcSame = Number.isFinite(o) && o === h && h === l && l === c;
     if (vIsZero && ohlcSame) deleteRows.push(i + 2);
   });
-  if (deleteRows.length === 0) { Logger.log("[purgeBogus] 削除対象なし"); return { ok: true, deleted: 0 }; }
+  if (deleteRows.length === 0) { console.log("[purgeBogus] 削除対象なし"); return { ok: true, deleted: 0 }; }
   deleteRowsByRowNums_(sh, deleteRows);
-  Logger.log(`[purgeBogus] 削除: ${deleteRows.length} 行`);
+  console.log(`[purgeBogus] 削除: ${deleteRows.length} 行`);
   return { ok: true, deleted: deleteRows.length };
 }
 
@@ -5106,7 +5162,7 @@ function cleanupLegacyGapFailedAndEmptyTimestamps(dryRun) {
     PropertiesService.getScriptProperties().getProperty("SPREADSHEET_ID")
   );
   const sh = ss.getSheetByName(CONFIG.OHLCV_SHEET);
-  if (!sh) { Logger.log("ohlcv_4h が見つかりません"); return { ok: false, message: "sheet not found" }; }
+  if (!sh) { console.log("ohlcv_4h が見つかりません"); return { ok: false, message: "sheet not found" }; }
 
   while (Date.now() - startTime < MAX_RUN_MS) {
     const lastRow = sh.getLastRow();
@@ -5123,7 +5179,7 @@ function cleanupLegacyGapFailedAndEmptyTimestamps(dryRun) {
         deletedRows: state.deletedRows,
         chunks: state.chunks
       };
-      Logger.log(`[cleanupLegacy] 完了: ${JSON.stringify(summary)}`);
+      console.log(`[cleanupLegacy] 完了: ${JSON.stringify(summary)}`);
       return summary;
     }
 
@@ -5167,13 +5223,13 @@ function cleanupLegacyGapFailedAndEmptyTimestamps(dryRun) {
     state.chunks += 1;
     props.setProperty(STATE_KEY, JSON.stringify(state));
 
-    Logger.log(`[cleanupLegacy] chunk=${state.chunks} scanned=${state.scannedRows} deleteCandidates=${chunkEmpty + chunkStale} nextRow=${state.nextRow}`);
+    console.log(`[cleanupLegacy] chunk=${state.chunks} scanned=${state.scannedRows} deleteCandidates=${chunkEmpty + chunkStale} nextRow=${state.nextRow}`);
   }
 
   deleteTriggersByHandler_(RESUME_HANDLER);
   ScriptApp.newTrigger(RESUME_HANDLER).timeBased().after(RESUME_DELAY_MS).create();
   props.setProperty(STATE_KEY, JSON.stringify(state));
-  Logger.log(`[cleanupLegacy] 中断: scanned=${state.scannedRows} nextRow=${state.nextRow} 1分後に再開`);
+  console.log(`[cleanupLegacy] 中断: scanned=${state.scannedRows} nextRow=${state.nextRow} 1分後に再開`);
   return { ok: true, incomplete: true, scannedRows: state.scannedRows, nextRow: state.nextRow };
 }
 
