@@ -3206,6 +3206,8 @@ const QUICK_REPAIR_SCAN_ROWS_PER_SYMBOL_DAY = 3;
 const QUICK_REPAIR_SCAN_MIN_ROWS = 20000;
 const QUICK_REPAIR_SCAN_MAX_ROWS = 90000;
 const QUICK_REPAIR_TAIL_CLEANUP_ROWS = 12000;
+const QUICK_REPAIR_READ_CHUNK_ROWS = 1000;
+const QUICK_REPAIR_MIN_READ_REMAINING_MS = 15000;
 const EVAL_OHLCV_COVERAGE_STATE_KEY = "EVAL_OHLCV_COVERAGE_REPAIR_STATE_V1";
 const EVAL_OHLCV_COVERAGE_RESUME_HANDLER = "resumeEvaluationOhlcvCoverageRepair";
 const EVAL_OHLCV_COVERAGE_BATCH_GROUPS = 12;
@@ -4579,7 +4581,7 @@ function readRecentOhlcvRowsByTimestamp_(sheet, cutoffDateKey, nowDateKey, numCo
     emptyRows.scanStats = { complete: true, scannedRows: 0, maxRows: 0, stoppedBy: "" };
     return emptyRows;
   }
-  const chunkSize = 5000;
+  const chunkSize = Math.max(100, Number(opts.chunkSize) || QUICK_REPAIR_READ_CHUNK_ROWS);
   const rows = [];
   let row = lastRow;
   let scannedRows = 0;
@@ -4588,7 +4590,7 @@ function readRecentOhlcvRowsByTimestamp_(sheet, cutoffDateKey, nowDateKey, numCo
   const deadlineMs = Math.max(0, Number(opts.deadlineMs) || 0);
 
   while (row >= 2) {
-    if (deadlineMs && Date.now() >= deadlineMs) {
+    if (deadlineMs && deadlineMs - Date.now() < QUICK_REPAIR_MIN_READ_REMAINING_MS) {
       stoppedBy = "deadline";
       break;
     }
@@ -4620,12 +4622,17 @@ function readRecentOhlcvRowsByTimestamp_(sheet, cutoffDateKey, nowDateKey, numCo
     }
 
     if (sawOlderThanCutoff) break;
+    if (deadlineMs && deadlineMs - Date.now() < QUICK_REPAIR_MIN_READ_REMAINING_MS) {
+      stoppedBy = "deadline";
+      break;
+    }
     row = startRow - 1;
   }
 
   rows.scanStats = {
     complete: !stoppedBy,
     scannedRows: scannedRows,
+    chunkSize: chunkSize,
     maxRows: maxRows,
     stoppedBy: stoppedBy,
     lastRow: lastRow
