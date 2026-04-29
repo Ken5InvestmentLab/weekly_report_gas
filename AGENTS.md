@@ -33,6 +33,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 | `resumeOHLCVFetch` | OHLCV フェーズ再開時 | `fetchOHLCVForNewAlerts` を再起動 |
 | `resumeDailyMaintenance` | `runDailyMaintenance` 再開時 | `runDailyMaintenanceInternal_` を再起動 |
 | `resumeQuickRepair` | `quickRepairRecentGaps` 再開時 | ギャップ修復を再起動 |
+| `resumeCleanupLegacyGapFailedAndEmptyTimestamps` | `cleanupLegacyGapFailedAndEmptyTimestamps(false)` 未完了時 | 旧OHLCV残骸整理（空timestamp・非09:00/13:00・長期GAP_FAILED）を再開 |
 | `purgeOldOhlcvResumeTrigger` | `purgeOldOhlcvDataDaily` 未完了時 | OHLCV削除を再起動 |
 | `resumeEvaluationOhlcvCoverageRepair` | `repairEvaluationOhlcvCoverage120` 未完了時 | 評価対象銘柄の120日OHLCV補填を再開 |
 
@@ -61,9 +62,12 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 | `GITHUB_PAT` | 任意 | GitHub Actions (`optimize.yml`) トリガー用 PAT |
 | `OHLCV_CURRENT_PHASE` | 内部 | OHLCV 取得フェーズ管理（1〜4） |
 | `DAILY_MAINT_CURSOR` | 内部 | `runDailyMaintenance` の再開カーソル |
-| `QUICK_REPAIR_STATE` | 内部 | `quickRepairRecentGaps` の再開カーソル（v3: `nextIndex` / `totalSymbols` / `totalRows` など） |
+| `QUICK_REPAIR_STATE` | 内部 | `quickRepairRecentGaps` の再開カーソル（v6: `nextIndex` / `processedGroups` / `totalRows` など） |
+| `QUICK_REPAIR_TAIL_CLEANUP_STATE` | 内部 | GAP修復入口での末尾不正timestamp掃除の実行済み状態。営業日だけでなく `lastRow` 増加時は再チェックする |
+| `CLEANUP_LEGACY_STATE_V1` | 内部 | `cleanupLegacyGapFailedAndEmptyTimestamps` の再開カーソル・集計状態 |
+| `CLEANUP_LEGACY_AUTO_QUICK_REPAIR_V1` | 内部 | `emergencyStopQuickRepairAndCleanOhlcv` 後にcleanup完了時だけ `quickRepairTrigger` を予約するためのフラグ |
 | `EVAL_OHLCV_COVERAGE_REPAIR_STATE_V1` | 内部 | `repairEvaluationOhlcvCoverage120` の再開・集計状態 |
-| `OHLCV_REPAIR_SYMBOLS` | 内部 | 空timestamp削除後など、次回OHLCV取得で120日再取得する銘柄リスト |
+| `OHLCV_REPAIR_SYMBOLS` | 内部 | 空timestamp/非09:00・13:00削除後など、次回OHLCV取得で120日再取得する銘柄リスト |
 | `SPLIT_QUEUE` / `SPLIT_INDEX` | 内部 | 株式分割調整キューの進捗 |
 | `VARIANT_HISTORY_V1` | 内部 | 週次レポート文言の重複防止履歴（JSON） |
 
@@ -113,7 +117,7 @@ PHASE4: 重複排除・ソート・完了通知 → runDailyMaintenanceTrigger �
 祝日などに前営業日扱いで `fetchOHLCVForNewAlerts` 起点のチェーンを手動実行する場合は、日付別の公開ラッパーから `runFetchOHLCVForNewAlertsAsDate_("yyyy-mm-dd")` を呼ぶ。手動基準日は日次メンテナンス・GAP修復にも引き継がれ、GAP修復完了時または `clearManualOhlcvBusinessDate()` で解除する。
 手動基準日の公開ラッパーは、開始時に既存のOHLCVフェーズ進捗・保存済み銘柄リスト・再開トリガーをリセットしてから基準日を設定し、古い途中状態を引き継がないようにする。
 
-空/無効 timestamp 行は日付推定で修正しない。`repairEmptyTimestampRows(false)` は対象行を削除し、対象銘柄を `OHLCV_REPAIR_SYMBOLS` に記録して正規取得で補填する。
+空/無効 timestamp 行は日付推定で修正しない。`repairEmptyTimestampRows(false)` / `cleanupLegacyGapFailedAndEmptyTimestamps(false)` は対象行を削除し、対象銘柄を `OHLCV_REPAIR_SYMBOLS` に記録して正規取得で補填する。空timestampや非09:00/13:00 timestampを既存行から推定して書き換えない。
 
 Yahoo Finance 1h足は JPX の時間足を区間末尾側の時刻で返すため、`13:00 JST` 足は前場（9:00〜13:00）バケットに含める。`15:30 JST` の `volume=0` かつ `O=H=L=C` バーは後場の終値スナップショットとして扱う。`parseIntraResponse_` では PM バケットの `close` だけを更新し、`open/high/low/volume` には混ぜない。OHLCV は生価格保存のため、通常取得・GAP修復・過去出来高補正では Yahoo Finance の `1h` だけを取得し、`1d` はデバッグや分割情報確認など必要な場合に限る。`ohlcv_4h` に保存する timestamp はセッション代表時刻の `09:00 JST` / `13:00 JST` の2種類だけにする。Yahooの生1h足時刻（10:00/11:00/12:00/14:00/15:00/15:30など）や `GAP_FAILED` の `00:00` マーカーは保存しない。
 
@@ -133,18 +137,24 @@ Yahoo Finance 1h足は JPX の時間足を区間末尾側の時刻で返すた�
 
 `quickRepairRecentGaps` は巨大な `ohlcv_4h` 全行スキャンと全銘柄再取得を避けるため、まず `quickScanMissingSessions(daysBack, minSessions)` で未処理のセッション不足だけを抽出し、対象銘柄・日付グループだけを Yahoo Finance から再取得する。取得は `UrlFetchApp.fetchAll` を使い、進捗集計は `QUICK_REPAIR_STATE` v6 に保存する。再開時は直近スキャンをやり直し、既に埋まったグループや `GAP_FAILED` / `GAP_REPAIR` マーカー付きの未充足日は再取得対象から外す。
 
-修復行は B列に `GAP_REPAIR` を入れて追記し、最後に `timestamp + symbol` で重複排除・A列 timestamp 昇順ソートする。`refetchSymbolGap(symbol, startDate, endDate)` は手動用の単一補填関数で、前後3日マージンで取得しても、成功判定は対象日付範囲内の行だけに限定する（対象日以外が取れただけで成功扱いしない）。
+修復行は B列に `GAP_REPAIR` を入れて追記し、`GAP_FAILED` は不足しているAM/PMセッションに対して `makeGapFailedRows_` で `09:00 JST` / `13:00 JST` の実timestampを持つマーカー行として作る。空timestamp、`00:00`、Yahoo生1h足時刻をマーカーとして保存しない。追記した実行では、正常完了時だけでなく時間切れで再開に回す直前にも `dedupeAndSortOhlcv_()` と `SpreadsheetApp.flush()` を実行し、必ず `timestamp + symbol` 重複排除・A列 timestamp 昇順ソート済みの状態に戻してから `QUICK_REPAIR_STATE` を保存する。`refetchSymbolGap(symbol, startDate, endDate)` は手動用の単一補填関数で、前後3日マージンで取得しても、成功判定は対象日付範囲内の行だけに限定する（対象日以外が取れただけで成功扱いしない）。
 
-`quickScanMissingSessions` と `auditGapRepairCoverage` は `ohlcv_4h` のA列 timestamp 昇順を前提に、timestamp列で直近範囲の開始位置を絞ってから読む。全行読み込みに戻すと、行数が大きい環境でログを出す前に6分タイムアウトするので禁止。`quickRepairRecentGaps` のバッチ処理では、初回スキャンで返る `sessionInfo` を使い回し、バッチごとに同じ直近範囲を再スキャンしない。
+`quickScanMissingSessions` と `auditGapRepairCoverage` は `ohlcv_4h` のA列 timestamp 昇順を前提に、timestamp列で直近範囲の開始位置を絞ってから読む。全行読み込みに戻すと、行数が大きい環境でログを出す前に6分タイムアウトするので禁止。`quickRepairRecentGaps` のバッチ処理では、初回スキャンで返る `sessionInfo` を使い回し、バッチごとに同じ直近範囲を再スキャンしない。途中中断で追記行を末尾に未ソートのまま残すと、次回の直近範囲探索が壊れてタイムアウトループ化するため禁止。
 
 補填後の確認は `auditGapRepairCoverage(daysBack, minSessions)` を使う。`untreatedShort` が実際の未処理不足、`attemptedButShort` は `GAP_FAILED` / `GAP_REPAIR` などのマーカーがあるが2セッション未満のもの。
+
+### OHLCV 不正timestamp・GAP修復タイムアウトの復旧手順
+
+`resumeQuickRepair` / `quickRepairTrigger` がタイムアウトループになった場合、または `ohlcv_4h` に空timestamp・09:00/13:00以外のtimestampが混入した場合は、先に `emergencyStopQuickRepairAndCleanOhlcv()` を実行する。これは既存の `resumeQuickRepair` / `quickRepairTrigger` を削除し、`QUICK_REPAIR_STATE` と `QUICK_REPAIR_TAIL_CLEANUP_STATE` を消したうえで、`cleanupLegacyGapFailedAndEmptyTimestamps(false)` を本番実行する。cleanupが複数回に分かれる場合は `resumeCleanupLegacyGapFailedAndEmptyTimestamps` で再開し、完了後にだけ `CLEANUP_LEGACY_AUTO_QUICK_REPAIR_V1` を見て `quickRepairTrigger` を1分後に予約する。cleanup中に `quickRepairRecentGaps()` を直接起動しない。
+
+`cleanupLegacyGapFailedAndEmptyTimestamps(true)` はDryRun、`false` は本番削除。対象は空timestamp、09:00/13:00以外のtimestamp、長期滞留した `GAP_FAILED`。削除した銘柄は `OHLCV_REPAIR_SYMBOLS` に積み、通常OHLCV取得の120日再取得で補填する。
 
 ### シート読み書きのベストプラクティス
 
 - 時間主導トリガーから呼ばれる処理では `SpreadsheetApp.getActiveSpreadsheet()` に依存せず、`SPREADSHEET_ID` から `SpreadsheetApp.openById()` で対象ブックを開く。重い初期化より前に `console.log` / `Logger.log` で入口ログを出し、再開可能な長時間処理は入口直後に保険の再開トリガーを先行予約してから `LockService` で二重起動を避ける
 - `ohlcv_4h` は A列（timestamp）昇順ソート前提。先頭から連続削除する処理は `sheet.deleteRows(firstDataRow, N)` で高速に行える
-- `ohlcv_4h` に新規行を追記する場合は `appendRowsToSheet_` を通し、A列 timestamp を `Date` に正規化してから書く。補填・手動修復でも空 timestamp や 09:00/13:00 以外の時刻のまま直接 `setValues` しない
-- GAP修復・監査は A列 timestamp 昇順を前提に末尾から直近分だけを読む。GAP系処理で `getRange(2, 1, lastRow - 1, ...)` の全行読みを追加しない
+- `ohlcv_4h` に新規行を追記する場合は `appendRowsToSheet_` を通し、A列 timestamp を `Date` に正規化してから書く。補填・手動修復でも空 timestamp や 09:00/13:00 以外の時刻のまま直接 `setValues` しない。GAP修復のように内部でまとめて追記する場合も、追記前に各行のtimestampを検証し、追記後は中断前を含めて `dedupeAndSortOhlcv_()` で昇順 invariant を復元する
+- GAP修復・監査は A列 timestamp 昇順を前提に末尾から直近分だけを読む。GAP系処理で `getRange(2, 1, lastRow - 1, ...)` の全行読みを追加しない。入口の不正timestamp掃除は営業日単位だけでスキップせず、前回チェック後に `lastRow` が増えていたら再チェックする
 - デバッグ・進捗ログは `debug_webhook` に書き込まず、原則 `console.log` のみに統一する。`console.log` と `Logger.log` に同じ内容を二重出力しない。`debugLogToSheet_` は互換用の名前だが、実装はコンソール出力のみとする
 - OHLCV取得の正常系ログは銘柄ごとに出さず、バッチ/チャンク単位に集約する。銘柄別のYahoo Finance取得期間・結果ログが必要な場合だけ、スクリプトプロパティ `OHLCV_VERBOSE_FETCH_LOGS=true` で詳細ログを有効化する
 - 株式分割調整で `ohlcv_4h` を更新する場合は全行走査を避け、C列 `symbol` を `TextFinder` などで絞って対象銘柄の行だけ処理する
@@ -171,7 +181,10 @@ repairEvaluationOhlcvCoverage120()    // 評価対象銘柄の120日OHLCV欠落�
 resetEvaluationOhlcvCoverageRepairState() // 120日OHLCV補填の再開状態をリセット
 buildAndSendWeeklyReportManual()      // 週次レポートの手動送信
 previewWeeklyReportThisWeek()         // 今週分レポートのプレビュー
-repairEmptyTimestampRows(true)        // DryRun でタイムスタンプ修復を確認
+repairEmptyTimestampRows(true)        // DryRun で空/無効timestamp削除対象を確認
+cleanupLegacyGapFailedAndEmptyTimestamps(true)  // DryRun で空timestamp・非09:00/13:00・長期GAP_FAILED削除対象を確認
+cleanupLegacyGapFailedAndEmptyTimestamps(false) // 本番削除。未完了時は resumeCleanupLegacyGapFailedAndEmptyTimestamps で再開
+emergencyStopQuickRepairAndCleanOhlcv() // GAP修復タイムアウトループ停止→OHLCV整理→完了後quickRepairTrigger自動予約
 purgeBogusGapRepairRows()             // 不正な GAP_REPAIR 行を削除
 repairHistoricalOhlcvVolumes()        // 旧セッション境界で保存済みの過去OHLCVを全履歴補正（再開可能）
 previewHistoricalOhlcvVolumeRepair()  // 過去OHLCV補正のDryRun
