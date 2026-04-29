@@ -3199,6 +3199,13 @@ const QUICK_REPAIR_BATCH_SYMBOLS = 20;
 const QUICK_REPAIR_MAX_RUN_MS = 3.5 * 60 * 1000;
 const QUICK_REPAIR_RESUME_AFTER_MS = 60 * 1000;
 const QUICK_REPAIR_SAFETY_AFTER_MS = 10 * 60 * 1000;
+const QUICK_REPAIR_LOCK_WAIT_MS = 5000;
+const QUICK_REPAIR_STATE_VERSION = 5;
+const QUICK_REPAIR_SCAN_BUDGET_MS = 90 * 1000;
+const QUICK_REPAIR_SCAN_ROWS_PER_SYMBOL_DAY = 3;
+const QUICK_REPAIR_SCAN_MIN_ROWS = 20000;
+const QUICK_REPAIR_SCAN_MAX_ROWS = 90000;
+const QUICK_REPAIR_TAIL_CLEANUP_ROWS = 12000;
 const EVAL_OHLCV_COVERAGE_STATE_KEY = "EVAL_OHLCV_COVERAGE_REPAIR_STATE_V1";
 const EVAL_OHLCV_COVERAGE_RESUME_HANDLER = "resumeEvaluationOhlcvCoverageRepair";
 const EVAL_OHLCV_COVERAGE_BATCH_GROUPS = 12;
@@ -3987,7 +3994,8 @@ function buildHistoricalVolumeRepairChunkContext_(sheet, rowStart, rowEnd, symbo
  * 休場日（土日祝・年末年始）は診断対象から除外する。
  * B列に GAP_REPAIR / GAP_FAILED がある日も除外する。
  */
-function quickScanMissingSessions(daysBack = 14, minSessions = 2) {
+function quickScanMissingSessions(daysBack = 14, minSessions = 2, options) {
+  const opts = options || {};
   const ss = SpreadsheetApp.openById(
     PropertiesService.getScriptProperties().getProperty("SPREADSHEET_ID")
   );
@@ -4010,7 +4018,21 @@ function quickScanMissingSessions(daysBack = 14, minSessions = 2) {
   symbols.forEach(sym => symbolLookup[sym] = true);
 
   // ohlcv_4h はA列(timestamp)昇順に整列している前提。直近分だけを末尾から読む。
-  const values = readRecentOhlcvRowsByTimestamp_(sh, cutoffDateKey, nowDateKey, 3);
+  const values = readRecentOhlcvRowsByTimestamp_(sh, cutoffDateKey, nowDateKey, 3, {
+    deadlineMs: opts.deadlineMs || 0,
+    maxRows: opts.maxRows || getQuickRepairRecentScanMaxRows_(symbols.length, daysBack)
+  });
+  const scanStats = values.scanStats || {};
+  if (scanStats.complete === false) {
+    writeProcessLog_("ギャップ修復", "直近OHLCVの確認が時間内に終わらなかったため、今回の実行を中断して次回へ回します。", {
+      businessDate: formatYmd_(now),
+      targetSymbols: symbols.length,
+      scannedRows: scanStats.scannedRows || 0,
+      maxRows: scanStats.maxRows || 0,
+      stoppedBy: scanStats.stoppedBy || ""
+    });
+    return { count: 0, details: {}, incomplete: true, reason: "scan_incomplete", scanStats: scanStats };
+  }
 
   // 日付×銘柄 ごとの有効セッション数カウント
   const countMap = {};
@@ -4259,7 +4281,58 @@ function isTransientHttpResponse_(res) {
   }
 }
 
+function getQuickRepairRecentScanMaxRows_(symbolCount, daysBack) {
+  const count = Math.max(1, Number(symbolCount) || 1);
+  const days = Math.max(1, Number(daysBack) || 14) + 7;
+  const estimated = Math.ceil(count * days * QUICK_REPAIR_SCAN_ROWS_PER_SYMBOL_DAY);
+  return Math.min(QUICK_REPAIR_SCAN_MAX_ROWS, Math.max(QUICK_REPAIR_SCAN_MIN_ROWS, estimated));
+}
+
+function purgeInvalidOhlcvTimestampRows_(sheet, context, maxRows) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow <= 1) return { deletedRows: 0, repairSymbols: 0 };
+
+  const scanRows = Math.min(Math.max(1, Number(maxRows) || QUICK_REPAIR_TAIL_CLEANUP_ROWS), lastRow - 1);
+  const startRow = lastRow - scanRows + 1;
+  const values = sheet.getRange(startRow, 1, scanRows, 3).getValues();
+  const deleteRows = [];
+  const repairSymbolSet = {};
+  const samples = [];
+
+  values.forEach((row, index) => {
+    const ts = row[0];
+    if (isValidOhlcvTimestamp_(ts)) return;
+
+    const sheetRow = startRow + index;
+    const symbol = String(row[2] || "").trim();
+    deleteRows.push(sheetRow);
+    if (symbol) repairSymbolSet[symbol] = true;
+    if (samples.length < 10) {
+      samples.push({
+        row: sheetRow,
+        timestamp: ts == null ? "" : String(ts),
+        symbol: symbol
+      });
+    }
+  });
+
+  if (deleteRows.length === 0) return { deletedRows: 0, repairSymbols: 0 };
+
+  deleteRowsByRowNums_(sheet, deleteRows);
+  const repairSymbols = Object.keys(repairSymbolSet).sort();
+  if (repairSymbols.length > 0) setOhlcvRepairSymbols_(repairSymbols);
+  writeProcessLog_("OHLCV", "空または無効なtimestampのOHLCV行を削除し、対象銘柄を再取得キューへ入れました。", {
+    context: context || "",
+    scannedRows: scanRows,
+    deletedRows: deleteRows.length,
+    repairSymbols: repairSymbols.length,
+    samples: samples
+  });
+  return { deletedRows: deleteRows.length, repairSymbols: repairSymbols.length };
+}
+
 function dedupeAndSortOhlcv_(sheet) {
+  purgeInvalidOhlcvTimestampRows_(sheet, "dedupeAndSortOhlcv_", QUICK_REPAIR_TAIL_CLEANUP_ROWS);
   const lastRow = sheet.getLastRow();
   if (lastRow <= 1) return;
   sheet.getRange(2, 1, lastRow - 1, 8).removeDuplicates([1, 3]);
@@ -4498,18 +4571,42 @@ function fetchQuickRepairRecentRowsForSymbols_(symbols, fetchStartSec, fetchEndS
   return { rows: rows, summary: summary };
 }
 
-function readRecentOhlcvRowsByTimestamp_(sheet, cutoffDateKey, nowDateKey, numCols) {
+function readRecentOhlcvRowsByTimestamp_(sheet, cutoffDateKey, nowDateKey, numCols, options) {
+  const opts = options || {};
   const lastRow = sheet.getLastRow();
-  if (lastRow < 2) return [];
+  if (lastRow < 2) {
+    const emptyRows = [];
+    emptyRows.scanStats = { complete: true, scannedRows: 0, maxRows: 0, stoppedBy: "" };
+    return emptyRows;
+  }
   const chunkSize = 5000;
   const rows = [];
   let row = lastRow;
+  let scannedRows = 0;
+  let stoppedBy = "";
+  const maxRows = Math.max(0, Number(opts.maxRows) || 0);
+  const deadlineMs = Math.max(0, Number(opts.deadlineMs) || 0);
 
   while (row >= 2) {
-    const numRows = Math.min(chunkSize, row - 1);
+    if (deadlineMs && Date.now() >= deadlineMs) {
+      stoppedBy = "deadline";
+      break;
+    }
+    if (maxRows && scannedRows >= maxRows) {
+      stoppedBy = "maxRows";
+      break;
+    }
+
+    const remainingMaxRows = maxRows ? Math.max(0, maxRows - scannedRows) : chunkSize;
+    const numRows = Math.min(chunkSize, row - 1, remainingMaxRows);
+    if (numRows <= 0) {
+      stoppedBy = "maxRows";
+      break;
+    }
     const startRow = row - numRows + 1;
     const values = sheet.getRange(startRow, 1, numRows, numCols).getValues();
     let sawOlderThanCutoff = false;
+    scannedRows += numRows;
 
     for (let i = values.length - 1; i >= 0; i--) {
       const ts = values[i][0];
@@ -4526,6 +4623,13 @@ function readRecentOhlcvRowsByTimestamp_(sheet, cutoffDateKey, nowDateKey, numCo
     row = startRow - 1;
   }
 
+  rows.scanStats = {
+    complete: !stoppedBy,
+    scannedRows: scannedRows,
+    maxRows: maxRows,
+    stoppedBy: stoppedBy,
+    lastRow: lastRow
+  };
   return rows;
 }
 
@@ -4536,6 +4640,9 @@ function isTransientError_(e) {
   const msg = (e.message || '').toLowerCase();
   return msg.includes("server error") ||
          msg.includes("we're sorry") ||
+         msg.includes("javascript engine") ||
+         msg.includes("unexpected error") ||
+         msg.includes("internal") ||
          msg.includes("service unavailable") ||
          msg.includes("quota") ||
          msg.includes("timeout") ||
@@ -4581,11 +4688,12 @@ function quickRepairRecentGaps(options) {
   const daysBack = opts.daysBack || 14;
   const minSessions = opts.minSessions || 2;
   const batchSymbols = opts.batchSymbols || QUICK_REPAIR_BATCH_SYMBOLS;
-  const STATE_VERSION = 4;
+  const STATE_VERSION = QUICK_REPAIR_STATE_VERSION;
+  const businessDateKey = getOhlcvBusinessDateKey_();
 
   const props = PropertiesService.getScriptProperties();
   writeProcessLog_("ギャップ修復", `直近 ${daysBack} 日のOHLCV不足セッションを確認し、必要な銘柄だけ補填します。`, {
-    businessDate: getOhlcvBusinessDateKey_(),
+    businessDate: businessDateKey,
     minSessions: minSessions,
     batchSymbols: batchSymbols,
     isManual: !!getManualOhlcvBusinessDateKey_()
@@ -4595,7 +4703,19 @@ function quickRepairRecentGaps(options) {
   // 正常完了時は最後に削除。GASに強制終了されても自動再開できる。
   scheduleQuickRepairResume_(QUICK_REPAIR_SAFETY_AFTER_MS);
 
+  let lock = null;
+  let lockAcquired = false;
   try {
+    lock = LockService.getScriptLock();
+    if (!lock.tryLock(QUICK_REPAIR_LOCK_WAIT_MS)) {
+      writeProcessLog_("ギャップ修復", "別のギャップ修復が実行中のため、1分後に再試行します。", {
+        businessDate: businessDateKey
+      });
+      scheduleQuickRepairResume_(QUICK_REPAIR_RESUME_AFTER_MS);
+      return { ok: true, incomplete: true, reason: "lock_busy" };
+    }
+    lockAcquired = true;
+
     const startTime = Date.now();
     const ss = SpreadsheetApp.openById(
       PropertiesService.getScriptProperties().getProperty("SPREADSHEET_ID")
@@ -4603,35 +4723,45 @@ function quickRepairRecentGaps(options) {
     const ohlcvSh = ss.getSheetByName(CONFIG.OHLCV_SHEET);
     if (!ohlcvSh) throw new Error("ohlcv_4h シートが見つかりません");
 
-    let state = null;
-    try {
-      const rawState = props.getProperty(QUICK_REPAIR_STATE_KEY);
-      state = rawState ? JSON.parse(rawState) : null;
-    } catch (e) {
-      state = null;
-    }
-    if (!state || state.version !== STATE_VERSION || state.daysBack !== daysBack || state.minSessions !== minSessions) {
-      state = {
-        version: STATE_VERSION,
-        daysBack: daysBack,
-        minSessions: minSessions,
-        totalRows: 0,
-        processedGroups: 0,
-        processedTasks: 0,
-        repairedDates: 0,
-        failedDates: 0,
-        deferredDates: 0,
-        deferredSymbols: 0,
-        parseErrors: 0,
-        batches: 0,
-        lastScanSymbols: 0,
-        lastScanTasks: 0,
-        startedAt: new Date().toISOString()
-      };
-    }
+    const state = {
+      version: STATE_VERSION,
+      businessDate: businessDateKey,
+      daysBack: daysBack,
+      minSessions: minSessions,
+      totalRows: 0,
+      processedGroups: 0,
+      processedTasks: 0,
+      repairedDates: 0,
+      failedDates: 0,
+      deferredDates: 0,
+      deferredSymbols: 0,
+      parseErrors: 0,
+      batches: 0,
+      lastScanSymbols: 0,
+      lastScanTasks: 0,
+      startedAt: new Date().toISOString()
+    };
+    props.setProperty(QUICK_REPAIR_STATE_KEY, JSON.stringify(state));
 
     const DEDUPE_GUARD_MS = 60 * 1000;
-    const scan = quickScanMissingSessions(daysBack, minSessions);
+    const scanDeadlineMs = Math.min(
+      startTime + QUICK_REPAIR_SCAN_BUDGET_MS,
+      startTime + QUICK_REPAIR_MAX_RUN_MS - DEDUPE_GUARD_MS
+    );
+    purgeInvalidOhlcvTimestampRows_(ohlcvSh, "quickRepairRecentGaps.entry", QUICK_REPAIR_TAIL_CLEANUP_ROWS);
+    const scan = quickScanMissingSessions(daysBack, minSessions, { deadlineMs: scanDeadlineMs });
+    if (scan.incomplete) {
+      state.deferredDates += 1;
+      state.updatedAt = new Date().toISOString();
+      props.setProperty(QUICK_REPAIR_STATE_KEY, JSON.stringify(state));
+      scheduleQuickRepairResume_(QUICK_REPAIR_RESUME_AFTER_MS);
+      return {
+        ok: true,
+        incomplete: true,
+        reason: scan.reason || "scan_incomplete",
+        scanStats: scan.scanStats || {}
+      };
+    }
     const tasks = flattenMissingTasks_(scan.details);
     const groups = groupQuickRepairTasksBySymbol_(tasks);
     state.lastScanSymbols = scan.count;
@@ -4664,7 +4794,25 @@ function quickRepairRecentGaps(options) {
 
       const batchGroups = groups.slice(groupIndex, groupIndex + batchSymbols);
       const batchTasks = flattenQuickRepairGroupsToTasks_(batchGroups);
-      const sessionInfo = buildRecentSessionInfoForTasks_(ohlcvSh, batchTasks, daysBack);
+      const sessionInfo = buildRecentSessionInfoForTasks_(ohlcvSh, batchTasks, daysBack, {
+        deadlineMs: startTime + QUICK_REPAIR_MAX_RUN_MS - DEDUPE_GUARD_MS
+      });
+      if (sessionInfo.incomplete) {
+        state.deferredDates += batchTasks.length;
+        state.updatedAt = new Date().toISOString();
+        props.setProperty(QUICK_REPAIR_STATE_KEY, JSON.stringify(state));
+        scheduleQuickRepairResume_(QUICK_REPAIR_RESUME_AFTER_MS);
+        writeProcessLog_("ギャップ修復", "バッチ処理前の既存セッション確認が時間内に終わらなかったため、次回へ回します。", {
+          tasks: batchTasks.length,
+          scanStats: sessionInfo.scanStats || {}
+        });
+        return {
+          ok: true,
+          incomplete: true,
+          reason: "session_info_scan_incomplete",
+          scanStats: sessionInfo.scanStats || {}
+        };
+      }
       writeProcessLog_("ギャップ修復", `不足セッションを補填中です。銘柄グループ ${groupIndex + 1}〜${groupIndex + batchGroups.length} / ${groups.length} を処理します。`, {
         tasks: batchTasks.length
       });
@@ -4736,6 +4884,10 @@ function quickRepairRecentGaps(options) {
     writeProcessLog_("ギャップ修復", "予期しないエラーが発生しました。再開トリガーを設定したうえで、GAS側にも失敗として記録します。", { message: e.message });
     scheduleQuickRepairResume_(QUICK_REPAIR_RESUME_AFTER_MS);
     throw e;
+  } finally {
+    if (lockAcquired && lock) {
+      try { lock.releaseLock(); } catch (releaseErr) {}
+    }
   }
 }
 
@@ -4744,7 +4896,18 @@ function quickRepairRecentGaps(options) {
  */
 function resumeQuickRepair() {
   deleteTriggersByHandler_("resumeQuickRepair");
-  quickRepairRecentGaps();
+  try {
+    return quickRepairRecentGaps();
+  } catch (e) {
+    if (isTransientError_(e)) {
+      writeProcessLog_("ギャップ修復", "再開トリガーで一時的なエラーが発生したため、1分後に再試行します。", {
+        message: e.message
+      });
+      scheduleQuickRepairResume_(QUICK_REPAIR_RESUME_AFTER_MS);
+      return { ok: false, transient: true, retried: true, message: e.message };
+    }
+    throw e;
+  }
 }
 
 /**
@@ -5044,7 +5207,8 @@ function flattenQuickRepairGroupsToTasks_(groups) {
   return tasks;
 }
 
-function buildRecentSessionInfoForTasks_(sheet, tasks, daysBack) {
+function buildRecentSessionInfoForTasks_(sheet, tasks, daysBack, options) {
+  const opts = options || {};
   const info = { countMap: {}, periodMap: {}, markerMap: {} };
   if (!tasks || tasks.length === 0) return info;
 
@@ -5060,7 +5224,16 @@ function buildRecentSessionInfoForTasks_(sheet, tasks, daysBack) {
   const cutoff = new Date(now.getTime() - daysBack * 24 * 60 * 60 * 1000);
   const cutoffDateKey = Utilities.formatDate(cutoff, CONFIG.TIMEZONE, "yyyy/MM/dd");
   const nowDateKey = Utilities.formatDate(now, CONFIG.TIMEZONE, "yyyy/MM/dd");
-  const values = readRecentOhlcvRowsByTimestamp_(sheet, cutoffDateKey, nowDateKey, 3);
+  const values = readRecentOhlcvRowsByTimestamp_(sheet, cutoffDateKey, nowDateKey, 3, {
+    deadlineMs: opts.deadlineMs || 0,
+    maxRows: opts.maxRows || getQuickRepairRecentScanMaxRows_(Object.keys(targetSymbols).length, daysBack)
+  });
+  const scanStats = values.scanStats || {};
+  if (scanStats.complete === false) {
+    info.incomplete = true;
+    info.scanStats = scanStats;
+    return info;
+  }
 
   for (const row of values) {
     const ts = row[0];
