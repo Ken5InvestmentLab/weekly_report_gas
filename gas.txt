@@ -1418,7 +1418,7 @@ function describeDebugStage_(stage, data) {
   if (stage === "ohlcv.phase4.remove_duplicates.start") return "PHASE4: timestampと銘柄が同じOHLCV行を重複として削除しています。";
   if (stage === "ohlcv.phase4.sort_final.start") return "PHASE4: 最後にtimestamp昇順で並べ替えています。";
   if (stage === "ohlcv.phase4.complete") return "PHASE4: OHLCV取得フローが完了しました。日次メンテナンスを次に予約します。";
-  if (stage === "appendRowsToSheet_.skippedInvalidTs") return "OHLCV追記時にtimestampが空または不正な行をスキップしました。";
+  if (stage === "appendRowsToSheet_.skippedInvalidTs") return "OHLCV追記時にtimestampが空・不正・対象外時刻の行をスキップしました。";
   if (String(stage || "").indexOf("fetchOHLCVRecent.") === 0) return "Yahoo FinanceのOHLCVレスポンス確認ログです。";
   return `${stage}: 処理ログ`;
 }
@@ -2281,6 +2281,7 @@ function normalizeOhlcvRowForWrite_(row) {
   while (out.length < 8) out.push("");
   const ts = normalizeOhlcvTimestamp_(out[0]);
   if (!ts) return null;
+  if (!isOhlcvSessionTimestamp_(ts)) return null;
   out[0] = ts;
   return out;
 }
@@ -3281,13 +3282,8 @@ function refetchSymbolGap(symbol, startDate, endDate) {
     return { ok: true, symbol, rows: validRows.length };
   } else {
     // 失敗：ダミー行を追加（B列に "GAP_FAILED"）
-    const dummyRow = [
-      start,                // timestamp（指定日の 00:00）
-      "GAP_FAILED",         // alert_id
-      symbol,               // symbol
-      "", "", "", "", ""    // open, high, low, close, volume
-    ];
-    const appended = appendRowsToSheet_(ohlcvSh, [dummyRow]);
+    const dummyRows = makeGapFailedRows_(symbol, startDate, {}, {});
+    const appended = appendRowsToSheet_(ohlcvSh, dummyRows);
     if (appended === 0) throw new Error("GAP_FAILED行のタイムスタンプ生成に失敗しました");
     SpreadsheetApp.flush();
     
@@ -4058,6 +4054,7 @@ function quickScanMissingSessions(daysBack = 14, minSessions = 2, options) {
     }
 
     const period = getOhlcvSessionName_(ts);
+    if (!period) continue;
     if (!periodMap[key]) periodMap[key] = {};
     periodMap[key][period] = true;
     countMap[key] = Object.keys(periodMap[key]).length;
@@ -4144,6 +4141,7 @@ function buildSessionCountMapForTasks_(sheet, tasks, startIndex) {
     if (!rowDateStr) continue;
     const key = sym + "|" + rowDateStr;
     const period = getOhlcvSessionName_(ts);
+    if (!period) continue;
     if (!periodMap[key]) periodMap[key] = {};
     periodMap[key][period] = true;
     map[key] = Object.keys(periodMap[key]).length;
@@ -4180,12 +4178,29 @@ function buildDateSetBetween_(startDate, endDate) {
 }
 
 function getOhlcvSessionName_(ts) {
+  if (!isValidOhlcvTimestamp_(ts)) return "";
   const hour = parseInt(Utilities.formatDate(ts, CONFIG.TIMEZONE, "HH"), 10);
-  if (hour < 13) return "AM";
-  return "PM";
+  const minute = parseInt(Utilities.formatDate(ts, CONFIG.TIMEZONE, "mm"), 10);
+  if (hour === 9 && minute === 0) return "AM";
+  if (hour === 13 && minute === 0) return "PM";
+  return "";
+}
+
+function isOhlcvSessionTimestamp_(ts) {
+  return getOhlcvSessionName_(ts) !== "";
+}
+
+function makeJstSessionTimestamp_(dateStr, sessionName) {
+  const normalized = normalizeDateStrSlash_(dateStr);
+  if (!normalized) return null;
+  const isoDate = normalized.replace(/\//g, "-");
+  const hour = sessionName === "PM" ? "13" : "09";
+  const ts = new Date(`${isoDate}T${hour}:00:00+09:00`);
+  return isValidOhlcvTimestamp_(ts) ? ts : null;
 }
 
 function addSessionPeriod_(periodMap, key, period) {
+  if (!period) return;
   if (!periodMap[key]) periodMap[key] = {};
   periodMap[key][period] = true;
 }
@@ -4201,10 +4216,22 @@ function countMergedSessionPeriods_(basePeriodMap, extraPeriodMap, key) {
   return Object.keys(merged).length;
 }
 
-function makeGapFailedRow_(symbol, dateStr) {
-  const ts = parseJstDate_(dateStr, false);
-  if (!isValidOhlcvTimestamp_(ts)) throw new Error("Invalid GAP_FAILED timestamp: " + dateStr);
-  return [ts, "GAP_FAILED", symbol, "", "", "", "", ""];
+function makeGapFailedRows_(symbol, dateStr, basePeriodMap, extraPeriodMap) {
+  const key = symbol + "|" + normalizeDateStrSlash_(dateStr);
+  const existing = {};
+  if (basePeriodMap && basePeriodMap[key]) Object.keys(basePeriodMap[key]).forEach(p => existing[p] = true);
+  if (extraPeriodMap && extraPeriodMap[key]) Object.keys(extraPeriodMap[key]).forEach(p => existing[p] = true);
+
+  const sessions = [];
+  if (!existing.AM) sessions.push("AM");
+  if (!existing.PM) sessions.push("PM");
+  if (sessions.length === 0) return [];
+
+  return sessions.map(sessionName => {
+    const ts = makeJstSessionTimestamp_(dateStr, sessionName);
+    if (!isValidOhlcvTimestamp_(ts)) throw new Error("Invalid GAP_FAILED timestamp: " + dateStr);
+    return [ts, "GAP_FAILED", symbol, "", "", "", "", ""];
+  });
 }
 
 function flattenMissingTasks_(details) {
@@ -4303,7 +4330,10 @@ function purgeInvalidOhlcvTimestampRows_(sheet, context, maxRows) {
 
   values.forEach((row, index) => {
     const ts = row[0];
-    if (isValidOhlcvTimestamp_(ts)) return;
+    const invalidReason = !isValidOhlcvTimestamp_(ts)
+      ? "invalid_timestamp"
+      : (!isOhlcvSessionTimestamp_(ts) ? "non_session_timestamp" : "");
+    if (!invalidReason) return;
 
     const sheetRow = startRow + index;
     const symbol = String(row[2] || "").trim();
@@ -4313,6 +4343,7 @@ function purgeInvalidOhlcvTimestampRows_(sheet, context, maxRows) {
       samples.push({
         row: sheetRow,
         timestamp: ts == null ? "" : String(ts),
+        reason: invalidReason,
         symbol: symbol
       });
     }
@@ -4323,7 +4354,7 @@ function purgeInvalidOhlcvTimestampRows_(sheet, context, maxRows) {
   deleteRowsByRowNums_(sheet, deleteRows);
   const repairSymbols = Object.keys(repairSymbolSet).sort();
   if (repairSymbols.length > 0) setOhlcvRepairSymbols_(repairSymbols);
-  writeProcessLog_("OHLCV", "空または無効なtimestampのOHLCV行を削除し、対象銘柄を再取得キューへ入れました。", {
+  writeProcessLog_("OHLCV", "空・無効・対象外時刻のOHLCV行を削除し、対象銘柄を再取得キューへ入れました。", {
     context: context || "",
     scannedRows: scanRows,
     deletedRows: deleteRows.length,
@@ -4358,7 +4389,8 @@ function addQuickRepairFailedMarkers_(failedRows, sessionInfo, group) {
   group.dates.forEach(dateStr => {
     const key = group.symbol + "|" + dateStr;
     if (sessionInfo.markerMap[key]) return;
-    failedRows.push(makeGapFailedRow_(group.symbol, dateStr));
+    makeGapFailedRows_(group.symbol, dateStr, sessionInfo.periodMap, null)
+      .forEach(row => failedRows.push(row));
     sessionInfo.markerMap[key] = true;
   });
 }
@@ -4441,7 +4473,8 @@ function processQuickRepairGroups_(sheet, groups, sessionInfo, minSessions) {
         if (afterCount >= minSessions) {
           summary.repairedDates++;
         } else {
-          failedRows.push(makeGapFailedRow_(meta.symbol, dateStr));
+          makeGapFailedRows_(meta.symbol, dateStr, sessionInfo.periodMap, fetchedPeriodMap)
+            .forEach(row => failedRows.push(row));
           sessionInfo.markerMap[key] = true;
           summary.failedDates++;
         }
@@ -5298,6 +5331,7 @@ function purgeBogusGapRepairRows() {
 /**
  * 旧ロジック由来の残骸を安全に整理する one-shot（再開可能バッチ版）。
  * - 空timestamp行を削除
+ * - 09:00 / 13:00 以外のOHLCV timestamp行を削除
  * - 長期滞留の GAP_FAILED を削除
  *
  * 使い方:
@@ -5332,6 +5366,7 @@ function cleanupLegacyGapFailedAndEmptyTimestamps(dryRun) {
       nextRow: 2,
       scannedRows: 0,
       emptyTimestamp: 0,
+      invalidSessionTimestamp: 0,
       staleGapFailed: 0,
       deletedRows: 0,
       chunks: 0
@@ -5356,6 +5391,7 @@ function cleanupLegacyGapFailedAndEmptyTimestamps(dryRun) {
         dryRun: isDryRun,
         scannedRows: state.scannedRows,
         emptyTimestamp: state.emptyTimestamp,
+        invalidSessionTimestamp: state.invalidSessionTimestamp || 0,
         staleGapFailed: state.staleGapFailed,
         deletedRows: state.deletedRows,
         chunks: state.chunks
@@ -5367,18 +5403,29 @@ function cleanupLegacyGapFailedAndEmptyTimestamps(dryRun) {
     const numRows = Math.min(BATCH_SIZE, lastRow - state.nextRow + 1);
     const values = sh.getRange(state.nextRow, 1, numRows, 3).getValues();
     const deleteRows = [];
+    const repairSymbolSet = {};
     let chunkEmpty = 0;
+    let chunkInvalidSession = 0;
     let chunkStale = 0;
 
     for (let i = 0; i < values.length; i++) {
       const rowNum = state.nextRow + i;
       const ts = values[i][0];
       const alertId = String(values[i][1] || "").trim();
+      const sym = String(values[i][2] || "").trim();
 
       const isEmptyTs = !(ts instanceof Date) || isNaN(ts.getTime());
       if (isEmptyTs) {
         deleteRows.push(rowNum);
+        if (sym) repairSymbolSet[sym] = true;
         chunkEmpty++;
+        continue;
+      }
+
+      if (!isOhlcvSessionTimestamp_(ts)) {
+        deleteRows.push(rowNum);
+        if (sym) repairSymbolSet[sym] = true;
+        chunkInvalidSession++;
         continue;
       }
 
@@ -5386,12 +5433,15 @@ function cleanupLegacyGapFailedAndEmptyTimestamps(dryRun) {
       const ageMs = nowMs - ts.getTime();
       if (ageMs >= forcePurgeMs) {
         deleteRows.push(rowNum);
+        if (sym) repairSymbolSet[sym] = true;
         chunkStale++;
       }
     }
 
     if (!isDryRun && deleteRows.length > 0) {
       deleteRowsByRowNums_(sh, deleteRows);
+      const repairSymbols = Object.keys(repairSymbolSet).sort();
+      if (repairSymbols.length > 0) setOhlcvRepairSymbols_(repairSymbols);
       state.deletedRows += deleteRows.length;
       state.nextRow = state.nextRow + numRows - deleteRows.length;
     } else {
@@ -5400,11 +5450,12 @@ function cleanupLegacyGapFailedAndEmptyTimestamps(dryRun) {
 
     state.scannedRows += numRows;
     state.emptyTimestamp += chunkEmpty;
+    state.invalidSessionTimestamp = (state.invalidSessionTimestamp || 0) + chunkInvalidSession;
     state.staleGapFailed += chunkStale;
     state.chunks += 1;
     props.setProperty(STATE_KEY, JSON.stringify(state));
 
-    console.log(`[cleanupLegacy] chunk=${state.chunks} scanned=${state.scannedRows} deleteCandidates=${chunkEmpty + chunkStale} nextRow=${state.nextRow}`);
+    console.log(`[cleanupLegacy] chunk=${state.chunks} scanned=${state.scannedRows} deleteCandidates=${chunkEmpty + chunkInvalidSession + chunkStale} invalidSession=${chunkInvalidSession} nextRow=${state.nextRow}`);
   }
 
   deleteTriggersByHandler_(RESUME_HANDLER);
