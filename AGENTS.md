@@ -20,7 +20,8 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 | 関数 | スケジュール | 役割 |
 |------|-------------|------|
 | `buildAndSendWeeklyReport` | 土曜 9:05 | 週次レポート送信 |
-| `fetchOHLCVForNewAlerts` | 毎日 16:10 | 全銘柄の OHLCV データ取得 |
+| `fetchOHLCVForNewAlertsMidday` | 毎日 13:30 | 当日AM分までのOHLCV先行取得（後続チェーンなし） |
+| `fetchOHLCVForNewAlerts` | 毎日 16:00 | 全銘柄の OHLCV データ取得→日次メンテ→GAP修復 |
 | `syncMarketHolidays` | 毎月1日 3:10 | 祝日カレンダー同期 |
 | `purgeOldOhlcvDataDaily` | 毎日 2:00 | 古い OHLCV データ削除 |
 
@@ -30,6 +31,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 |---|---|---|
 | `runDailyMaintenanceTrigger` | OHLCV PHASE4完了後 | `runDailyMaintenance` を起動 |
 | `quickRepairTrigger` | `runDailyMaintenance` 完了後 | `quickRepairRecentGaps` を起動 |
+| `resumeOHLCVFetchMidday` | 13:30先行OHLCV取得の再開時 | `fetchOHLCVForNewAlertsMidday` を再起動 |
 | `resumeOHLCVFetch` | OHLCV フェーズ再開時 | `fetchOHLCVForNewAlerts` を再起動 |
 | `resumeDailyMaintenance` | `runDailyMaintenance` 再開時 | `runDailyMaintenanceInternal_` を再起動 |
 | `resumeQuickRepair` | `quickRepairRecentGaps` 再開時 | ギャップ修復を再起動 |
@@ -61,6 +63,11 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 | `DISCORD_WEBHOOK` | ✅ | OHLCV 完了通知送信先 |
 | `GITHUB_PAT` | 任意 | GitHub Actions (`optimize.yml`) トリガー用 PAT |
 | `OHLCV_CURRENT_PHASE` | 内部 | OHLCV 取得フェーズ管理（1〜4） |
+| `OHLCV_MIDDAY_PROGRESS_INDEX` | 内部 | 13:30 OHLCV先行取得の再開カーソル |
+| `OHLCV_MIDDAY_SYMBOL_LIST` | 内部 | 13:30 OHLCV先行取得の対象銘柄リスト |
+| `OHLCV_MIDDAY_NEW_ALERT_COUNT` | 内部 | 13:30 OHLCV先行取得で行が取れた銘柄数 |
+| `OHLCV_MIDDAY_LAST_TS_MAP` | 内部 | 13:30 OHLCV先行取得用の銘柄別最終timestamp |
+| `OHLCV_MIDDAY_REFRESH_ID` | 内部 | 13:30 OHLCV先行取得の実行ID（`MIDDAY_yyyy-mm-dd`） |
 | `DAILY_MAINT_CURSOR` | 内部 | `runDailyMaintenance` の再開カーソル |
 | `QUICK_REPAIR_STATE` | 内部 | `quickRepairRecentGaps` の再開カーソル（v6: `nextIndex` / `processedGroups` / `totalRows` など） |
 | `QUICK_REPAIR_TAIL_CLEANUP_STATE` | 内部 | GAP修復入口での末尾不正timestamp掃除の実行済み状態。営業日だけでなく `lastRow` 増加時は再チェックする |
@@ -90,7 +97,9 @@ GAS の実行上限は **6分**。長時間処理はどちらかのパターン�
 
 ### 日次処理の実行チェーン
 
-`fetchOHLCVForNewAlerts`（16:10 直接トリガー）が起点：
+`fetchOHLCVForNewAlertsMidday`（13:30 直接トリガー）は、当日AM分までのOHLCV先行取得だけを行う。完了時はDiscordのOHLCV完了通知だけを送り、`runDailyMaintenanceTrigger` / GitHub Actions / `quickRepairTrigger` には進まない。当日分はAM行（シートtimestamp `09:00 JST`）だけ保存し、当日PM行（`13:00 JST`）や14:00以降のYahoo足、15:30終値スナップショットは保存しない。途中中断・完了時は `dedupeAndSortOhlcv_()` で `ohlcv_4h` をtimestamp昇順へ戻す。
+
+`fetchOHLCVForNewAlerts`（16:00 直接トリガー）が本番チェーンの起点：
 
 ```
 fetchOHLCVForNewAlerts → (PHASE1→2→3→4)
@@ -101,6 +110,7 @@ fetchOHLCVForNewAlerts → (PHASE1→2→3→4)
 ```
 
 各ワンショットトリガーのハンドラーはラッパー関数（例: `runDailyMaintenanceTrigger`）であり、起動直後に自分自身を `deleteTriggersByHandler_` で削除してから本体を呼ぶ。
+16:00本番チェーン開始時は、残っている `resumeOHLCVFetchMidday` と13:30専用プロパティをクリアしてから通常PHASEを開始する。13:30で既に書き込まれたOHLCV行はシート上の成果として引き継ぎ、16:00側が通常どおり再取得・重複排除する。
 
 ### OHLCV 取得フロー（4フェーズ）
 
@@ -167,6 +177,8 @@ Yahoo Finance 1h足は JPX の時間足を区間末尾側の時刻で返すた�
 `buildWeeklySummaryText_` はDiscord投稿文を生成する。`VARIANT_HISTORY_V1` プロパティで過去3回分の文言パターンを記録し、直近と同じ表現を避けるロジックがある（`pushUniqueVariant_`）。
 
 ## よく使うデバッグ・手動操作関数
+
+一時デバッグ・one-shot補修関数は原則として恒久化しない。復旧・監査用として残す手動関数は、この一覧か関連セクションに用途を明記する。
 
 ```javascript
 setupAllTriggers()                    // トリガー全リセット（固定トリガーのみ再登録）
