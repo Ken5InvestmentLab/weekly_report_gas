@@ -1,0 +1,9 @@
+.env
+*.env
+*credentials*.json
+*service-account*.json
+token.json
+
+premium_worker/.env
+premium_worker/out/
+premium_worker/state/

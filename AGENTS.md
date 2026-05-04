@@ -6,6 +6,12 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 天底極致スコアリングBot の週次レポート・OHLCV管理を担う Google Apps Script (GAS) プロジェクト。TradingView からのアラート Webhook を受信し、JPX 銘柄の中期パフォーマンス（5/10/20/40営業日後）を追跡してDiscordに週次レポートを送信する。
 
+## プレミアム通知 worker
+
+- `premium_worker/` は既存GAS本体から独立したCodex automation用の読み取り専用worker。プレミアム通知対応では、既存機能保護を最優先し、`gas.txt` / `doPost` / 既存トリガー / `alerts_raw` スキーマを変更しない
+- workerはGoogle Sheets APIで `alerts_raw` を読むだけにし、投稿済み状態は `premium_worker/state/`、生成中ファイルは `premium_worker/out/` に置く（どちらもgit管理しない）
+- Codex automationは毎時起動してよいが、worker側のJST時間ゲート（既定 `PREMIUM_ALLOWED_JST_HOURS=14,16`）で対象時間以外は即終了する
+
 ## デプロイ・実行方法
 
 - GAS プロジェクトは Google Apps Script エディタ上で管理（ファイルは `.gs` 拡張子）
