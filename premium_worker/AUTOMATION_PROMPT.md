@@ -20,6 +20,10 @@ Run the premium alert worker for the weekly_report_gas repository.
    open and scan the company's official IR/news disclosure list and an
    IRBANK/TDnet-style disclosure list for the symbol. Check at least the 45
    days before `receivedAt` and any newer disclosures visible at run time.
+   If the IR library has a newer quarterly result, monthly data, guidance
+   revision, asset-sale/special-gain notice, shareholder-return policy update,
+   or other current disclosure, prioritize that newer item over an older annual
+   earnings presentation.
    Do not conclude from only "no earnings release" or "no guidance revision";
    non-earnings disclosures such as warrant exercise/transfer, M&A progress,
    headquarters relocation, capital allocation, or business progress can be the
@@ -65,7 +69,8 @@ Run the premium alert worker for the weekly_report_gas repository.
     for that alert instead of posting it.
 
 If `PREMIUM_LOG_SPREADSHEET_ID` is configured, the worker records post/fail
-events in that separate spreadsheet and automatically deletes old active log
+events in that separate spreadsheet, batches post log rows once per run, retries
+transient Sheets 429/5xx responses, and automatically deletes old active log
 rows. Do not use the existing GAS spreadsheet as the premium log spreadsheet.
 
 Do not edit `gas.txt`, do not modify GAS triggers, and do not write to the

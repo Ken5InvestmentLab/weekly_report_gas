@@ -145,38 +145,45 @@ async function post(opts) {
   if (!reports.length) throw new Error("report file contains no reports");
 
   const results = [];
-  for (const report of reports) {
-    const embed = buildEmbed(report);
-    const payload = {
-      username: env("DISCORD_PREMIUM_USERNAME") || "天底極致 Premium Report",
-      allowed_mentions: { parse: [] },
-      embeds: [embed]
-    };
+  const postLogEvents = [];
+  try {
+    for (const report of reports) {
+      const embed = buildEmbed(report);
+      const payload = {
+        username: env("DISCORD_PREMIUM_USERNAME") || "天底極致 Premium Report",
+        allowed_mentions: { parse: [] },
+        embeds: [embed]
+      };
 
-    if (dryRun) {
-      results.push({ alertId: report.alertId, dryRun: true, payload });
-      continue;
+      if (dryRun) {
+        results.push({ alertId: report.alertId, dryRun: true, payload });
+        continue;
+      }
+
+      await postDiscord(webhookUrl, payload);
+      const claim = state.claims[report.alertId] || {};
+      const symbolCode = String(report.symbolCode || claim.symbolCode || extractSymbolCodeFromUrl(embed.url) || "").trim();
+      state.posted[report.alertId] = {
+        postedAt: new Date().toISOString(),
+        symbolCode,
+        symbolName: String(report.symbolName || claim.symbolName || ""),
+        title: embed.title,
+        url: embed.url || "",
+        sourceCount: countUrls(JSON.stringify(embed))
+      };
+      delete state.claims[report.alertId];
+      delete state.failed[report.alertId];
+      results.push({ alertId: report.alertId, posted: true });
+      postLogEvents.push(buildPostLogEvent(report, embed, claim));
+      saveState(statePath, state);
     }
-
-    await postDiscord(webhookUrl, payload);
-    const claim = state.claims[report.alertId] || {};
-    const symbolCode = String(report.symbolCode || claim.symbolCode || extractSymbolCodeFromUrl(embed.url) || "").trim();
-    state.posted[report.alertId] = {
-      postedAt: new Date().toISOString(),
-      symbolCode,
-      symbolName: String(report.symbolName || claim.symbolName || ""),
-      title: embed.title,
-      url: embed.url || "",
-      sourceCount: countUrls(JSON.stringify(embed))
-    };
-    delete state.claims[report.alertId];
-    delete state.failed[report.alertId];
-    results.push({ alertId: report.alertId, posted: true });
-    saveState(statePath, state);
-    await writePremiumLogEventsSafe([buildPostLogEvent(report, embed, claim)]);
+  } finally {
+    if (!dryRun) {
+      saveState(statePath, state);
+      await writePremiumLogEventsSafe(postLogEvents);
+    }
   }
 
-  if (!dryRun) saveState(statePath, state);
   console.log(JSON.stringify({ ok: true, posted: results.filter(r => r.posted).length, results }, null, 2));
 }
 
@@ -406,6 +413,7 @@ function buildEmbed(report) {
   assertDescriptiveLinkLabels(alertId, fieldMap);
   assertJapaneseNarrativeFields(alertId, fieldMap);
   assertNoNarrowDisclosureCaveat(alertId, fieldMap);
+  assertNoStaleSingleMaterialSummary(alertId, fieldMap);
   const title = buildEmbedTitle(report);
 
   const fieldNames = [
@@ -474,6 +482,15 @@ function assertNoNarrowDisclosureCaveat(alertId, fieldMap) {
   ];
   if (narrowPatterns.some(pattern => pattern.test(materials))) {
     throw new Error(`report ${alertId} field 足元材料 is too narrowly scoped; check company IR/TDnet for non-earnings disclosures`);
+  }
+}
+
+function assertNoStaleSingleMaterialSummary(alertId, fieldMap) {
+  const materials = String(fieldMap.get("足元材料") || "");
+  const reliesOnAnnualPresentation = /20[0-9]{2}年度決算説明資料を確認/.test(materials);
+  const mentionsRecentIr = /(第[１1一]四半期|月次|業績予想|固定資産|特別利益|最新IR|最新資料)/.test(materials);
+  if (reliesOnAnnualPresentation && !mentionsRecentIr) {
+    throw new Error(`report ${alertId} field 足元材料 may be stale; scan the latest IR library and newer disclosures before relying on an annual presentation`);
   }
 }
 
@@ -621,20 +638,16 @@ async function readSheetValues(spreadsheetId, range, accessToken) {
   const url = new URL(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}`);
   url.searchParams.set("majorDimension", "ROWS");
   url.searchParams.set("valueRenderOption", "FORMATTED_VALUE");
-  const response = await fetch(url, {
+  const data = await fetchGoogleJson("Sheets read", url, {
     headers: { Authorization: `Bearer ${accessToken}` }
   });
-  if (!response.ok) {
-    throw new Error(`Sheets API failed: HTTP ${response.status} ${(await response.text()).slice(0, 500)}`);
-  }
-  const data = await response.json();
   return data.values || [];
 }
 
 async function updateSheetValues(spreadsheetId, range, values, accessToken) {
   const url = new URL(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}`);
   url.searchParams.set("valueInputOption", "USER_ENTERED");
-  const response = await fetch(url, {
+  return fetchGoogleJson("Sheets update", url, {
     method: "PUT",
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -642,17 +655,13 @@ async function updateSheetValues(spreadsheetId, range, values, accessToken) {
     },
     body: JSON.stringify({ range, majorDimension: "ROWS", values })
   });
-  if (!response.ok) {
-    throw new Error(`Sheets update failed: HTTP ${response.status} ${(await response.text()).slice(0, 500)}`);
-  }
-  return response.json();
 }
 
 async function appendSheetValues(spreadsheetId, range, values, accessToken) {
   const url = new URL(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}:append`);
   url.searchParams.set("valueInputOption", "USER_ENTERED");
   url.searchParams.set("insertDataOption", "INSERT_ROWS");
-  const response = await fetch(url, {
+  return fetchGoogleJson("Sheets append", url, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -660,16 +669,12 @@ async function appendSheetValues(spreadsheetId, range, values, accessToken) {
     },
     body: JSON.stringify({ majorDimension: "ROWS", values })
   });
-  if (!response.ok) {
-    throw new Error(`Sheets append failed: HTTP ${response.status} ${(await response.text()).slice(0, 500)}`);
-  }
-  return response.json();
 }
 
 async function batchUpdateSpreadsheet(spreadsheetId, requests, accessToken) {
   if (!requests.length) return {};
   const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}:batchUpdate`;
-  const response = await fetch(url, {
+  return fetchGoogleJson("Sheets batchUpdate", url, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -677,23 +682,39 @@ async function batchUpdateSpreadsheet(spreadsheetId, requests, accessToken) {
     },
     body: JSON.stringify({ requests })
   });
-  if (!response.ok) {
-    throw new Error(`Sheets batchUpdate failed: HTTP ${response.status} ${(await response.text()).slice(0, 500)}`);
-  }
-  return response.json();
 }
 
 async function getSpreadsheetSheets(spreadsheetId, accessToken) {
   const url = new URL(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}`);
   url.searchParams.set("fields", "sheets.properties(sheetId,title)");
-  const response = await fetch(url, {
+  const data = await fetchGoogleJson("Sheets metadata", url, {
     headers: { Authorization: `Bearer ${accessToken}` }
   });
-  if (!response.ok) {
-    throw new Error(`Sheets metadata failed: HTTP ${response.status} ${(await response.text()).slice(0, 500)}`);
-  }
-  const data = await response.json();
   return (data.sheets || []).map(sheet => sheet.properties);
+}
+
+async function fetchGoogleJson(label, url, options) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const response = await fetch(url, options);
+    const body = await response.text();
+    if (response.ok) return body ? JSON.parse(body) : {};
+    if (isRetriableGoogleStatus(response.status) && attempt < 4) {
+      await sleep(googleRetryDelayMs(response, body, attempt));
+      continue;
+    }
+    throw new Error(`${label} failed: HTTP ${response.status} ${body.slice(0, 500)}`);
+  }
+  throw new Error(`${label} failed after retries`);
+}
+
+function isRetriableGoogleStatus(status) {
+  return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+}
+
+function googleRetryDelayMs(response, body, attempt) {
+  const retryAfter = parseRetryAfterMs(response, body);
+  if (retryAfter !== 1000) return Math.min(retryAfter, 90000);
+  return Math.min(5000 * (2 ** attempt), 60000);
 }
 
 async function ensureSheetWithHeader(spreadsheetId, sheetName, headers, accessToken) {
@@ -720,8 +741,8 @@ async function writePremiumLogEventsSafe(events) {
     const config = getPremiumLogConfig();
     if (!config) return;
     const token = await getGoogleAccessToken([SHEETS_WRITE_SCOPE]);
-    await ensureSheetWithHeader(config.spreadsheetId, config.logSheetName, LOG_HEADERS, token);
-    await deleteOldPremiumLogRows(config, token);
+    const sheetId = await ensureSheetWithHeader(config.spreadsheetId, config.logSheetName, LOG_HEADERS, token);
+    await deleteOldPremiumLogRows(config, token, sheetId);
     await appendSheetValues(
       config.spreadsheetId,
       `${quoteSheetName(config.logSheetName)}!A:${columnName(LOG_HEADERS.length)}`,
@@ -737,9 +758,7 @@ async function writePremiumLogEventsSafe(events) {
   }
 }
 
-async function deleteOldPremiumLogRows(config, accessToken) {
-  const sheetId = await ensureSheetWithHeader(config.spreadsheetId, config.logSheetName, LOG_HEADERS, accessToken);
-
+async function deleteOldPremiumLogRows(config, accessToken, sheetId) {
   const range = `${quoteSheetName(config.logSheetName)}!A2:${columnName(LOG_HEADERS.length)}`;
   const values = await readSheetValues(config.spreadsheetId, range, accessToken);
   if (!values.length) return;
@@ -1258,6 +1277,20 @@ function selfTest() {
       { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
     ]
   }), /too narrowly scoped/);
+  assert.throws(() => buildEmbed({
+    alertId: "a9",
+    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    symbolCode: "1234",
+    symbolName: "テスト",
+    fields: [
+      { name: "事業概要", value: "通信販売と法人向けサービスを扱う小売企業で、在庫管理、物流費、販促効率、顧客基盤の維持が収益性を左右する会社。" },
+      { name: "足元材料", value: "2025年度決算説明資料を確認し、株主・投資家情報や事業内容ページもSourcesで参照。株主還元方針変更、優待廃止、再建計画など、収益改善と株主政策が同時に確認材料になっている。" },
+      { name: "ファンダ要点", value: "黒字化計画は重要な材料だが、小売事業では在庫回転、粗利率、広告費、物流費の改善が伴う必要がある。既存顧客基盤を活かした再成長がどこまで進むかを確認したい。" },
+      { name: "注意点", value: "カタログやEC需要の鈍化、在庫評価、物流費、広告費、構造改革費用に注意。還元方針変更は短期需給に影響しやすく、本業改善と分けて見る必要がある。" },
+      { name: "開示リンク", value: "[2025年度 決算説明資料](https://example.com/2025_presentation.pdf)" },
+      { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
+    ]
+  }), /may be stale/);
   const detailEmbed = buildEmbed({
     alertId: "a7",
     url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",

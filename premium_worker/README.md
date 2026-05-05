@@ -125,6 +125,10 @@ items visible during the run. Do not treat "no earnings release" or "no
 guidance revision" as enough; warrant exercise/transfer, M&A progress,
 headquarters relocation, capital allocation, and business progress disclosures
 can be the main material.
+If a newer quarterly result, monthly data, guidance revision, asset-sale or
+special-gain notice, shareholder-return policy update, or other current IR
+library item exists, use that newer disclosure before relying on an older annual
+earnings presentation.
 Use direct disclosure URLs only in `開示リンク`: PDF URLs, TDnet
 `td_download.cgi` file URLs, IRBANK individual disclosure pages, or individual
 company/PR disclosure detail pages. Use reference page URLs only in `Sources`:
@@ -146,3 +150,9 @@ score. If no disclosure link can be verified, set `開示リンク` to
 label such as `ポジティブ材料`, `ネガティブ材料`, `様子見`, or `混在/要確認`.
 The worker uses it to sort embeds and choose the embed color, but it must not
 be phrased as a buy/sell recommendation.
+
+When `PREMIUM_LOG_SPREADSHEET_ID` is set, `post` writes premium log rows to
+that separate spreadsheet in one batch per run and retries transient Google
+Sheets 429/5xx responses. Discord posting is still treated as the primary
+delivery path; log write failures are reported as warnings so a rate-limit on
+the log spreadsheet does not duplicate or block alert posts.
