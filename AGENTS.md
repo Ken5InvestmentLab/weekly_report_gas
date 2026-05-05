@@ -13,6 +13,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 - プレミアム投稿ログをスプレッドシートへ残す場合は、`PREMIUM_LOG_SPREADSHEET_ID` で既存GAS対象とは別のスプレッドシートを使い、古いログはworker側で自動削除する
 - Codex automationはJST `13:05` と `15:36` の2回起動する。worker側の時間ゲートは既定 `PREMIUM_ALLOWED_JST_HOURS=13,15` / `PREMIUM_ALLOWED_JST_MINUTES=13:05,15:36` とし、対象時間以外は即終了する。抽出対象は既定で `signal_type=BOTTOM`、`received_at` 新しい順、ロック粒度はシンボルではなく `alert_id` 単位。同一シンボルでも別 `alert_id` は別アラートとして扱い、一度投稿または手動ロックした `alert_id` は再選択しない
 - プレミアムworkerは既定で `PREMIUM_MAX_ALERTS_PER_RUN=0` / `PREMIUM_SCAN_MAX_ROWS=0` とし、全行を読み込んで未送信の対象 `alert_id` をすべてclaimする。正の値は手動テストなどで意図的に件数制限したい場合だけ使う
+- `collect` が `claimedCount: 0` の場合は何も投稿しない。`post` もアクティブなclaimが残っている `alert_id` だけをDiscord投稿対象にし、古い `premium_reports.json` や投稿済み `alert_id` はskipして再投稿しない
 - プレミアムEmbedのTradingViewリンクはJPX銘柄でも `TSE:{code}` を使う（`TYO:` は開けない銘柄がある）。タイトルはチャートリンクだと分かる文言にする
 - プレミアム分析は決算だけに限定せず、業績修正・自社株買い・配当/資本政策・中計・M&A・業務提携・大型契約・新株予約権の行使/譲渡・資金使途・本店移転・規制/ガバナンスなど検証できる適時材料も対象にする。`開示リンク未確認` や材料なし判断の前に、公式IR/ニュース一覧とIRBANK/TDnet系一覧を少なくとも `received_at` 前45日分（実行時に見える新しい開示も含む）確認する。公式IRライブラリに新しい四半期決算、月次、業績予想修正、固定資産譲渡/特別利益、株主還元方針などがある場合は、古い年度決算説明資料だけで足元材料を作らない。`材料インパクト` は根拠付きの `ポジティブ材料` / `ネガティブ材料` / `様子見` / `混在/要確認` に留め、売買推奨・目標株価・スコア化はしない
 - プレミアムEmbedの `開示リンク` はPDF、TDnet `td_download.cgi`、IRBANK個別開示ページ、会社/PRの個別開示詳細ページなど、資料または開示への直リンクだけにし、IR一覧・会社概要・ニュース一覧などの参照ページは `Sources` に分ける。リンクラベルは `開示1` / `出典1` / `会社IR` のような汎用名ではなく、実際の資料タイトルまたはページタイトルにする。本文は日本語で、各分析欄に日付・数値・事業ドライバー・確認点を含め、1行メモのような薄い要約にしない

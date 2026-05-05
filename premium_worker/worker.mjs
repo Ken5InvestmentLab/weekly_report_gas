@@ -109,6 +109,7 @@ async function collect(opts) {
     state.claims[alert.alertId] = {
       claimId,
       claimedAt: now.toISOString(),
+      signalType: alert.signalType,
       symbolCode: alert.symbolCode,
       symbolName: alert.symbolName
     };
@@ -148,6 +149,13 @@ async function post(opts) {
   const postLogEvents = [];
   try {
     for (const report of reports) {
+      const claim = state.claims[report.alertId] || null;
+      const skipReason = getPostSkipReason(report.alertId, state, claim);
+      if (skipReason) {
+        results.push({ alertId: report.alertId, skipped: true, reason: skipReason });
+        continue;
+      }
+
       await resolveIrbankPdfDisclosureLinks(report);
       const embed = buildEmbed(report);
       const payload = {
@@ -163,7 +171,6 @@ async function post(opts) {
 
       const discordMessage = await postDiscord(webhookUrl, payload);
       const discordMessageUrl = buildDiscordMessageUrl(discordMessage);
-      const claim = state.claims[report.alertId] || {};
       const symbolCode = String(report.symbolCode || claim.symbolCode || extractSymbolCodeFromUrl(embed.url) || "").trim();
       state.posted[report.alertId] = {
         postedAt: new Date().toISOString(),
@@ -188,6 +195,12 @@ async function post(opts) {
   }
 
   console.log(JSON.stringify({ ok: true, posted: results.filter(r => r.posted).length, results }, null, 2));
+}
+
+function getPostSkipReason(alertId, state, claim) {
+  if (state.posted?.[alertId]) return "already posted";
+  if (!claim?.claimId) return "no active claim";
+  return "";
 }
 
 async function fail(opts) {
@@ -1510,6 +1523,9 @@ function selfTest() {
   }, { title: "千趣会 (8165) | TradingView チャート", url: "https://www.tradingview.com/chart/?symbol=TSE%3A8165" }, {}, "https://discord.com/channels/1/2/3");
   assert.equal(linkedLogEvent.reason, "[混在/要確認: 1Qは売上高91.66億円で前年同期比7.1%減ながら、営業損失は9.88億円と前年同期から損失幅が縮小。](https://discord.com/channels/1/2/3)");
   assert.equal(extractIrbankPdfUrlFromHtml('<a href="https://f.irbank.net/pr/20260401/140120260326590425.pdf">PDF</a>', "140120260326590425"), "https://f.irbank.net/pr/20260401/140120260326590425.pdf");
+  assert.equal(getPostSkipReason("posted-alert", { posted: { "posted-alert": {} }, claims: {} }, null), "already posted");
+  assert.equal(getPostSkipReason("unclaimed-alert", { posted: {}, claims: {} }, null), "no active claim");
+  assert.equal(getPostSkipReason("claimed-alert", { posted: {}, claims: { "claimed-alert": { claimId: "c1" } } }, { claimId: "c1" }), "");
   const detailEmbed = buildEmbed({
     alertId: "a7",
     url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
