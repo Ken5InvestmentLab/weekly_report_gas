@@ -28,8 +28,12 @@ Run the premium alert worker for the weekly_report_gas repository.
    the TradingView `TSE:` prefix, not `TYO:`. The worker normalizes TradingView
    embed titles to `銘柄名 (証券コード) | TradingView チャート`.
 7. Put direct disclosure URLs in `開示リンク` when verified. If no disclosure link
-   can be verified, write `開示リンク未確認`.
+   can be verified, write `開示リンク未確認`. Link labels must describe the
+   material, such as `第3四半期決算短信PDF`, `業績予想修正PDF`,
+   `会社IR`, or `中期経営計画`; do not use generic labels like `開示1`.
 8. Put 2-4 source URLs in `Sources`. Do not invent URLs or cite unverified pages.
+   Source link labels must also be descriptive; do not use `出典1`, `Source1`,
+   or similarly opaque labels.
 9. Do not write buy/sell recommendations, target prices, or any additional score.
    Avoid wording such as `買い推奨`, `売り推奨`, `買うべき`, `売るべき`,
    `目標株価`, `利確`, or `損切り`.

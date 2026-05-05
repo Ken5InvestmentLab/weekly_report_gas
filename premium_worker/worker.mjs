@@ -401,6 +401,7 @@ function buildEmbed(report) {
   if (!hasUrl(fieldMap.get("Sources"))) {
     throw new Error(`report ${alertId} must include at least one URL in Sources`);
   }
+  assertDescriptiveLinkLabels(alertId, fieldMap);
   assertJapaneseNarrativeFields(alertId, fieldMap);
   const title = buildEmbedTitle(report);
 
@@ -449,6 +450,31 @@ function assertJapaneseNarrativeFields(alertId, fieldMap) {
 
 function hasJapaneseText(value) {
   return /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/u.test(String(value || ""));
+}
+
+function assertDescriptiveLinkLabels(alertId, fieldMap) {
+  for (const name of ["開示リンク", "Sources"]) {
+    const value = String(fieldMap.get(name) || "").trim();
+    if (name === "開示リンク" && value === "開示リンク未確認") continue;
+    for (const label of extractMarkdownLinkLabels(value)) {
+      if (isGenericLinkLabel(label)) {
+        throw new Error(`report ${alertId} field ${name} has non-descriptive link label: ${label}`);
+      }
+    }
+  }
+}
+
+function extractMarkdownLinkLabels(value) {
+  const labels = [];
+  const pattern = /\[([^\]\n]+)\]\(https?:\/\/[^)\s]+(?:\s+"[^"]*")?\)/g;
+  let match;
+  while ((match = pattern.exec(String(value || ""))) !== null) labels.push(match[1].trim());
+  return labels;
+}
+
+function isGenericLinkLabel(label) {
+  const text = String(label || "").trim();
+  return /^(?:開示|出典|資料|リンク|link|source|sources|ir|pdf|url)\s*[0-9０-９]*$/i.test(text);
 }
 
 function resolveEmbedColor(report, fieldMap) {
@@ -1076,7 +1102,7 @@ function selfTest() {
       { name: "ファンダ要点", value: "売上と利益の推移を要確認。" },
       { name: "注意点", value: "材料の鮮度に注意。" },
       { name: "開示リンク", value: "" },
-      { name: "Sources", value: "[IR](https://example.com/ir)" }
+      { name: "Sources", value: "[会社IR](https://example.com/ir)" }
     ]
   });
   assert.equal(embed.title, "テスト (1234) | TradingView チャート");
@@ -1104,9 +1130,23 @@ function selfTest() {
       { name: "ファンダ要点", value: "Profitability matters." },
       { name: "注意点", value: "Watch costs." },
       { name: "開示リンク", value: "開示リンク未確認" },
-      { name: "Sources", value: "[IR](https://example.com/ir)" }
+      { name: "Sources", value: "[会社IR](https://example.com/ir)" }
     ]
   }), /must be written in Japanese/);
+  assert.throws(() => buildEmbed({
+    alertId: "a4",
+    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    symbolCode: "1234",
+    symbolName: "テスト",
+    fields: [
+      { name: "事業概要", value: "製造業の会社。" },
+      { name: "足元材料", value: "直近決算を確認。" },
+      { name: "ファンダ要点", value: "売上と利益の推移を要確認。" },
+      { name: "注意点", value: "材料の鮮度に注意。" },
+      { name: "開示リンク", value: "[開示1](https://example.com/disclosure)" },
+      { name: "Sources", value: "[出典1](https://example.com/ir)" }
+    ]
+  }), /non-descriptive link label/);
   const previousHours = process.env.PREMIUM_ALLOWED_JST_HOURS;
   const previousMinutes = process.env.PREMIUM_ALLOWED_JST_MINUTES;
   process.env.PREMIUM_ALLOWED_JST_HOURS = "13,15";
