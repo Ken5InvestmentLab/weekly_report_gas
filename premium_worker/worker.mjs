@@ -32,7 +32,6 @@ const LOG_HEADERS = [
   "signal_type", "title", "tradingview_url", "disclosure_links",
   "source_urls", "reason"
 ];
-const ARCHIVE_HEADERS = LOG_HEADERS.concat(["archived_at"]);
 
 loadDotEnv(path.join(REPO_ROOT, ".env"));
 loadDotEnv(path.join(WORKER_DIR, ".env"));
@@ -443,8 +442,7 @@ async function writePremiumLogEventsSafe(events) {
     if (!config) return;
     const token = await getGoogleAccessToken([SHEETS_WRITE_SCOPE]);
     await ensureSheetWithHeader(config.spreadsheetId, config.logSheetName, LOG_HEADERS, token);
-    await ensureSheetWithHeader(config.spreadsheetId, config.archiveSheetName, ARCHIVE_HEADERS, token);
-    await archiveOldPremiumLogRows(config, token);
+    await deleteOldPremiumLogRows(config, token);
     await appendSheetValues(
       config.spreadsheetId,
       `${quoteSheetName(config.logSheetName)}!A:${columnName(LOG_HEADERS.length)}`,
@@ -460,32 +458,22 @@ async function writePremiumLogEventsSafe(events) {
   }
 }
 
-async function archiveOldPremiumLogRows(config, accessToken) {
+async function deleteOldPremiumLogRows(config, accessToken) {
   const sheetId = await ensureSheetWithHeader(config.spreadsheetId, config.logSheetName, LOG_HEADERS, accessToken);
-  await ensureSheetWithHeader(config.spreadsheetId, config.archiveSheetName, ARCHIVE_HEADERS, accessToken);
 
   const range = `${quoteSheetName(config.logSheetName)}!A2:${columnName(LOG_HEADERS.length)}`;
   const values = await readSheetValues(config.spreadsheetId, range, accessToken);
   if (!values.length) return;
 
   const cutoffMs = Date.now() - config.retentionDays * 24 * 60 * 60 * 1000;
-  const rowsToArchive = [];
   const rowNumbersToDelete = [];
   values.forEach((row, index) => {
     const eventAtMs = Date.parse(row[0] || "");
     if (Number.isFinite(eventAtMs) && eventAtMs < cutoffMs) {
-      rowsToArchive.push(rowToWidth(row, LOG_HEADERS.length).concat([new Date().toISOString()]));
       rowNumbersToDelete.push(index + 2);
     }
   });
-  if (!rowsToArchive.length) return;
-
-  await appendSheetValues(
-    config.spreadsheetId,
-    `${quoteSheetName(config.archiveSheetName)}!A:${columnName(ARCHIVE_HEADERS.length)}`,
-    rowsToArchive,
-    accessToken
-  );
+  if (!rowNumbersToDelete.length) return;
 
   const requests = buildDeleteRowRequests(sheetId, rowNumbersToDelete);
   await batchUpdateSpreadsheet(config.spreadsheetId, requests, accessToken);
@@ -501,7 +489,6 @@ function getPremiumLogConfig() {
   return {
     spreadsheetId,
     logSheetName: env("PREMIUM_LOG_SHEET_NAME") || "premium_alert_log",
-    archiveSheetName: env("PREMIUM_LOG_ARCHIVE_SHEET_NAME") || "premium_alert_log_archive",
     retentionDays: positiveInt(env("PREMIUM_LOG_RETENTION_DAYS"), 90)
   };
 }

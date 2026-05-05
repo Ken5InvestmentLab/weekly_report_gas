@@ -22,7 +22,7 @@ Run the premium alert worker for the weekly_report_gas repository.
     for that alert instead of posting it.
 
 If `PREMIUM_LOG_SPREADSHEET_ID` is configured, the worker records post/fail
-events in that separate spreadsheet and automatically archives old active log
+events in that separate spreadsheet and automatically deletes old active log
 rows. Do not use the existing GAS spreadsheet as the premium log spreadsheet.
 
 Do not edit `gas.txt`, do not modify GAS triggers, and do not write to the

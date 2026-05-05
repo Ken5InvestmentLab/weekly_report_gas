@@ -50,13 +50,9 @@ By default, this worker records posted/failed alerts only in
 `PREMIUM_LOG_SPREADSHEET_ID` to a separate spreadsheet ID and share that log
 spreadsheet with the service account as **Editor**.
 
-The worker will create/update:
-
-- `premium_alert_log`
-- `premium_alert_log_archive`
-
-Rows older than `PREMIUM_LOG_RETENTION_DAYS` are moved from the active log sheet
-to the archive sheet automatically before new log rows are appended.
+The worker will create/update `premium_alert_log`. Rows older than
+`PREMIUM_LOG_RETENTION_DAYS` are deleted automatically before new log rows are
+appended.
 
 For safety, `PREMIUM_LOG_SPREADSHEET_ID` must be different from
 `PREMIUM_SPREADSHEET_ID`.
