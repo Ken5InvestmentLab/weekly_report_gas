@@ -63,13 +63,21 @@ For safety, `PREMIUM_LOG_SPREADSHEET_ID` must be different from
 node premium_worker/worker.mjs collect
 node premium_worker/worker.mjs post --input premium_worker/out/premium_reports.json
 node premium_worker/worker.mjs fail --alert-id ALERT_ID --reason "insufficient sources"
+node premium_worker/worker.mjs lock-before --date 2026-04-30
 node premium_worker/worker.mjs status
 node premium_worker/worker.mjs self-test
 ```
 
-`collect` runs only at the allowed JST hours by default. Use `--force` for a
-manual test. The default allowed hours are `14,16`, so an hourly Codex
-automation can wake up every hour and exit immediately outside those hours.
+`collect` runs only at the allowed JST slots by default. Use `--force` for a
+manual test. The default slots are `13:10` and `15:40` JST on weekdays. The
+default signal filter is `BOTTOM`, and already-posted alert IDs are never
+selected again. The same symbol may be selected again when TradingView creates
+a different alert ID.
+
+`lock-before` is a local state maintenance command. It reads `alerts_raw` with
+Sheets read-only access and marks every alert ID with `received_at` on or before
+the given JST date as locked in `premium_worker/state/`, without writing to the
+spreadsheet.
 
 ## Report JSON shape
 

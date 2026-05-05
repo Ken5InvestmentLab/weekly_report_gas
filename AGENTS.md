@@ -11,7 +11,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 - `premium_worker/` は既存GAS本体から独立したCodex automation用の読み取り専用worker。プレミアム通知対応では、既存機能保護を最優先し、`gas.txt` / `doPost` / 既存トリガー / `alerts_raw` スキーマを変更しない
 - workerはGoogle Sheets APIで `alerts_raw` を読むだけにし、投稿済み状態は `premium_worker/state/`、生成中ファイルは `premium_worker/out/` に置く（どちらもgit管理しない）
 - プレミアム投稿ログをスプレッドシートへ残す場合は、`PREMIUM_LOG_SPREADSHEET_ID` で既存GAS対象とは別のスプレッドシートを使い、古いログはworker側で自動削除する
-- Codex automationは毎時起動してよいが、worker側のJST時間ゲート（既定 `PREMIUM_ALLOWED_JST_HOURS=14,16`）で対象時間以外は即終了する
+- Codex automationはJST `13:10` と `15:40` の2回起動する。worker側の時間ゲートは既定 `PREMIUM_ALLOWED_JST_HOURS=13,15` / `PREMIUM_ALLOWED_JST_MINUTES=13:10,15:40` とし、対象時間以外は即終了する。抽出対象は既定で `signal_type=BOTTOM`、`received_at` 新しい順、ロック粒度はシンボルではなく `alert_id` 単位。同一シンボルでも別 `alert_id` は別アラートとして扱い、一度投稿または手動ロックした `alert_id` は再選択しない
 - プレミアムEmbedのTradingViewリンクはJPX銘柄でも `TSE:{code}` を使う（`TYO:` は開けない銘柄がある）。タイトルはチャートリンクだと分かる文言にする
 - プレミアム分析は決算だけに限定せず、業績修正・自社株買い・配当/資本政策・中計・M&A・業務提携・大型契約・規制/ガバナンスなど検証できる適時材料も対象にする。`材料インパクト` は根拠付きの `ポジティブ材料` / `ネガティブ材料` / `様子見` / `混在/要確認` に留め、売買推奨・目標株価・スコア化はしない
 

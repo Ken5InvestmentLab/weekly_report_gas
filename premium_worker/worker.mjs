@@ -22,7 +22,9 @@ const RAW_HEADERS = [
 
 const REQUIRED_FIELDS = ["事業概要", "足元材料", "ファンダ要点", "注意点", "開示リンク", "Sources"];
 const OPTIONAL_FIELDS = ["材料インパクト"];
-const DEFAULT_ALLOWED_HOURS = "14,16";
+const DEFAULT_ALLOWED_HOURS = "13,15";
+const DEFAULT_ALLOWED_MINUTES_BY_HOUR = "13:10,15:40";
+const DEFAULT_SIGNAL_TYPES = "BOTTOM";
 const DEFAULT_ALLOWED_WEEKDAYS = "1,2,3,4,5";
 const CLAIM_TTL_MS = 2 * 60 * 60 * 1000;
 const DEFAULT_RETRY_AFTER_MS = 24 * 60 * 60 * 1000;
@@ -51,6 +53,9 @@ try {
       break;
     case "fail":
       await fail(options);
+      break;
+    case "lock-before":
+      await lockBefore(options);
       break;
     case "status":
       status();
@@ -153,8 +158,11 @@ async function post(opts) {
 
     await postDiscord(webhookUrl, payload);
     const claim = state.claims[report.alertId] || {};
+    const symbolCode = String(report.symbolCode || claim.symbolCode || extractSymbolCodeFromUrl(embed.url) || "").trim();
     state.posted[report.alertId] = {
       postedAt: new Date().toISOString(),
+      symbolCode,
+      symbolName: String(report.symbolName || claim.symbolName || ""),
       title: embed.title,
       url: embed.url || "",
       sourceCount: countUrls(JSON.stringify(embed))
@@ -198,6 +206,74 @@ async function fail(opts) {
   saveState(statePath, state);
   await writePremiumLogEventsSafe(failures.map(item => buildFailureLogEvent(item, now)));
   console.log(JSON.stringify({ ok: true, failed: failures.length, failures }, null, 2));
+}
+
+async function lockBefore(opts) {
+  const cutoffDate = String(opts.date || opts.before || "").trim();
+  if (!cutoffDate) throw new Error("lock-before requires --date <yyyy-mm-dd>");
+  const cutoffMs = parseJstDateEndMs(cutoffDate);
+  const spreadsheetId = requiredEnv("PREMIUM_SPREADSHEET_ID", "SPREADSHEET_ID");
+  const sheetName = env("PREMIUM_SHEET_NAME") || "alerts_raw";
+  const statePath = env("PREMIUM_STATE_PATH") || DEFAULT_STATE_PATH;
+  const state = loadState(statePath);
+
+  const token = await getGoogleAccessToken([SHEETS_READONLY_SCOPE]);
+  const values = await readSheetValues(spreadsheetId, `${sheetName}!A4:AH`, token);
+  const rows = mapRawRows(values);
+  const now = new Date().toISOString();
+  const examples = [];
+  let locked = 0;
+  let alreadyLocked = 0;
+  let skippedNoDate = 0;
+
+  for (const row of rows) {
+    const receivedAtMs = parseReceivedAtMs(row.receivedAt || row.signalDate);
+    if (!receivedAtMs) {
+      skippedNoDate++;
+      continue;
+    }
+    if (receivedAtMs > cutoffMs) continue;
+
+    if (state.posted[row.alertId]) {
+      alreadyLocked++;
+    } else {
+      state.posted[row.alertId] = {
+        postedAt: now,
+        lockedAt: now,
+        lockReason: `historical alert received_at <= ${cutoffDate}`,
+        receivedAt: row.receivedAt,
+        signalType: row.signalType,
+        symbolCode: row.symbolCode,
+        symbolName: row.symbolName,
+        title: `${row.symbolName}（${row.symbolCode}）｜Historical lock`,
+        url: row.tradingViewUrl,
+        sourceCount: 0
+      };
+      locked++;
+      if (examples.length < 5) examples.push({
+        alertId: row.alertId,
+        receivedAt: row.receivedAt,
+        signalType: row.signalType,
+        symbolCode: row.symbolCode,
+        symbolName: row.symbolName
+      });
+    }
+    delete state.claims[row.alertId];
+    delete state.failed[row.alertId];
+  }
+
+  saveState(statePath, state);
+  console.log(JSON.stringify({
+    ok: true,
+    cutoffDate,
+    cutoffJstEnd: new Date(cutoffMs).toISOString(),
+    scanned: rows.length,
+    locked,
+    alreadyLocked,
+    skippedNoDate,
+    statePath,
+    examples
+  }, null, 2));
 }
 
 function status() {
@@ -250,7 +326,9 @@ function mapRawRows(values) {
 function selectPendingAlerts(rows, state, now) {
   const retryAfterMs = positiveInt(env("PREMIUM_RETRY_AFTER_MINUTES"), 24 * 60) * 60 * 1000;
   const maxAttempts = positiveInt(env("PREMIUM_MAX_ATTEMPTS"), 3);
-  return rows.filter(row => {
+  const signalTypes = allowedSignalTypes();
+  return [...rows].sort(compareAlertsNewestFirst).filter(row => {
+    if (!signalTypes.has(normalizeSignalType(row.signalType))) return false;
     if (state.posted[row.alertId]) return false;
     const claim = state.claims[row.alertId];
     if (claim && Date.parse(claim.claimedAt || "") + CLAIM_TTL_MS > now.getTime()) return false;
@@ -262,6 +340,41 @@ function selectPendingAlerts(rows, state, now) {
     }
     return true;
   });
+}
+
+function compareAlertsNewestFirst(a, b) {
+  const byReceivedAt = parseReceivedAtMs(b.receivedAt) - parseReceivedAtMs(a.receivedAt);
+  if (byReceivedAt) return byReceivedAt;
+  return String(b.alertId || "").localeCompare(String(a.alertId || ""));
+}
+
+function parseReceivedAtMs(value) {
+  const text = String(value || "").trim();
+  const match = text.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?/);
+  if (match) {
+    const [, y, m, d, hh = "0", mm = "0", ss = "0"] = match;
+    return Date.UTC(Number(y), Number(m) - 1, Number(d), Number(hh) - 9, Number(mm), Number(ss));
+  }
+  const parsed = Date.parse(text);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function parseJstDateEndMs(value) {
+  const text = String(value || "").trim();
+  const match = text.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})$/);
+  if (!match) throw new Error(`invalid JST cutoff date: ${value}`);
+  const [, y, m, d] = match;
+  return Date.UTC(Number(y), Number(m) - 1, Number(d), 14, 59, 59, 999);
+}
+
+function normalizeSignalType(value) {
+  return String(value || "").trim().toUpperCase();
+}
+
+function allowedSignalTypes() {
+  const raw = env("PREMIUM_SIGNAL_TYPES") || DEFAULT_SIGNAL_TYPES;
+  const items = raw.split(",").map(normalizeSignalType).filter(Boolean);
+  return new Set(items.length ? items : [DEFAULT_SIGNAL_TYPES]);
 }
 
 function buildEmbed(report) {
@@ -700,9 +813,13 @@ function evaluateTimeGate(now, force) {
   const jst = getJstParts(now);
   if (force) return { allowed: true, forced: true, ...jst };
   const allowedHours = parseNumberSet(env("PREMIUM_ALLOWED_JST_HOURS") || DEFAULT_ALLOWED_HOURS);
+  const allowedMinutePairs = parseMinutePairs(env("PREMIUM_ALLOWED_JST_MINUTES") || DEFAULT_ALLOWED_MINUTES_BY_HOUR);
   const allowedWeekdays = parseNumberSet(env("PREMIUM_ALLOWED_JST_WEEKDAYS") || DEFAULT_ALLOWED_WEEKDAYS);
   if (allowedHours && !allowedHours.has(jst.jstHour)) {
     return { allowed: false, reason: "outside allowed JST hours", ...jst };
+  }
+  if (allowedMinutePairs && !allowedMinutePairs.has(`${jst.jstHour}:${String(jst.jstMinute).padStart(2, "0")}`)) {
+    return { allowed: false, reason: "outside allowed JST minute slots", ...jst };
   }
   if (allowedWeekdays && !allowedWeekdays.has(jst.jstWeekday)) {
     return { allowed: false, reason: "outside allowed JST weekdays", ...jst };
@@ -715,18 +832,30 @@ function getJstParts(date) {
     timeZone: "Asia/Tokyo",
     hourCycle: "h23",
     weekday: "short",
-    hour: "2-digit"
+    hour: "2-digit",
+    minute: "2-digit"
   }).formatToParts(date);
   const hour = Number(parts.find(p => p.type === "hour")?.value);
+  const minute = Number(parts.find(p => p.type === "minute")?.value);
   const weekdayText = parts.find(p => p.type === "weekday")?.value;
   const weekdayMap = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 };
-  return { jstHour: hour, jstWeekday: weekdayMap[weekdayText] || 0 };
+  return { jstHour: hour, jstMinute: minute, jstWeekday: weekdayMap[weekdayText] || 0 };
 }
 
 function parseNumberSet(value) {
   const text = String(value || "").trim();
   if (!text || text === "*") return null;
   return new Set(text.split(",").map(s => Number(s.trim())).filter(Number.isFinite));
+}
+
+function parseMinutePairs(value) {
+  const text = String(value || "").trim();
+  if (!text || text === "*") return null;
+  const pairs = text.split(",")
+    .map(item => item.trim().match(/^(\d{1,2}):(\d{1,2})$/))
+    .filter(Boolean)
+    .map(([, hour, minute]) => `${Number(hour)}:${String(Number(minute)).padStart(2, "0")}`);
+  return pairs.length ? new Set(pairs) : null;
 }
 
 function loadState(statePath) {
@@ -837,6 +966,17 @@ function normalizeEmbedUrl(value) {
   return normalizeTradingViewUrl(url);
 }
 
+function extractSymbolCodeFromUrl(value) {
+  try {
+    const url = new URL(String(value || ""));
+    const symbol = normalizeTradingViewSymbol(url.searchParams.get("symbol") || "");
+    const match = symbol.match(/^[A-Z]+:(.+)$/i);
+    return match ? match[1] : symbol;
+  } catch {
+    return "";
+  }
+}
+
 function normalizeTradingViewUrl(value) {
   try {
     const url = new URL(value);
@@ -925,9 +1065,44 @@ function selfTest() {
     alertId: "a2",
     fields: REQUIRED_FIELDS.map(name => ({ name, value: name === "Sources" ? "no source" : "x" }))
   }), /Sources/);
-  const gate = evaluateTimeGate(new Date("2026-05-05T05:00:00Z"), false);
-  assert.equal(gate.jstHour, 14);
+  const previousHours = process.env.PREMIUM_ALLOWED_JST_HOURS;
+  const previousMinutes = process.env.PREMIUM_ALLOWED_JST_MINUTES;
+  process.env.PREMIUM_ALLOWED_JST_HOURS = "13,15";
+  process.env.PREMIUM_ALLOWED_JST_MINUTES = "13:10,15:40";
+  const gate1310 = evaluateTimeGate(new Date("2026-05-05T04:10:00Z"), false);
+  const gate1540 = evaluateTimeGate(new Date("2026-05-05T06:40:00Z"), false);
+  const gate1539 = evaluateTimeGate(new Date("2026-05-05T06:39:00Z"), false);
+  assert.equal(gate1310.allowed, true);
+  assert.equal(gate1540.allowed, true);
+  assert.equal(gate1539.allowed, false);
+  assert.equal(gate1539.reason, "outside allowed JST minute slots");
+  restoreEnv("PREMIUM_ALLOWED_JST_HOURS", previousHours);
+  restoreEnv("PREMIUM_ALLOWED_JST_MINUTES", previousMinutes);
+
+  const previousSignalTypes = process.env.PREMIUM_SIGNAL_TYPES;
+  process.env.PREMIUM_SIGNAL_TYPES = "BOTTOM";
+  const selected = selectPendingAlerts([
+    { alertId: "top-new", receivedAt: "2026/05/03 12:00:00", signalType: "TOP", symbolCode: "1111" },
+    { alertId: "bottom-old", receivedAt: "2026/05/01 12:00:00", signalType: "BOTTOM", symbolCode: "1111" },
+    { alertId: "bottom-new", receivedAt: "2026/05/02 12:00:00", signalType: "BOTTOM", symbolCode: "1111" },
+    { alertId: "bottom-posted", receivedAt: "2026/05/03 12:00:00", signalType: "BOTTOM", symbolCode: "2222" }
+  ], {
+    posted: { "bottom-posted": { postedAt: "2026-05-03T03:00:00.000Z" } },
+    failed: {},
+    claims: {}
+  }, new Date("2026-05-05T00:00:00Z"));
+  assert.deepEqual(selected.map(row => row.alertId), ["bottom-new", "bottom-old"]);
+  restoreEnv("PREMIUM_SIGNAL_TYPES", previousSignalTypes);
+  const cutoff = parseJstDateEndMs("2026-05-01");
+  assert.ok(parseReceivedAtMs("2026/05/01 23:59:59") <= cutoff);
+  assert.ok(parseReceivedAtMs("2026/05/02 00:00:00") > cutoff);
+  assert.equal(extractSymbolCodeFromUrl("https://www.tradingview.com/chart/?symbol=TYO%3A8285"), "8285");
   console.log(JSON.stringify({ ok: true, selfTest: "passed" }, null, 2));
+}
+
+function restoreEnv(key, value) {
+  if (value == null) delete process.env[key];
+  else process.env[key] = value;
 }
 
 function printHelp() {
@@ -935,6 +1110,7 @@ function printHelp() {
   node premium_worker/worker.mjs collect [--force]
   node premium_worker/worker.mjs post --input <premium_reports.json> [--dry-run]
   node premium_worker/worker.mjs fail --alert-id <id> --reason <reason>
+  node premium_worker/worker.mjs lock-before --date <yyyy-mm-dd>
   node premium_worker/worker.mjs status
   node premium_worker/worker.mjs self-test`);
 }

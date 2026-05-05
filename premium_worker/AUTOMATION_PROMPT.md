@@ -5,6 +5,10 @@ Run the premium alert worker for the weekly_report_gas repository.
 1. Run `node premium_worker/worker.mjs collect`.
 2. If the command reports `skipped` or `claimedCount: 0`, stop without posting.
 3. Read `premium_worker/out/latest_claim.json`.
+   The worker is configured to claim only `BOTTOM` alerts, newest
+   `received_at` first. Posted or manually locked alert IDs must not be claimed
+   again; do not dedupe by symbol because different alert IDs for the same
+   symbol are separate alerts.
 4. For each claimed alert, use web search to verify a concise fundamental snapshot.
    Prioritize official company IR, TDnet/JPX disclosure pages or PDFs, EDINET,
    and reputable financial news. Do not limit the scan to earnings releases:
