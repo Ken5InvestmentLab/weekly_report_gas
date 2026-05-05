@@ -80,9 +80,10 @@ Codex should create `premium_worker/out/premium_reports.json` like this:
   "reports": [
     {
       "alertId": "example-alert-id",
-      "title": "銘柄名（1234）｜Premium Snapshot",
-      "url": "https://www.tradingview.com/chart/?symbol=TYO%3A1234",
+      "title": "TradingViewチャート｜銘柄名（1234）｜Premium Snapshot",
+      "url": "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
       "fields": [
+        { "name": "材料インパクト", "value": "ポジティブ材料: 会社開示で確認できる増益要因。" },
         { "name": "事業概要", "value": "..." },
         { "name": "足元材料", "value": "..." },
         { "name": "ファンダ要点", "value": "..." },
@@ -98,3 +99,8 @@ Codex should create `premium_worker/out/premium_reports.json` like this:
 Do not include buy/sell recommendations, target prices, or any additional
 score. If no disclosure link can be verified, set `開示リンク` to
 `開示リンク未確認`.
+
+`材料インパクト` is optional. Use it only as a source-grounded material impact
+label such as `ポジティブ材料`, `ネガティブ材料`, `様子見`, or `混在/要確認`.
+The worker uses it to sort embeds and choose the embed color, but it must not
+be phrased as a buy/sell recommendation.

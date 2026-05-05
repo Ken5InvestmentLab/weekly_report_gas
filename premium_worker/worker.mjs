@@ -21,6 +21,7 @@ const RAW_HEADERS = [
 ];
 
 const REQUIRED_FIELDS = ["事業概要", "足元材料", "ファンダ要点", "注意点", "開示リンク", "Sources"];
+const OPTIONAL_FIELDS = ["材料インパクト"];
 const DEFAULT_ALLOWED_HOURS = "14,16";
 const DEFAULT_ALLOWED_WEEKDAYS = "1,2,3,4,5";
 const CLAIM_TTL_MS = 2 * 60 * 60 * 1000;
@@ -133,7 +134,7 @@ async function post(opts) {
   const statePath = env("PREMIUM_STATE_PATH") || DEFAULT_STATE_PATH;
   const webhookUrl = dryRun ? "" : requiredEnv("DISCORD_PREMIUM_WEBHOOK_URL");
   const state = loadState(statePath);
-  const reports = normalizeReports(readJson(path.resolve(inputPath)));
+  const reports = sortReportsByImpact(normalizeReports(readJson(path.resolve(inputPath))));
   if (!reports.length) throw new Error("report file contains no reports");
 
   const results = [];
@@ -228,7 +229,7 @@ function mapRawRows(values) {
         return i >= 0 ? row[i] : "";
       };
       const symbolCode = cleanCell(get("symbol_code"));
-      const tvSymbol = cleanCell(get("tv_symbol")) || (symbolCode ? `TYO:${symbolCode}` : "");
+      const tvSymbol = normalizeTradingViewSymbol(cleanCell(get("tv_symbol")) || (symbolCode ? `TSE:${symbolCode}` : ""));
       return {
         alertId: cleanCell(get("alert_id")),
         receivedAt: cleanCell(get("received_at")),
@@ -266,7 +267,7 @@ function selectPendingAlerts(rows, state, now) {
 function buildEmbed(report) {
   const alertId = String(report.alertId || "").trim();
   if (!alertId) throw new Error("report is missing alertId");
-  const title = truncate(String(report.title || "Premium Snapshot").trim(), 256);
+  const title = buildEmbedTitle(report);
   const textForPolicy = JSON.stringify(report);
   assertNoInvestmentAdvice(textForPolicy);
 
@@ -287,7 +288,11 @@ function buildEmbed(report) {
     throw new Error(`report ${alertId} must include at least one URL in Sources`);
   }
 
-  const fields = REQUIRED_FIELDS.map(name => ({
+  const fieldNames = [
+    ...OPTIONAL_FIELDS.filter(name => fieldMap.has(name) && fieldMap.get(name)),
+    ...REQUIRED_FIELDS
+  ];
+  const fields = fieldNames.map(name => ({
     name,
     value: truncate(fieldMap.get(name) || (name === "開示リンク" ? "開示リンク未確認" : "未確認"), 1024),
     inline: false
@@ -295,12 +300,55 @@ function buildEmbed(report) {
 
   return {
     title,
-    url: normalizeUrl(report.url || ""),
-    color: Number(report.color || "5793266"),
+    url: normalizeEmbedUrl(report.url || ""),
+    color: resolveEmbedColor(report, fieldMap),
     timestamp: new Date().toISOString(),
     fields,
     footer: { text: "Premium fundamental snapshot / Not investment advice" }
   };
+}
+
+function buildEmbedTitle(report) {
+  const baseTitle = truncate(String(report.title || "Premium Snapshot").trim(), 256);
+  const url = String(report.url || "");
+  if (/tradingview\.com/i.test(url) && !/TradingView|チャート/i.test(baseTitle)) {
+    return truncate(`TradingViewチャート｜${baseTitle}`, 256);
+  }
+  return baseTitle;
+}
+
+function resolveEmbedColor(report, fieldMap) {
+  if (report.color != null && String(report.color).trim() !== "") return Number(report.color);
+  const impact = String(report.materialImpact || fieldMap.get("材料インパクト") || "");
+  if (/様子見|中立|要確認|混在|watch|neutral|mixed/i.test(impact)) return 0xF9A825;
+  if (/ポジティブ|positive/i.test(impact)) return 0x2E7D32;
+  if (/ネガティブ|negative/i.test(impact)) return 0xC62828;
+  return 5793266;
+}
+
+function sortReportsByImpact(reports) {
+  const order = new Map([
+    ["positive", 0],
+    ["watch", 1],
+    ["negative", 2],
+    ["unknown", 3]
+  ]);
+  return reports
+    .map((report, index) => ({ report, index, rank: order.get(classifyReportImpact(report)) ?? 3 }))
+    .sort((a, b) => a.rank - b.rank || a.index - b.index)
+    .map(item => item.report);
+}
+
+function classifyReportImpact(report) {
+  const direct = String(report.materialImpact || "");
+  const fromFields = Array.isArray(report.fields)
+    ? report.fields.find(field => String(field.name || "").trim() === "材料インパクト")
+    : null;
+  const text = `${direct}\n${fromFields ? String(fromFields.value || "") : ""}`;
+  if (/様子見|中立|要確認|混在|watch|neutral|mixed/i.test(text)) return "watch";
+  if (/ポジティブ|positive/i.test(text)) return "positive";
+  if (/ネガティブ|negative/i.test(text)) return "negative";
+  return "unknown";
 }
 
 function assertNoInvestmentAdvice(text) {
@@ -310,7 +358,9 @@ function assertNoInvestmentAdvice(text) {
     /目標株価/,
     /追加採点/,
     /[0-9０-９]+点満点/,
-    /スコア\s*[:：]\s*[0-9０-９]/
+    /スコア\s*[:：]\s*[0-9０-９]/,
+    /購入推奨|売却推奨|買うべき|売るべき/,
+    /利確|損切り/
   ];
   for (const pattern of prohibited) {
     if (pattern.test(text)) throw new Error(`report contains prohibited wording: ${pattern}`);
@@ -764,8 +814,13 @@ function cleanCell(value) {
   return String(value == null ? "" : value).trim();
 }
 
-function buildTradingViewUrl(tvSymbol) {
+function normalizeTradingViewSymbol(tvSymbol) {
   const symbol = String(tvSymbol || "").trim();
+  return symbol.replace(/^TYO:/i, "TSE:");
+}
+
+function buildTradingViewUrl(tvSymbol) {
+  const symbol = normalizeTradingViewSymbol(tvSymbol);
   return symbol ? `https://www.tradingview.com/chart/?symbol=${encodeURIComponent(symbol)}` : "";
 }
 
@@ -774,6 +829,24 @@ function normalizeUrl(value) {
   if (!url) return "";
   if (!/^https?:\/\//i.test(url)) throw new Error(`invalid URL: ${url}`);
   return url;
+}
+
+function normalizeEmbedUrl(value) {
+  const url = normalizeUrl(value);
+  if (!url) return "";
+  return normalizeTradingViewUrl(url);
+}
+
+function normalizeTradingViewUrl(value) {
+  try {
+    const url = new URL(value);
+    if (!/tradingview\.com$/i.test(url.hostname)) return value;
+    const symbol = url.searchParams.get("symbol");
+    if (symbol) url.searchParams.set("symbol", normalizeTradingViewSymbol(symbol));
+    return url.toString();
+  } catch {
+    return value;
+  }
 }
 
 function hasUrl(value) {
@@ -821,12 +894,15 @@ function base64url(input) {
 }
 
 function selfTest() {
-  assert.equal(buildTradingViewUrl("TYO:7203"), "https://www.tradingview.com/chart/?symbol=TYO%3A7203");
+  assert.equal(normalizeTradingViewSymbol("TYO:7203"), "TSE:7203");
+  assert.equal(buildTradingViewUrl("TYO:7203"), "https://www.tradingview.com/chart/?symbol=TSE%3A7203");
+  assert.equal(buildTradingViewUrl("TSE:8285"), "https://www.tradingview.com/chart/?symbol=TSE%3A8285");
   const embed = buildEmbed({
     alertId: "a1",
     title: "テスト（1234）｜Premium Snapshot",
     url: "https://www.tradingview.com/chart/?symbol=TYO%3A1234",
     fields: [
+      { name: "材料インパクト", value: "ポジティブ材料: 会社開示で確認できる増益要因。" },
       { name: "事業概要", value: "製造業の会社。" },
       { name: "足元材料", value: "直近決算を確認。" },
       { name: "ファンダ要点", value: "売上と利益の推移を要確認。" },
@@ -835,7 +911,16 @@ function selfTest() {
       { name: "Sources", value: "[IR](https://example.com/ir)" }
     ]
   });
+  assert.equal(embed.title, "TradingViewチャート｜テスト（1234）｜Premium Snapshot");
+  assert.equal(embed.url, "https://www.tradingview.com/chart/?symbol=TSE%3A1234");
+  assert.equal(embed.color, 0x2E7D32);
+  assert.equal(embed.fields[0].name, "材料インパクト");
   assert.equal(embed.fields.find(f => f.name === "開示リンク").value, "開示リンク未確認");
+  assert.deepEqual(sortReportsByImpact([
+    { alertId: "n", materialImpact: "ネガティブ材料" },
+    { alertId: "p", materialImpact: "ポジティブ材料" },
+    { alertId: "w", materialImpact: "様子見" }
+  ]).map(report => report.alertId), ["p", "w", "n"]);
   assert.throws(() => buildEmbed({
     alertId: "a2",
     fields: REQUIRED_FIELDS.map(name => ({ name, value: name === "Sources" ? "no source" : "x" }))

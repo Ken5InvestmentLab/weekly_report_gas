@@ -12,6 +12,8 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 - workerはGoogle Sheets APIで `alerts_raw` を読むだけにし、投稿済み状態は `premium_worker/state/`、生成中ファイルは `premium_worker/out/` に置く（どちらもgit管理しない）
 - プレミアム投稿ログをスプレッドシートへ残す場合は、`PREMIUM_LOG_SPREADSHEET_ID` で既存GAS対象とは別のスプレッドシートを使い、古いログはworker側で自動削除する
 - Codex automationは毎時起動してよいが、worker側のJST時間ゲート（既定 `PREMIUM_ALLOWED_JST_HOURS=14,16`）で対象時間以外は即終了する
+- プレミアムEmbedのTradingViewリンクはJPX銘柄でも `TSE:{code}` を使う（`TYO:` は開けない銘柄がある）。タイトルはチャートリンクだと分かる文言にする
+- プレミアム分析は決算だけに限定せず、業績修正・自社株買い・配当/資本政策・中計・M&A・業務提携・大型契約・規制/ガバナンスなど検証できる適時材料も対象にする。`材料インパクト` は根拠付きの `ポジティブ材料` / `ネガティブ材料` / `様子見` / `混在/要確認` に留め、売買推奨・目標株価・スコア化はしない
 
 ## デプロイ・実行方法
 
