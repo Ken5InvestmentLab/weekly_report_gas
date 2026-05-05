@@ -16,6 +16,14 @@ Run the premium alert worker for the weekly_report_gas repository.
    also look for guidance revisions, buybacks, dividends, capital policy,
    medium-term plans, M&A, business alliances, major contracts, regulatory
    actions, governance events, and other timely disclosures.
+   Before writing `開示リンク未確認` or saying there are no timely materials,
+   open and scan the company's official IR/news disclosure list and an
+   IRBANK/TDnet-style disclosure list for the symbol. Check at least the 45
+   days before `receivedAt` and any newer disclosures visible at run time.
+   Do not conclude from only "no earnings release" or "no guidance revision";
+   non-earnings disclosures such as warrant exercise/transfer, M&A progress,
+   headquarters relocation, capital allocation, or business progress can be the
+   main material.
 5. Create `premium_worker/out/premium_reports.json` with one report per alert.
    Each report must include fields named exactly:
    `事業概要`, `足元材料`, `ファンダ要点`, `注意点`, `開示リンク`, `Sources`.

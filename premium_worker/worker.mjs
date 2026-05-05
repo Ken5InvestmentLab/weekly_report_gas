@@ -405,6 +405,7 @@ function buildEmbed(report) {
   assertSourceLinksAreReferencePages(alertId, fieldMap);
   assertDescriptiveLinkLabels(alertId, fieldMap);
   assertJapaneseNarrativeFields(alertId, fieldMap);
+  assertNoNarrowDisclosureCaveat(alertId, fieldMap);
   const title = buildEmbedTitle(report);
 
   const fieldNames = [
@@ -461,6 +462,19 @@ function assertJapaneseNarrativeFields(alertId, fieldMap) {
 
 function hasJapaneseText(value) {
   return /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/u.test(String(value || ""));
+}
+
+function assertNoNarrowDisclosureCaveat(alertId, fieldMap) {
+  const materials = String(fieldMap.get("足元材料") || "");
+  const narrowPatterns = [
+    /業績修正や決算短信[^。]*確認できず/,
+    /決算短信[^。]*直リンク[^。]*確認できず/,
+    /大型業績修正[^。]*確認できず/,
+    /個別の業績修正[^。]*確認できず/
+  ];
+  if (narrowPatterns.some(pattern => pattern.test(materials))) {
+    throw new Error(`report ${alertId} field 足元材料 is too narrowly scoped; check company IR/TDnet for non-earnings disclosures`);
+  }
 }
 
 function assertDescriptiveLinkLabels(alertId, fieldMap) {
@@ -1230,6 +1244,20 @@ function selfTest() {
       { name: "Sources", value: "[業績予想修正に関するお知らせ](https://example.com/disclosure.pdf)" }
     ]
   }), /source link must be a reference\/listing page URL/);
+  assert.throws(() => buildEmbed({
+    alertId: "a8",
+    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    symbolCode: "1234",
+    symbolName: "テスト",
+    fields: [
+      { name: "事業概要", value: "精密部品を扱う製造業で、国内外の顧客向けに加工品と関連サービスを提供する会社。受注環境と工場稼働率が収益に効きやすい。" },
+      { name: "足元材料", value: "同日付近の業績修正や決算短信の直リンクは確認できず、会社概要と株式情報を参照した。非決算のIR開示がないかは別途確認が必要であり、この表現は公式IR一覧の確認不足を招くため使用しない。" },
+      { name: "ファンダ要点", value: "増収要因が数量増なのか価格転嫁なのかで評価が変わる。利益率、在庫、キャッシュフローの改善が続くかを確認したい。会社予想との進捗差も重要になる。" },
+      { name: "注意点", value: "短期の株価材料と中期の業績改善は分けて確認する。需要変動、為替、原材料価格、顧客集中に注意し、単発利益の有無も見たい。" },
+      { name: "開示リンク", value: "開示リンク未確認" },
+      { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
+    ]
+  }), /too narrowly scoped/);
   const detailEmbed = buildEmbed({
     alertId: "a7",
     url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",

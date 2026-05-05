@@ -118,6 +118,13 @@ fields are not Japanese text or are too terse to be useful as analysis. Keep
 each narrative field to roughly two short sentences, adding source-grounded
 figures, dates, business drivers, or confirmation points where available while
 staying concise enough for Discord embeds.
+Before deciding that timely disclosures are unconfirmed, scan both the
+company's official IR/news disclosure list and an IRBANK/TDnet-style disclosure
+list for at least the 45 days before the alert `receivedAt`, plus any newer
+items visible during the run. Do not treat "no earnings release" or "no
+guidance revision" as enough; warrant exercise/transfer, M&A progress,
+headquarters relocation, capital allocation, and business progress disclosures
+can be the main material.
 Use direct disclosure URLs only in `開示リンク`: PDF URLs, TDnet
 `td_download.cgi` file URLs, IRBANK individual disclosure pages, or individual
 company/PR disclosure detail pages. Use reference page URLs only in `Sources`:
