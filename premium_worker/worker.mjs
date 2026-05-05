@@ -414,6 +414,7 @@ function buildEmbed(report) {
   assertJapaneseNarrativeFields(alertId, fieldMap);
   assertNoNarrowDisclosureCaveat(alertId, fieldMap);
   assertNoStaleSingleMaterialSummary(alertId, fieldMap);
+  assertNoStaleDisclosureProxyLabels(alertId, fieldMap);
   const title = buildEmbedTitle(report);
 
   const fieldNames = [
@@ -474,13 +475,19 @@ function hasJapaneseText(value) {
 
 function assertNoNarrowDisclosureCaveat(alertId, fieldMap) {
   const materials = String(fieldMap.get("足元材料") || "");
+  const disclosure = String(fieldMap.get("開示リンク") || "");
+  if (hasSparseDisclosureFallback(fieldMap)) return;
   const narrowPatterns = [
     /業績修正や決算短信[^。]*確認できず/,
     /決算短信[^。]*直リンク[^。]*確認できず/,
     /大型業績修正[^。]*確認できず/,
-    /個別の業績修正[^。]*確認できず/
+    /個別の業績修正[^。]*確認できず/,
+    /同日付近[^。]*(?:確認できず|未確認)/,
+    /直接的な[^。]*(?:ファイル|開示|直リンク)[^。]*(?:確認できず|未確認)/,
+    /(?:大型|直近)[^。]*(?:ファイル|開示|直リンク)[^。]*(?:確認できず|未確認)/,
+    /開示リンク[^。]*(?:未確認扱い|未確認)/
   ];
-  if (narrowPatterns.some(pattern => pattern.test(materials))) {
+  if (narrowPatterns.some(pattern => pattern.test(materials)) || /開示リンク未確認扱い/.test(disclosure)) {
     throw new Error(`report ${alertId} field 足元材料 is too narrowly scoped; check company IR/TDnet for non-earnings disclosures`);
   }
 }
@@ -492,6 +499,41 @@ function assertNoStaleSingleMaterialSummary(alertId, fieldMap) {
   if (reliesOnAnnualPresentation && !mentionsRecentIr) {
     throw new Error(`report ${alertId} field 足元材料 may be stale; scan the latest IR library and newer disclosures before relying on an annual presentation`);
   }
+}
+
+function assertNoStaleDisclosureProxyLabels(alertId, fieldMap) {
+  const value = String(fieldMap.get("開示リンク") || "").trim();
+  if (!value || value === "開示リンク未確認") return;
+  const alwaysProxyPatterns = [
+    /新規上場会社紹介レポート/,
+    /COMPANY RESEARCH/i,
+    /フォローアップレポート/,
+    /スポンサードリサーチレポート/,
+    /調査レポート/,
+    /社長名鑑/
+  ];
+  const staleOfficialPatterns = [
+    /有価証券報告書/,
+    /統合報告書/,
+    /IRプレゼンテーション補足資料/,
+    /平成[0-9０-９]+年/,
+    /^[^0-9０-９]*会社説明会資料$/,
+    /^[^0-9０-９]*IR説明会資料$/
+  ];
+  for (const { label } of extractMarkdownLinks(value)) {
+    if (alwaysProxyPatterns.some(pattern => pattern.test(label))) {
+      throw new Error(`report ${alertId} disclosure link uses a proxy document instead of a current direct disclosure: ${label}`);
+    }
+    if (staleOfficialPatterns.some(pattern => pattern.test(label)) && !hasSparseDisclosureFallback(fieldMap)) {
+      throw new Error(`report ${alertId} disclosure link uses a stale/proxy document instead of a current direct disclosure: ${label}`);
+    }
+  }
+}
+
+function hasSparseDisclosureFallback(fieldMap) {
+  const text = `${fieldMap.get("足元材料") || ""}\n${fieldMap.get("注意点") || ""}`;
+  return /公式IR\/IRBANKを(?:45日|四十五日|少なくとも45日)[^。]*(?:新しい|直近)[^。]*(?:個別開示|適時開示)[^。]*(?:見当たらず|確認できず|限定的)/.test(text)
+    || /公式IRとIRBANKを(?:45日|四十五日|少なくとも45日)[^。]*(?:新しい|直近)[^。]*(?:個別開示|適時開示)[^。]*(?:見当たらず|確認できず|限定的)/.test(text);
 }
 
 function assertDescriptiveLinkLabels(alertId, fieldMap) {
@@ -556,6 +598,7 @@ function isDisclosureDetailPageUrl(url) {
     const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
     const pathname = parsed.pathname;
     if (host === "irbank.net" && /^\/[0-9A-Z]{4,5}\/[0-9]{12,}\/?$/i.test(pathname)) return true;
+    if (host === "irbank.net" && /^\/E[0-9A-Z]+\/[0-9]{12,}\/?$/i.test(pathname)) return true;
     if (host === "prtimes.jp" && /^\/main\/html\/rd\/p\/[0-9.]+\.html$/i.test(pathname)) return true;
   } catch {
     return false;
@@ -804,8 +847,27 @@ function buildPostLogEvent(report, embed, claim) {
     tradingViewUrl: embed.url || "",
     disclosureLinks: fields.get("開示リンク") || fields.get("髢狗､ｺ繝ｪ繝ｳ繧ｯ") || "",
     sourceUrls: fields.get("Sources") || "",
-    reason: ""
+    reason: buildPostLogReason(report, fields)
   };
+}
+
+function buildPostLogReason(report, fields) {
+  const impact = normalizeOneLine(fields.get("材料インパクト") || report.materialImpact || "");
+  const fundamental = firstSentence(fields.get("ファンダ要点") || "");
+  const material = firstSentence(fields.get("足元材料") || "");
+  const basis = normalizeOneLine(fundamental || material);
+  if (impact && basis) return truncate(`${impact}: ${basis}`, 1000);
+  return truncate(basis || impact, 1000);
+}
+
+function firstSentence(value) {
+  const text = normalizeOneLine(value);
+  const match = text.match(/^(.+?[。.!！?？])/);
+  return match ? match[1] : text;
+}
+
+function normalizeOneLine(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
 }
 
 function buildFailureLogEvent(item, eventAt) {
@@ -1291,6 +1353,49 @@ function selfTest() {
       { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
     ]
   }), /may be stale/);
+  assert.throws(() => buildEmbed({
+    alertId: "a10",
+    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    symbolCode: "1234",
+    symbolName: "テスト",
+    fields: [
+      { name: "事業概要", value: "施設向けサービスを継続課金で提供する企業で、導入先数、利用者数、物流・人件費の管理が収益性を左右する会社。" },
+      { name: "足元材料", value: "2026年5月1日に第1四半期決算関連資料が開示され、売上成長と利益進捗、サービス導入数の推移が確認材料になっている。古い有価証券報告書だけでは足元材料として不十分。" },
+      { name: "ファンダ要点", value: "継続課金型の事業は安定性がある一方、導入施設数、利用率、単価、配送・洗濯・人件費が利益率を左右する。四半期進捗と通期計画との差を確認したい。" },
+      { name: "注意点", value: "制度変更、施設稼働、物流費、人件費、競合サービスの影響に注意。売上成長が続いてもコスト増で利益率が鈍る可能性がある。" },
+      { name: "開示リンク", value: "[有価証券報告書 第29期](https://example.com/securities.pdf)" },
+      { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
+    ]
+  }), /stale\/proxy document/);
+  const sparseDisclosureEmbed = buildEmbed({
+    alertId: "a10b",
+    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    symbolCode: "1234",
+    symbolName: "テスト",
+    fields: [
+      { name: "材料インパクト", value: "様子見" },
+      { name: "事業概要", value: "単一領域のサービスを展開する企業で、契約数、単価、固定費の推移が業績確認の中心になる会社。" },
+      { name: "足元材料", value: "公式IR/IRBANKを45日分確認したが、直近の個別開示は見当たらず、確認できる開示は限定的。古い公式資料で事業構成、収益源、リスク要因だけを補助確認し、新規材料としては扱わない。" },
+      { name: "ファンダ要点", value: "新しい個別材料が乏しいため、足元の評価は保留気味。既存事業の継続性、利益率、資金繰り、固定費の吸収状況、受注や契約数の変化、次回決算での進捗確認が重要になる。" },
+      { name: "注意点", value: "開示頻度が低い銘柄は、材料の鮮度と流動性を分けて確認したい。古い資料だけで短期材料を強く評価せず、次の会社開示や決算で裏付けを取りたい。" },
+      { name: "開示リンク", value: "[有価証券報告書 第29期](https://example.com/securities.pdf)" },
+      { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)\n[テスト株式会社 会社概要](https://example.com/company)" }
+    ]
+  });
+  assert.equal(sparseDisclosureEmbed.fields.some(field => field.name === "開示リンク"), true);
+  const logEvent = buildPostLogEvent({
+    alertId: "a11",
+    symbolCode: "1234",
+    symbolName: "テスト",
+    fields: [
+      { name: "材料インパクト", value: "混在/要確認" },
+      { name: "ファンダ要点", value: "増収は確認できるが、投資負担と利益率の改善確認が必要。次回決算で継続性を見たい。" },
+      { name: "足元材料", value: "直近資料で事業進捗を確認。" },
+      { name: "開示リンク", value: "[決算短信](https://example.com/disclosure.pdf)" },
+      { name: "Sources", value: "[IRニュース一覧](https://example.com/ir)" }
+    ]
+  }, { title: "テスト (1234) | TradingView チャート", url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234" }, {});
+  assert.equal(logEvent.reason, "混在/要確認: 増収は確認できるが、投資負担と利益率の改善確認が必要。");
   const detailEmbed = buildEmbed({
     alertId: "a7",
     url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",

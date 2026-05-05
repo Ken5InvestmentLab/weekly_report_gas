@@ -23,7 +23,12 @@ Run the premium alert worker for the weekly_report_gas repository.
    If the IR library has a newer quarterly result, monthly data, guidance
    revision, asset-sale/special-gain notice, shareholder-return policy update,
    or other current disclosure, prioritize that newer item over an older annual
-   earnings presentation.
+   earnings presentation. If a company genuinely has very few disclosures, an
+   older official disclosure may be used only after explicitly stating that the
+   official IR and IRBANK checks found no newer individual/timely disclosure in
+   the required window. Do not use proxy materials such as company research
+   reports, new-listing reports, interview articles, or media clippings as
+   `開示リンク`; those are background sources at most.
    Do not conclude from only "no earnings release" or "no guidance revision";
    non-earnings disclosures such as warrant exercise/transfer, M&A progress,
    headquarters relocation, capital allocation, or business progress can be the
@@ -71,7 +76,9 @@ Run the premium alert worker for the weekly_report_gas repository.
 If `PREMIUM_LOG_SPREADSHEET_ID` is configured, the worker records post/fail
 events in that separate spreadsheet, batches post log rows once per run, retries
 transient Sheets 429/5xx responses, and automatically deletes old active log
-rows. Do not use the existing GAS spreadsheet as the premium log spreadsheet.
+rows. For posted reports, the `reason` column is a concise one-line summary
+generated from `材料インパクト` and the report's fundamental point. Do not use
+the existing GAS spreadsheet as the premium log spreadsheet.
 
 Do not edit `gas.txt`, do not modify GAS triggers, and do not write to the
 existing spreadsheet.

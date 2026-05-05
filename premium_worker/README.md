@@ -129,6 +129,12 @@ If a newer quarterly result, monthly data, guidance revision, asset-sale or
 special-gain notice, shareholder-return policy update, or other current IR
 library item exists, use that newer disclosure before relying on an older annual
 earnings presentation.
+If a company genuinely has very few disclosures, an older official disclosure
+may be used only after the report explicitly states that official IR and
+IRBANK checks found no newer individual/timely disclosure in the required
+window. Do not use proxy materials such as company research reports,
+new-listing reports, interview articles, or media clippings as `開示リンク`;
+treat them as background sources only.
 Use direct disclosure URLs only in `開示リンク`: PDF URLs, TDnet
 `td_download.cgi` file URLs, IRBANK individual disclosure pages, or individual
 company/PR disclosure detail pages. Use reference page URLs only in `Sources`:
@@ -155,4 +161,6 @@ When `PREMIUM_LOG_SPREADSHEET_ID` is set, `post` writes premium log rows to
 that separate spreadsheet in one batch per run and retries transient Google
 Sheets 429/5xx responses. Discord posting is still treated as the primary
 delivery path; log write failures are reported as warnings so a rate-limit on
-the log spreadsheet does not duplicate or block alert posts.
+the log spreadsheet does not duplicate or block alert posts. Posted rows write a
+one-line `reason` summary generated from `材料インパクト` and the report's
+fundamental point, so the log can be scanned without opening Discord.
