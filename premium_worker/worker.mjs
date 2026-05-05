@@ -23,7 +23,7 @@ const RAW_HEADERS = [
 const REQUIRED_FIELDS = ["事業概要", "足元材料", "ファンダ要点", "注意点", "開示リンク", "Sources"];
 const OPTIONAL_FIELDS = ["材料インパクト"];
 const DEFAULT_ALLOWED_HOURS = "13,15";
-const DEFAULT_ALLOWED_MINUTES_BY_HOUR = "13:10,15:40";
+const DEFAULT_ALLOWED_MINUTES_BY_HOUR = "13:05,15:36";
 const DEFAULT_SIGNAL_TYPES = "BOTTOM";
 const DEFAULT_ALLOWED_WEEKDAYS = "1,2,3,4,5";
 const CLAIM_TTL_MS = 2 * 60 * 60 * 1000;
@@ -89,8 +89,8 @@ async function collect(opts) {
 
   const spreadsheetId = requiredEnv("PREMIUM_SPREADSHEET_ID", "SPREADSHEET_ID");
   const sheetName = env("PREMIUM_SHEET_NAME") || "alerts_raw";
-  const maxRows = positiveInt(env("PREMIUM_SCAN_MAX_ROWS"), 300);
-  const maxAlerts = positiveInt(env("PREMIUM_MAX_ALERTS_PER_RUN"), 3);
+  const maxRows = nonNegativeInt(env("PREMIUM_SCAN_MAX_ROWS"), 0);
+  const maxAlerts = nonNegativeInt(env("PREMIUM_MAX_ALERTS_PER_RUN"), 0);
   const statePath = env("PREMIUM_STATE_PATH") || DEFAULT_STATE_PATH;
   const outDir = env("PREMIUM_OUT_DIR") || DEFAULT_OUT_DIR;
 
@@ -99,8 +99,10 @@ async function collect(opts) {
 
   const token = await getGoogleAccessToken([SHEETS_READONLY_SCOPE]);
   const values = await readSheetValues(spreadsheetId, `${sheetName}!A4:AH`, token);
-  const rows = mapRawRows(values).slice(-maxRows);
-  const pending = selectPendingAlerts(rows, state, now).slice(0, maxAlerts);
+  const allRows = mapRawRows(values);
+  const rows = maxRows > 0 ? allRows.slice(-maxRows) : allRows;
+  const selected = selectPendingAlerts(rows, state, now);
+  const pending = maxAlerts > 0 ? selected.slice(0, maxAlerts) : selected;
   const claimId = crypto.randomUUID();
 
   for (const alert of pending) {
@@ -146,7 +148,7 @@ async function post(opts) {
   for (const report of reports) {
     const embed = buildEmbed(report);
     const payload = {
-      username: env("DISCORD_PREMIUM_USERNAME") || "天底極致 Premium",
+      username: env("DISCORD_PREMIUM_USERNAME") || "天底極致 Premium Report",
       allowed_mentions: { parse: [] },
       embeds: [embed]
     };
@@ -939,6 +941,11 @@ function positiveInt(value, fallback) {
   return Number.isInteger(n) && n > 0 ? n : fallback;
 }
 
+function nonNegativeInt(value, fallback) {
+  const n = Number(value);
+  return Number.isInteger(n) && n >= 0 ? n : fallback;
+}
+
 function cleanCell(value) {
   return String(value == null ? "" : value).trim();
 }
@@ -1068,14 +1075,14 @@ function selfTest() {
   const previousHours = process.env.PREMIUM_ALLOWED_JST_HOURS;
   const previousMinutes = process.env.PREMIUM_ALLOWED_JST_MINUTES;
   process.env.PREMIUM_ALLOWED_JST_HOURS = "13,15";
-  process.env.PREMIUM_ALLOWED_JST_MINUTES = "13:10,15:40";
-  const gate1310 = evaluateTimeGate(new Date("2026-05-05T04:10:00Z"), false);
-  const gate1540 = evaluateTimeGate(new Date("2026-05-05T06:40:00Z"), false);
-  const gate1539 = evaluateTimeGate(new Date("2026-05-05T06:39:00Z"), false);
-  assert.equal(gate1310.allowed, true);
-  assert.equal(gate1540.allowed, true);
-  assert.equal(gate1539.allowed, false);
-  assert.equal(gate1539.reason, "outside allowed JST minute slots");
+  process.env.PREMIUM_ALLOWED_JST_MINUTES = "13:05,15:36";
+  const gate1305 = evaluateTimeGate(new Date("2026-05-05T04:05:00Z"), false);
+  const gate1536 = evaluateTimeGate(new Date("2026-05-05T06:36:00Z"), false);
+  const gate1535 = evaluateTimeGate(new Date("2026-05-05T06:35:00Z"), false);
+  assert.equal(gate1305.allowed, true);
+  assert.equal(gate1536.allowed, true);
+  assert.equal(gate1535.allowed, false);
+  assert.equal(gate1535.reason, "outside allowed JST minute slots");
   restoreEnv("PREMIUM_ALLOWED_JST_HOURS", previousHours);
   restoreEnv("PREMIUM_ALLOWED_JST_MINUTES", previousMinutes);
 

@@ -69,10 +69,14 @@ node premium_worker/worker.mjs self-test
 ```
 
 `collect` runs only at the allowed JST slots by default. Use `--force` for a
-manual test. The default slots are `13:10` and `15:40` JST on weekdays. The
+manual test. The default slots are `13:05` and `15:36` JST on weekdays. The
 default signal filter is `BOTTOM`, and already-posted alert IDs are never
 selected again. The same symbol may be selected again when TradingView creates
 a different alert ID.
+
+By default, `PREMIUM_MAX_ALERTS_PER_RUN=0` and `PREMIUM_SCAN_MAX_ROWS=0`, so
+the worker scans all rows and claims every unsent matching alert ID. Set
+positive values only when intentionally capping a manual run.
 
 `lock-before` is a local state maintenance command. It reads `alerts_raw` with
 Sheets read-only access and marks every alert ID with `received_at` on or before
