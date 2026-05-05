@@ -382,7 +382,6 @@ function allowedSignalTypes() {
 function buildEmbed(report) {
   const alertId = String(report.alertId || "").trim();
   if (!alertId) throw new Error("report is missing alertId");
-  const title = buildEmbedTitle(report);
   const textForPolicy = JSON.stringify(report);
   assertNoInvestmentAdvice(textForPolicy);
 
@@ -402,6 +401,8 @@ function buildEmbed(report) {
   if (!hasUrl(fieldMap.get("Sources"))) {
     throw new Error(`report ${alertId} must include at least one URL in Sources`);
   }
+  assertJapaneseNarrativeFields(alertId, fieldMap);
+  const title = buildEmbedTitle(report);
 
   const fieldNames = [
     ...OPTIONAL_FIELDS.filter(name => fieldMap.has(name) && fieldMap.get(name)),
@@ -426,10 +427,28 @@ function buildEmbed(report) {
 function buildEmbedTitle(report) {
   const baseTitle = truncate(String(report.title || "Premium Snapshot").trim(), 256);
   const url = String(report.url || "");
-  if (/tradingview\.com/i.test(url) && !/TradingView|チャート/i.test(baseTitle)) {
-    return truncate(`TradingViewチャート｜${baseTitle}`, 256);
+  if (/tradingview\.com/i.test(url)) {
+    const symbolName = String(report.symbolName || "").trim();
+    const symbolCode = String(report.symbolCode || extractSymbolCodeFromUrl(url) || "").trim();
+    if (symbolName && symbolCode) return truncate(`${symbolName} (${symbolCode}) | TradingView チャート`, 256);
+    if (symbolName) return truncate(`${symbolName} | TradingView チャート`, 256);
+    if (symbolCode) return truncate(`${symbolCode} | TradingView チャート`, 256);
+    if (!/TradingView|チャート/i.test(baseTitle)) return truncate(`${baseTitle} | TradingView チャート`, 256);
   }
   return baseTitle;
+}
+
+function assertJapaneseNarrativeFields(alertId, fieldMap) {
+  for (const name of ["事業概要", "足元材料", "ファンダ要点", "注意点"]) {
+    const value = String(fieldMap.get(name) || "").trim();
+    if (!hasJapaneseText(value)) {
+      throw new Error(`report ${alertId} field ${name} must be written in Japanese`);
+    }
+  }
+}
+
+function hasJapaneseText(value) {
+  return /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/u.test(String(value || ""));
 }
 
 function resolveEmbedColor(report, fieldMap) {
@@ -1048,6 +1067,8 @@ function selfTest() {
     alertId: "a1",
     title: "テスト（1234）｜Premium Snapshot",
     url: "https://www.tradingview.com/chart/?symbol=TYO%3A1234",
+    symbolCode: "1234",
+    symbolName: "テスト",
     fields: [
       { name: "材料インパクト", value: "ポジティブ材料: 会社開示で確認できる増益要因。" },
       { name: "事業概要", value: "製造業の会社。" },
@@ -1058,7 +1079,7 @@ function selfTest() {
       { name: "Sources", value: "[IR](https://example.com/ir)" }
     ]
   });
-  assert.equal(embed.title, "TradingViewチャート｜テスト（1234）｜Premium Snapshot");
+  assert.equal(embed.title, "テスト (1234) | TradingView チャート");
   assert.equal(embed.url, "https://www.tradingview.com/chart/?symbol=TSE%3A1234");
   assert.equal(embed.color, 0x2E7D32);
   assert.equal(embed.fields[0].name, "材料インパクト");
@@ -1072,6 +1093,20 @@ function selfTest() {
     alertId: "a2",
     fields: REQUIRED_FIELDS.map(name => ({ name, value: name === "Sources" ? "no source" : "x" }))
   }), /Sources/);
+  assert.throws(() => buildEmbed({
+    alertId: "a3",
+    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    symbolCode: "1234",
+    symbolName: "テスト",
+    fields: [
+      { name: "事業概要", value: "Software vendor." },
+      { name: "足元材料", value: "Recent earnings." },
+      { name: "ファンダ要点", value: "Profitability matters." },
+      { name: "注意点", value: "Watch costs." },
+      { name: "開示リンク", value: "開示リンク未確認" },
+      { name: "Sources", value: "[IR](https://example.com/ir)" }
+    ]
+  }), /must be written in Japanese/);
   const previousHours = process.env.PREMIUM_ALLOWED_JST_HOURS;
   const previousMinutes = process.env.PREMIUM_ALLOWED_JST_MINUTES;
   process.env.PREMIUM_ALLOWED_JST_HOURS = "13,15";

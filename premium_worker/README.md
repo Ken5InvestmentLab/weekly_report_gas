@@ -92,8 +92,10 @@ Codex should create `premium_worker/out/premium_reports.json` like this:
   "reports": [
     {
       "alertId": "example-alert-id",
-      "title": "TradingViewチャート｜銘柄名（1234）｜Premium Snapshot",
+      "title": "銘柄名 (1234) | TradingView チャート",
       "url": "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+      "symbolCode": "1234",
+      "symbolName": "銘柄名",
       "fields": [
         { "name": "材料インパクト", "value": "ポジティブ材料: 会社開示で確認できる増益要因。" },
         { "name": "事業概要", "value": "..." },
@@ -107,6 +109,12 @@ Codex should create `premium_worker/out/premium_reports.json` like this:
   ]
 }
 ```
+
+The worker normalizes TradingView embed titles to
+`銘柄名 (証券コード) | TradingView チャート` when `symbolName` and
+`symbolCode` are present. Write the narrative report body in Japanese; `post`
+rejects reports whose `事業概要`, `足元材料`, `ファンダ要点`, or `注意点`
+fields are not Japanese text.
 
 Do not include buy/sell recommendations, target prices, or any additional
 score. If no disclosure link can be verified, set `開示リンク` to

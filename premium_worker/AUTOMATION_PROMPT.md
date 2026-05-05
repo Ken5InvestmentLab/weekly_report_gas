@@ -19,11 +19,14 @@ Run the premium alert worker for the weekly_report_gas repository.
 5. Create `premium_worker/out/premium_reports.json` with one report per alert.
    Each report must include fields named exactly:
    `事業概要`, `足元材料`, `ファンダ要点`, `注意点`, `開示リンク`, `Sources`.
+   Write the report body in Japanese. The narrative fields `事業概要`,
+   `足元材料`, `ファンダ要点`, and `注意点` must not be written in English.
    You may add an optional `材料インパクト` field with one of:
    `ポジティブ材料`, `ネガティブ材料`, `様子見`, or `混在/要確認`.
    Keep this as a source-grounded material impact label, not a trading action.
 6. Use the TradingView URL from the claim as the Embed URL. JPX symbols must use
-   the TradingView `TSE:` prefix, not `TYO:`.
+   the TradingView `TSE:` prefix, not `TYO:`. The worker normalizes TradingView
+   embed titles to `銘柄名 (証券コード) | TradingView チャート`.
 7. Put direct disclosure URLs in `開示リンク` when verified. If no disclosure link
    can be verified, write `開示リンク未確認`.
 8. Put 2-4 source URLs in `Sources`. Do not invent URLs or cite unverified pages.
