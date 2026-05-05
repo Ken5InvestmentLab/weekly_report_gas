@@ -439,7 +439,7 @@ function buildEmbed(report) {
   ];
   const fields = fieldNames.map(name => ({
     name,
-    value: truncate(fieldMap.get(name) || (name === "開示リンク" ? "開示リンク未確認" : "未確認"), 1024),
+    value: truncate(formatEmbedFieldValue(name, fieldMap.get(name) || (name === "開示リンク" ? "開示リンク未確認" : "未確認")), 1024),
     inline: false
   }));
 
@@ -451,6 +451,17 @@ function buildEmbed(report) {
     fields,
     footer: { text: "Premium fundamental snapshot / Not investment advice" }
   };
+}
+
+function formatEmbedFieldValue(name, value) {
+  const text = String(value || "").trim();
+  if (!["開示リンク", "Sources"].includes(name)) return text;
+  if (!hasUrl(text) || text === "開示リンク未確認") return text;
+  return text.split(/\r?\n/).map(line => {
+    const trimmed = line.trim();
+    if (!trimmed || /^・/.test(trimmed)) return trimmed;
+    return `・${trimmed}`;
+  }).join("\n");
 }
 
 function buildEmbedTitle(report) {
@@ -1540,7 +1551,8 @@ function selfTest() {
       { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
     ]
   });
-  assert.equal(detailEmbed.fields.find(f => f.name === "開示リンク").value, "[自己株式取得結果に関するお知らせ](https://irbank.net/1234/140120260212558146)");
+  assert.equal(detailEmbed.fields.find(f => f.name === "開示リンク").value, "・[自己株式取得結果に関するお知らせ](https://irbank.net/1234/140120260212558146)");
+  assert.equal(detailEmbed.fields.find(f => f.name === "Sources").value, "・[テスト株式会社 IRニュース一覧](https://example.com/ir/news)");
   const previousHours = process.env.PREMIUM_ALLOWED_JST_HOURS;
   const previousMinutes = process.env.PREMIUM_ALLOWED_JST_MINUTES;
   process.env.PREMIUM_ALLOWED_JST_HOURS = "13,15";
