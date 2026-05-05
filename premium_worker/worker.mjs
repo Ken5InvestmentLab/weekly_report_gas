@@ -401,6 +401,7 @@ function buildEmbed(report) {
   if (!hasUrl(fieldMap.get("Sources"))) {
     throw new Error(`report ${alertId} must include at least one URL in Sources`);
   }
+  assertDisclosureLinksAreDirectFiles(alertId, fieldMap);
   assertDescriptiveLinkLabels(alertId, fieldMap);
   assertJapaneseNarrativeFields(alertId, fieldMap);
   const title = buildEmbedTitle(report);
@@ -456,7 +457,7 @@ function assertDescriptiveLinkLabels(alertId, fieldMap) {
   for (const name of ["開示リンク", "Sources"]) {
     const value = String(fieldMap.get(name) || "").trim();
     if (name === "開示リンク" && value === "開示リンク未確認") continue;
-    for (const label of extractMarkdownLinkLabels(value)) {
+    for (const { label } of extractMarkdownLinks(value)) {
       if (isGenericLinkLabel(label)) {
         throw new Error(`report ${alertId} field ${name} has non-descriptive link label: ${label}`);
       }
@@ -464,17 +465,36 @@ function assertDescriptiveLinkLabels(alertId, fieldMap) {
   }
 }
 
-function extractMarkdownLinkLabels(value) {
-  const labels = [];
+function assertDisclosureLinksAreDirectFiles(alertId, fieldMap) {
+  const value = String(fieldMap.get("開示リンク") || "").trim();
+  if (value === "開示リンク未確認") return;
+  for (const { label, url } of extractMarkdownLinks(value)) {
+    if (!isDirectDisclosureFileUrl(url)) {
+      throw new Error(`report ${alertId} disclosure link must be a direct file URL: ${label}`);
+    }
+  }
+}
+
+function extractMarkdownLinks(value) {
+  const links = [];
   const pattern = /\[([^\]\n]+)\]\(https?:\/\/[^)\s]+(?:\s+"[^"]*")?\)/g;
   let match;
-  while ((match = pattern.exec(String(value || ""))) !== null) labels.push(match[1].trim());
-  return labels;
+  while ((match = pattern.exec(String(value || ""))) !== null) {
+    const raw = match[0].match(/\]\((https?:\/\/[^)\s]+)(?:\s+"[^"]*")?\)$/);
+    links.push({ label: match[1].trim(), url: raw ? raw[1] : "" });
+  }
+  return links;
 }
 
 function isGenericLinkLabel(label) {
   const text = String(label || "").trim();
-  return /^(?:開示|出典|資料|リンク|link|source|sources|ir|pdf|url)\s*[0-9０-９]*$/i.test(text);
+  return /^(?:開示|出典|資料|リンク|link|source|sources|ir|pdf|url)\s*[0-9０-９]*$/i.test(text)
+    || /^(?:会社IR|公式サイト|会社概要|製品情報|株価情報|会社プロフィール|会社開示PDF|決算短信PDF|調査レポートPDF|IRライブラリ)$/i.test(text);
+}
+
+function isDirectDisclosureFileUrl(url) {
+  const text = String(url || "").trim().toLowerCase();
+  return /\.pdf(?:$|[?#])/.test(text) || /td_download\.cgi/.test(text);
 }
 
 function resolveEmbedColor(report, fieldMap) {
@@ -1102,7 +1122,7 @@ function selfTest() {
       { name: "ファンダ要点", value: "売上と利益の推移を要確認。" },
       { name: "注意点", value: "材料の鮮度に注意。" },
       { name: "開示リンク", value: "" },
-      { name: "Sources", value: "[会社IR](https://example.com/ir)" }
+      { name: "Sources", value: "[会社IRページ](https://example.com/ir)" }
     ]
   });
   assert.equal(embed.title, "テスト (1234) | TradingView チャート");
@@ -1130,7 +1150,7 @@ function selfTest() {
       { name: "ファンダ要点", value: "Profitability matters." },
       { name: "注意点", value: "Watch costs." },
       { name: "開示リンク", value: "開示リンク未確認" },
-      { name: "Sources", value: "[会社IR](https://example.com/ir)" }
+      { name: "Sources", value: "[会社IRページ](https://example.com/ir)" }
     ]
   }), /must be written in Japanese/);
   assert.throws(() => buildEmbed({
@@ -1143,10 +1163,24 @@ function selfTest() {
       { name: "足元材料", value: "直近決算を確認。" },
       { name: "ファンダ要点", value: "売上と利益の推移を要確認。" },
       { name: "注意点", value: "材料の鮮度に注意。" },
-      { name: "開示リンク", value: "[開示1](https://example.com/disclosure)" },
+      { name: "開示リンク", value: "[開示1](https://example.com/disclosure.pdf)" },
       { name: "Sources", value: "[出典1](https://example.com/ir)" }
     ]
   }), /non-descriptive link label/);
+  assert.throws(() => buildEmbed({
+    alertId: "a5",
+    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    symbolCode: "1234",
+    symbolName: "テスト",
+    fields: [
+      { name: "事業概要", value: "製造業の会社。" },
+      { name: "足元材料", value: "直近決算を確認。" },
+      { name: "ファンダ要点", value: "売上と利益の推移を要確認。" },
+      { name: "注意点", value: "材料の鮮度に注意。" },
+      { name: "開示リンク", value: "[業績予想修正に関するお知らせ](https://example.com/disclosure)" },
+      { name: "Sources", value: "[会社IRページ](https://example.com/ir)" }
+    ]
+  }), /direct file URL/);
   const previousHours = process.env.PREMIUM_ALLOWED_JST_HOURS;
   const previousMinutes = process.env.PREMIUM_ALLOWED_JST_MINUTES;
   process.env.PREMIUM_ALLOWED_JST_HOURS = "13,15";

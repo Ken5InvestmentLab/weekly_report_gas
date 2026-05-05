@@ -27,13 +27,18 @@ Run the premium alert worker for the weekly_report_gas repository.
 6. Use the TradingView URL from the claim as the Embed URL. JPX symbols must use
    the TradingView `TSE:` prefix, not `TYO:`. The worker normalizes TradingView
    embed titles to `銘柄名 (証券コード) | TradingView チャート`.
-7. Put direct disclosure URLs in `開示リンク` when verified. If no disclosure link
-   can be verified, write `開示リンク未確認`. Link labels must describe the
-   material, such as `第3四半期決算短信PDF`, `業績予想修正PDF`,
-   `会社IR`, or `中期経営計画`; do not use generic labels like `開示1`.
+7. Put only direct disclosure file URLs in `開示リンク` when verified, such as
+   PDF URLs or TDnet `td_download.cgi` file URLs. Do not put IR pages,
+   disclosure-list pages, company-profile pages, or news-list pages in
+   `開示リンク`; put those in `Sources` instead. If no direct disclosure file
+   can be verified, write `開示リンク未確認`. Link labels must use the actual
+   document title as closely as possible, such as
+   `2026年３月期 第３四半期決算短信〔日本基準〕（連結）` or
+   `配当予想の修正（増配・特別配当）に関するお知らせ`; do not use generic
+   labels like `開示1`.
 8. Put 2-4 source URLs in `Sources`. Do not invent URLs or cite unverified pages.
-   Source link labels must also be descriptive; do not use `出典1`, `Source1`,
-   or similarly opaque labels.
+   Source link labels must also be page/document titles as closely as possible;
+   do not use `出典1`, `Source1`, `会社IR`, or similarly opaque labels.
 9. Do not write buy/sell recommendations, target prices, or any additional score.
    Avoid wording such as `買い推奨`, `売り推奨`, `買うべき`, `売るべき`,
    `目標株価`, `利確`, or `損切り`.
