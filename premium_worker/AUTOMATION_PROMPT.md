@@ -57,7 +57,9 @@ Run the premium alert worker for the weekly_report_gas repository.
    document or disclosure title as closely as possible, such as
    `2026年３月期 第３四半期決算短信〔日本基準〕（連結）` or
    `配当予想の修正（増配・特別配当）に関するお知らせ`; do not use generic
-   labels like `開示1`.
+   labels like `開示1`. IRBANK individual disclosure pages are accepted, but
+   when the page exposes an `f.irbank.net/pr/...pdf` file, the worker prefers
+   the PDF URL in the outgoing embed.
 8. Put 2-4 reference page URLs in `Sources`: company IR pages, disclosure-list
    pages, news pages, business/profile pages, or reputable financial-news pages
    used for grounding. Do not put direct PDFs, TDnet files, IRBANK individual
@@ -77,8 +79,10 @@ If `PREMIUM_LOG_SPREADSHEET_ID` is configured, the worker records post/fail
 events in that separate spreadsheet, batches post log rows once per run, retries
 transient Sheets 429/5xx responses, and automatically deletes old active log
 rows. For posted reports, the `reason` column is a concise one-line summary
-generated from `材料インパクト` and the report's fundamental point. Do not use
-the existing GAS spreadsheet as the premium log spreadsheet.
+generated from `材料インパクト` and the report's fundamental point; when Discord
+returns a message URL, that summary is stored as a Markdown link to the posted
+fundamental analysis. Do not use the existing GAS spreadsheet as the premium log
+spreadsheet.
 
 Do not edit `gas.txt`, do not modify GAS triggers, and do not write to the
 existing spreadsheet.

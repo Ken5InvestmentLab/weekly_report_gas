@@ -146,7 +146,9 @@ Markdown link labels should use the actual page or document title as closely as 
 `2026年３月期 第３四半期決算短信〔日本基準〕（連結）` or
 `配当予想の修正（増配・特別配当）に関するお知らせ`. Generic labels like
 `開示1`, `出典1`, `会社IR`, `Source1`, or `PDF1` are rejected because readers
-cannot tell what they are opening.
+cannot tell what they are opening. IRBANK individual disclosure pages are
+accepted, but when the page exposes an `f.irbank.net/pr/...pdf` file, the worker
+prefers that PDF URL in the outgoing embed.
 
 Do not include buy/sell recommendations, target prices, or any additional
 score. If no disclosure link can be verified, set `開示リンク` to
@@ -163,4 +165,5 @@ Sheets 429/5xx responses. Discord posting is still treated as the primary
 delivery path; log write failures are reported as warnings so a rate-limit on
 the log spreadsheet does not duplicate or block alert posts. Posted rows write a
 one-line `reason` summary generated from `材料インパクト` and the report's
-fundamental point, so the log can be scanned without opening Discord.
+fundamental point. When Discord returns a message URL, that summary is stored as
+a Markdown link to the posted analysis.

@@ -148,6 +148,7 @@ async function post(opts) {
   const postLogEvents = [];
   try {
     for (const report of reports) {
+      await resolveIrbankPdfDisclosureLinks(report);
       const embed = buildEmbed(report);
       const payload = {
         username: env("DISCORD_PREMIUM_USERNAME") || "天底極致 Premium Report",
@@ -160,7 +161,8 @@ async function post(opts) {
         continue;
       }
 
-      await postDiscord(webhookUrl, payload);
+      const discordMessage = await postDiscord(webhookUrl, payload);
+      const discordMessageUrl = buildDiscordMessageUrl(discordMessage);
       const claim = state.claims[report.alertId] || {};
       const symbolCode = String(report.symbolCode || claim.symbolCode || extractSymbolCodeFromUrl(embed.url) || "").trim();
       state.posted[report.alertId] = {
@@ -169,12 +171,13 @@ async function post(opts) {
         symbolName: String(report.symbolName || claim.symbolName || ""),
         title: embed.title,
         url: embed.url || "",
+        discordMessageUrl,
         sourceCount: countUrls(JSON.stringify(embed))
       };
       delete state.claims[report.alertId];
       delete state.failed[report.alertId];
-      results.push({ alertId: report.alertId, posted: true });
-      postLogEvents.push(buildPostLogEvent(report, embed, claim));
+      results.push({ alertId: report.alertId, posted: true, discordMessageUrl });
+      postLogEvents.push(buildPostLogEvent(report, embed, claim, discordMessageUrl));
       saveState(statePath, state);
     }
   } finally {
@@ -592,6 +595,78 @@ function isDirectDisclosureLinkUrl(url) {
   return isDirectDisclosureFileUrl(url) || isDisclosureDetailPageUrl(url);
 }
 
+async function resolveIrbankPdfDisclosureLinks(report) {
+  const fields = Array.isArray(report.fields) ? report.fields : [];
+  const field = fields.find(item => String(item.name || "").trim() === "開示リンク");
+  if (!field || !field.value || String(field.value).trim() === "開示リンク未確認") return report;
+  field.value = await replaceMarkdownLinkUrls(field.value, async url => resolveIrbankDisclosurePdfUrl(url));
+  return report;
+}
+
+async function replaceMarkdownLinkUrls(value, resolver) {
+  const pattern = /\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)(?:\s+"[^"]*")?\)/g;
+  let result = "";
+  let lastIndex = 0;
+  let match;
+  while ((match = pattern.exec(String(value || ""))) !== null) {
+    result += String(value).slice(lastIndex, match.index);
+    const label = match[1];
+    const url = match[2];
+    const resolved = await resolver(url);
+    result += `[${label}](${resolved || url})`;
+    lastIndex = pattern.lastIndex;
+  }
+  result += String(value || "").slice(lastIndex);
+  return result;
+}
+
+async function resolveIrbankDisclosurePdfUrl(url) {
+  const normalized = normalizeIrbankDisclosureDetailUrl(url);
+  if (!normalized) return url;
+  try {
+    const response = await fetch(normalized);
+    if (!response.ok) return normalized;
+    const html = await response.text();
+    return extractIrbankPdfUrlFromHtml(html, extractIrbankDisclosureId(normalized)) || normalized;
+  } catch {
+    return normalized;
+  }
+}
+
+function normalizeIrbankDisclosureDetailUrl(url) {
+  try {
+    const parsed = new URL(String(url || ""));
+    parsed.hash = "";
+    const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+    if (host !== "irbank.net") return "";
+    if (!isDisclosureDetailPageUrl(parsed.toString())) return "";
+    return parsed.toString();
+  } catch {
+    return "";
+  }
+}
+
+function extractIrbankDisclosureId(url) {
+  try {
+    const pathname = new URL(String(url || "")).pathname;
+    const match = pathname.match(/\/([0-9]{12,})\/?$/);
+    return match ? match[1] : "";
+  } catch {
+    return "";
+  }
+}
+
+function extractIrbankPdfUrlFromHtml(html, disclosureId = "") {
+  const escapedId = String(disclosureId || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const specificPattern = escapedId
+    ? new RegExp(`https?:\\/\\/f\\.irbank\\.net\\/pr\\/[^"'<>\\s)]+\\/${escapedId}\\.pdf`, "i")
+    : null;
+  const specific = specificPattern ? String(html || "").match(specificPattern) : null;
+  if (specific) return specific[0];
+  const fallback = String(html || "").match(/https?:\/\/f\.irbank\.net\/pr\/[^"'<>\s)]+\.pdf/i);
+  return fallback ? fallback[0] : "";
+}
+
 function isDisclosureDetailPageUrl(url) {
   try {
     const parsed = new URL(String(url || ""));
@@ -657,15 +732,17 @@ function assertNoInvestmentAdvice(text) {
 }
 
 async function postDiscord(webhookUrl, payload) {
+  const url = new URL(webhookUrl);
+  url.searchParams.set("wait", "true");
   for (let attempt = 0; attempt < 4; attempt++) {
-    const response = await fetch(webhookUrl, {
+    const response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
     });
-    if (response.status >= 200 && response.status < 300) return;
-
     const body = await response.text();
+    if (response.status >= 200 && response.status < 300) return body ? JSON.parse(body) : {};
+
     if (response.status === 429 && attempt < 3) {
       const retryAfter = parseRetryAfterMs(response, body);
       if (retryAfter <= 30000) {
@@ -675,6 +752,14 @@ async function postDiscord(webhookUrl, payload) {
     }
     throw new Error(`Discord webhook failed: HTTP ${response.status} ${body.slice(0, 500)}`);
   }
+}
+
+function buildDiscordMessageUrl(message) {
+  const channelId = String(message?.channel_id || "").trim();
+  const messageId = String(message?.id || "").trim();
+  const guildId = String(message?.guild_id || env("DISCORD_PREMIUM_GUILD_ID") || env("DISCORD_GUILD_ID") || "").trim();
+  if (!guildId || !channelId || !messageId) return "";
+  return `https://discord.com/channels/${guildId}/${channelId}/${messageId}`;
 }
 
 async function readSheetValues(spreadsheetId, range, accessToken) {
@@ -834,7 +919,7 @@ function getPremiumLogConfig() {
   };
 }
 
-function buildPostLogEvent(report, embed, claim) {
+function buildPostLogEvent(report, embed, claim, discordMessageUrl = "") {
   const fields = fieldsToMap(report.fields || []);
   return {
     eventAt: new Date().toISOString(),
@@ -847,23 +932,38 @@ function buildPostLogEvent(report, embed, claim) {
     tradingViewUrl: embed.url || "",
     disclosureLinks: fields.get("開示リンク") || fields.get("髢狗､ｺ繝ｪ繝ｳ繧ｯ") || "",
     sourceUrls: fields.get("Sources") || "",
-    reason: buildPostLogReason(report, fields)
+    reason: buildPostLogReason(report, fields, discordMessageUrl)
   };
 }
 
-function buildPostLogReason(report, fields) {
+function buildPostLogReason(report, fields, discordMessageUrl = "") {
   const impact = normalizeOneLine(fields.get("材料インパクト") || report.materialImpact || "");
   const fundamental = firstSentence(fields.get("ファンダ要点") || "");
   const material = firstSentence(fields.get("足元材料") || "");
   const basis = normalizeOneLine(fundamental || material);
-  if (impact && basis) return truncate(`${impact}: ${basis}`, 1000);
-  return truncate(basis || impact, 1000);
+  const summary = truncate(impact && basis ? `${impact}: ${basis}` : (basis || impact), discordMessageUrl ? 800 : 1000);
+  if (summary && discordMessageUrl) return `[${escapeMarkdownLinkLabel(summary)}](${discordMessageUrl})`;
+  return summary;
 }
 
 function firstSentence(value) {
   const text = normalizeOneLine(value);
-  const match = text.match(/^(.+?[。.!！?？])/);
-  return match ? match[1] : text;
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    if ("。！？".includes(char)) return text.slice(0, i + 1);
+    if (".!?".includes(char) && !isAsciiDigit(text[i - 1]) && !isAsciiDigit(text[i + 1])) {
+      return text.slice(0, i + 1);
+    }
+  }
+  return text;
+}
+
+function isAsciiDigit(value) {
+  return /[0-9]/.test(String(value || ""));
+}
+
+function escapeMarkdownLinkLabel(value) {
+  return String(value || "").replace(/\\/g, "\\\\").replace(/\]/g, "\\]");
 }
 
 function normalizeOneLine(value) {
@@ -1396,6 +1496,20 @@ function selfTest() {
     ]
   }, { title: "テスト (1234) | TradingView チャート", url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234" }, {});
   assert.equal(logEvent.reason, "混在/要確認: 増収は確認できるが、投資負担と利益率の改善確認が必要。");
+  const linkedLogEvent = buildPostLogEvent({
+    alertId: "a11b",
+    symbolCode: "8165",
+    symbolName: "千趣会",
+    fields: [
+      { name: "材料インパクト", value: "混在/要確認" },
+      { name: "ファンダ要点", value: "1Qは売上高91.66億円で前年同期比7.1%減ながら、営業損失は9.88億円と前年同期から損失幅が縮小。固定資産売却益と本業改善は分けて確認したい。" },
+      { name: "足元材料", value: "直近資料で第1四半期決算と月次を確認。" },
+      { name: "開示リンク", value: "[決算短信](https://example.com/disclosure.pdf)" },
+      { name: "Sources", value: "[IRニュース一覧](https://example.com/ir)" }
+    ]
+  }, { title: "千趣会 (8165) | TradingView チャート", url: "https://www.tradingview.com/chart/?symbol=TSE%3A8165" }, {}, "https://discord.com/channels/1/2/3");
+  assert.equal(linkedLogEvent.reason, "[混在/要確認: 1Qは売上高91.66億円で前年同期比7.1%減ながら、営業損失は9.88億円と前年同期から損失幅が縮小。](https://discord.com/channels/1/2/3)");
+  assert.equal(extractIrbankPdfUrlFromHtml('<a href="https://f.irbank.net/pr/20260401/140120260326590425.pdf">PDF</a>', "140120260326590425"), "https://f.irbank.net/pr/20260401/140120260326590425.pdf");
   const detailEmbed = buildEmbed({
     alertId: "a7",
     url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
