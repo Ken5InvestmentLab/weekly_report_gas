@@ -114,12 +114,16 @@ The worker normalizes TradingView embed titles to
 `銘柄名 (証券コード) | TradingView チャート` when `symbolName` and
 `symbolCode` are present. Write the narrative report body in Japanese; `post`
 rejects reports whose `事業概要`, `足元材料`, `ファンダ要点`, or `注意点`
-fields are not Japanese text.
+fields are not Japanese text or are too terse to be useful as analysis. Keep
+each narrative field to roughly two short sentences, adding source-grounded
+figures, dates, business drivers, or confirmation points where available while
+staying concise enough for Discord embeds.
 Use direct disclosure file URLs only in `開示リンク` (PDF URLs or TDnet
-`td_download.cgi` file URLs). IR pages, disclosure-list pages, profile pages,
-and news-list pages belong in `Sources`; if no direct disclosure file is
-verified, use `開示リンク未確認`. Markdown link labels should use the actual
-page or document title as closely as possible, such as
+`td_download.cgi` file URLs). Use reference page URLs only in `Sources`:
+company IR pages, disclosure-list pages, news pages, profile pages, or other
+grounding webpages. Do not put direct PDF or other direct file URLs in
+`Sources`; if no direct disclosure file is verified, use `開示リンク未確認`.
+Markdown link labels should use the actual page or document title as closely as possible, such as
 `2026年３月期 第３四半期決算短信〔日本基準〕（連結）` or
 `配当予想の修正（増配・特別配当）に関するお知らせ`. Generic labels like
 `開示1`, `出典1`, `会社IR`, `Source1`, or `PDF1` are rejected because readers

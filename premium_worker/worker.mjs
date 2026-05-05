@@ -402,6 +402,7 @@ function buildEmbed(report) {
     throw new Error(`report ${alertId} must include at least one URL in Sources`);
   }
   assertDisclosureLinksAreDirectFiles(alertId, fieldMap);
+  assertSourceLinksAreReferencePages(alertId, fieldMap);
   assertDescriptiveLinkLabels(alertId, fieldMap);
   assertJapaneseNarrativeFields(alertId, fieldMap);
   const title = buildEmbedTitle(report);
@@ -441,10 +442,19 @@ function buildEmbedTitle(report) {
 }
 
 function assertJapaneseNarrativeFields(alertId, fieldMap) {
+  const minimumLengths = new Map([
+    ["事業概要", 45],
+    ["足元材料", 70],
+    ["ファンダ要点", 70],
+    ["注意点", 55]
+  ]);
   for (const name of ["事業概要", "足元材料", "ファンダ要点", "注意点"]) {
     const value = String(fieldMap.get(name) || "").trim();
     if (!hasJapaneseText(value)) {
       throw new Error(`report ${alertId} field ${name} must be written in Japanese`);
+    }
+    if (value.length < minimumLengths.get(name)) {
+      throw new Error(`report ${alertId} field ${name} is too terse for analysis`);
     }
   }
 }
@@ -475,6 +485,14 @@ function assertDisclosureLinksAreDirectFiles(alertId, fieldMap) {
   }
 }
 
+function assertSourceLinksAreReferencePages(alertId, fieldMap) {
+  for (const { label, url } of extractMarkdownLinks(fieldMap.get("Sources") || "")) {
+    if (isDirectDisclosureFileUrl(url)) {
+      throw new Error(`report ${alertId} source link must be a reference page URL, not a direct file URL: ${label}`);
+    }
+  }
+}
+
 function extractMarkdownLinks(value) {
   const links = [];
   const pattern = /\[([^\]\n]+)\]\(https?:\/\/[^)\s]+(?:\s+"[^"]*")?\)/g;
@@ -489,7 +507,7 @@ function extractMarkdownLinks(value) {
 function isGenericLinkLabel(label) {
   const text = String(label || "").trim();
   return /^(?:開示|出典|資料|リンク|link|source|sources|ir|pdf|url)\s*[0-9０-９]*$/i.test(text)
-    || /^(?:会社IR|公式サイト|会社概要|製品情報|株価情報|会社プロフィール|会社開示PDF|決算短信PDF|調査レポートPDF|IRライブラリ)$/i.test(text);
+    || /^(?:会社IR|会社IRページ|公式サイト|会社概要|製品情報|株価情報|会社プロフィール|会社開示PDF|決算短信PDF|調査レポートPDF|IRライブラリ)$/i.test(text);
 }
 
 function isDirectDisclosureFileUrl(url) {
@@ -1117,12 +1135,12 @@ function selfTest() {
     symbolName: "テスト",
     fields: [
       { name: "材料インパクト", value: "ポジティブ材料: 会社開示で確認できる増益要因。" },
-      { name: "事業概要", value: "製造業の会社。" },
-      { name: "足元材料", value: "直近決算を確認。" },
-      { name: "ファンダ要点", value: "売上と利益の推移を要確認。" },
-      { name: "注意点", value: "材料の鮮度に注意。" },
+      { name: "事業概要", value: "精密部品を扱う製造業で、国内外の顧客向けに加工品と関連サービスを提供する会社。受注環境と工場稼働率が収益に効きやすい。" },
+      { name: "足元材料", value: "直近決算では売上と利益の推移が確認材料。受注環境、原材料価格、固定費吸収の状況に加え、会社予想との進捗差も見る必要がある。単発材料ではなく継続性も確認したい。" },
+      { name: "ファンダ要点", value: "増収要因が数量増なのか価格転嫁なのかで評価が変わる。利益率、在庫、キャッシュフローの改善が続くかを確認したい。会社予想との進捗差も重要になる。" },
+      { name: "注意点", value: "短期の株価材料と中期の業績改善は分けて確認する。需要変動、為替、原材料価格、顧客集中に注意し、単発利益の有無も見たい。" },
       { name: "開示リンク", value: "" },
-      { name: "Sources", value: "[会社IRページ](https://example.com/ir)" }
+      { name: "Sources", value: "[株主・投資家情報｜テスト株式会社](https://example.com/ir)" }
     ]
   });
   assert.equal(embed.title, "テスト (1234) | TradingView チャート");
@@ -1150,7 +1168,7 @@ function selfTest() {
       { name: "ファンダ要点", value: "Profitability matters." },
       { name: "注意点", value: "Watch costs." },
       { name: "開示リンク", value: "開示リンク未確認" },
-      { name: "Sources", value: "[会社IRページ](https://example.com/ir)" }
+      { name: "Sources", value: "[株主・投資家情報｜テスト株式会社](https://example.com/ir)" }
     ]
   }), /must be written in Japanese/);
   assert.throws(() => buildEmbed({
@@ -1159,10 +1177,10 @@ function selfTest() {
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
-      { name: "事業概要", value: "製造業の会社。" },
-      { name: "足元材料", value: "直近決算を確認。" },
-      { name: "ファンダ要点", value: "売上と利益の推移を要確認。" },
-      { name: "注意点", value: "材料の鮮度に注意。" },
+      { name: "事業概要", value: "精密部品を扱う製造業で、国内外の顧客向けに加工品と関連サービスを提供する会社。受注環境と工場稼働率が収益に効きやすい。" },
+      { name: "足元材料", value: "直近決算では売上と利益の推移が確認材料。受注環境、原材料価格、固定費吸収の状況に加え、会社予想との進捗差も見る必要がある。単発材料ではなく継続性も確認したい。" },
+      { name: "ファンダ要点", value: "増収要因が数量増なのか価格転嫁なのかで評価が変わる。利益率、在庫、キャッシュフローの改善が続くかを確認したい。会社予想との進捗差も重要になる。" },
+      { name: "注意点", value: "短期の株価材料と中期の業績改善は分けて確認する。需要変動、為替、原材料価格、顧客集中に注意し、単発利益の有無も見たい。" },
       { name: "開示リンク", value: "[開示1](https://example.com/disclosure.pdf)" },
       { name: "Sources", value: "[出典1](https://example.com/ir)" }
     ]
@@ -1173,14 +1191,28 @@ function selfTest() {
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
-      { name: "事業概要", value: "製造業の会社。" },
-      { name: "足元材料", value: "直近決算を確認。" },
-      { name: "ファンダ要点", value: "売上と利益の推移を要確認。" },
-      { name: "注意点", value: "材料の鮮度に注意。" },
+      { name: "事業概要", value: "精密部品を扱う製造業で、国内外の顧客向けに加工品と関連サービスを提供する会社。受注環境と工場稼働率が収益に効きやすい。" },
+      { name: "足元材料", value: "直近決算では売上と利益の推移が確認材料。受注環境、原材料価格、固定費吸収の状況に加え、会社予想との進捗差も見る必要がある。単発材料ではなく継続性も確認したい。" },
+      { name: "ファンダ要点", value: "増収要因が数量増なのか価格転嫁なのかで評価が変わる。利益率、在庫、キャッシュフローの改善が続くかを確認したい。会社予想との進捗差も重要になる。" },
+      { name: "注意点", value: "短期の株価材料と中期の業績改善は分けて確認する。需要変動、為替、原材料価格、顧客集中に注意し、単発利益の有無も見たい。" },
       { name: "開示リンク", value: "[業績予想修正に関するお知らせ](https://example.com/disclosure)" },
-      { name: "Sources", value: "[会社IRページ](https://example.com/ir)" }
+      { name: "Sources", value: "[株主・投資家情報｜テスト株式会社](https://example.com/ir)" }
     ]
   }), /direct file URL/);
+  assert.throws(() => buildEmbed({
+    alertId: "a6",
+    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    symbolCode: "1234",
+    symbolName: "テスト",
+    fields: [
+      { name: "事業概要", value: "精密部品を扱う製造業で、国内外の顧客向けに加工品と関連サービスを提供する会社。受注環境と工場稼働率が収益に効きやすい。" },
+      { name: "足元材料", value: "直近決算では売上と利益の推移が確認材料。受注環境、原材料価格、固定費吸収の状況に加え、会社予想との進捗差も見る必要がある。単発材料ではなく継続性も確認したい。" },
+      { name: "ファンダ要点", value: "増収要因が数量増なのか価格転嫁なのかで評価が変わる。利益率、在庫、キャッシュフローの改善が続くかを確認したい。会社予想との進捗差も重要になる。" },
+      { name: "注意点", value: "短期の株価材料と中期の業績改善は分けて確認する。需要変動、為替、原材料価格、顧客集中に注意し、単発利益の有無も見たい。" },
+      { name: "開示リンク", value: "[業績予想修正に関するお知らせ](https://example.com/disclosure.pdf)" },
+      { name: "Sources", value: "[業績予想修正に関するお知らせ](https://example.com/disclosure.pdf)" }
+    ]
+  }), /source link must be a reference page URL/);
   const previousHours = process.env.PREMIUM_ALLOWED_JST_HOURS;
   const previousMinutes = process.env.PREMIUM_ALLOWED_JST_MINUTES;
   process.env.PREMIUM_ALLOWED_JST_HOURS = "13,15";

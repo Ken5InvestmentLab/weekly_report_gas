@@ -21,6 +21,10 @@ Run the premium alert worker for the weekly_report_gas repository.
    `事業概要`, `足元材料`, `ファンダ要点`, `注意点`, `開示リンク`, `Sources`.
    Write the report body in Japanese. The narrative fields `事業概要`,
    `足元材料`, `ファンダ要点`, and `注意点` must not be written in English.
+   Keep each narrative field analytical rather than memo-like: usually 2 short
+   sentences, with source-grounded figures, dates, business drivers, or
+   confirmation points where available. Avoid one-line generic summaries, but
+   stay concise enough for Discord embeds.
    You may add an optional `材料インパクト` field with one of:
    `ポジティブ材料`, `ネガティブ材料`, `様子見`, or `混在/要確認`.
    Keep this as a source-grounded material impact label, not a trading action.
@@ -36,9 +40,12 @@ Run the premium alert worker for the weekly_report_gas repository.
    `2026年３月期 第３四半期決算短信〔日本基準〕（連結）` or
    `配当予想の修正（増配・特別配当）に関するお知らせ`; do not use generic
    labels like `開示1`.
-8. Put 2-4 source URLs in `Sources`. Do not invent URLs or cite unverified pages.
-   Source link labels must also be page/document titles as closely as possible;
-   do not use `出典1`, `Source1`, `会社IR`, or similarly opaque labels.
+8. Put 2-4 reference page URLs in `Sources`: company IR pages, disclosure-list
+   pages, news pages, business/profile pages, or reputable financial-news pages
+   used for grounding. Do not put direct PDF or other direct file URLs in
+   `Sources`; the direct file belongs only in `開示リンク`. Source link labels
+   must be page titles as closely as possible; do not use `出典1`, `Source1`,
+   `会社IR`, or similarly opaque labels.
 9. Do not write buy/sell recommendations, target prices, or any additional score.
    Avoid wording such as `買い推奨`, `売り推奨`, `買うべき`, `売るべき`,
    `目標株価`, `利確`, or `損切り`.
