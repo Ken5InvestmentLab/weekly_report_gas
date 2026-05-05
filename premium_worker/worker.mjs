@@ -401,7 +401,7 @@ function buildEmbed(report) {
   if (!hasUrl(fieldMap.get("Sources"))) {
     throw new Error(`report ${alertId} must include at least one URL in Sources`);
   }
-  assertDisclosureLinksAreDirectFiles(alertId, fieldMap);
+  assertDisclosureLinksAreDirectDisclosures(alertId, fieldMap);
   assertSourceLinksAreReferencePages(alertId, fieldMap);
   assertDescriptiveLinkLabels(alertId, fieldMap);
   assertJapaneseNarrativeFields(alertId, fieldMap);
@@ -475,20 +475,20 @@ function assertDescriptiveLinkLabels(alertId, fieldMap) {
   }
 }
 
-function assertDisclosureLinksAreDirectFiles(alertId, fieldMap) {
+function assertDisclosureLinksAreDirectDisclosures(alertId, fieldMap) {
   const value = String(fieldMap.get("開示リンク") || "").trim();
   if (value === "開示リンク未確認") return;
   for (const { label, url } of extractMarkdownLinks(value)) {
-    if (!isDirectDisclosureFileUrl(url)) {
-      throw new Error(`report ${alertId} disclosure link must be a direct file URL: ${label}`);
+    if (!isDirectDisclosureLinkUrl(url)) {
+      throw new Error(`report ${alertId} disclosure link must be a direct disclosure URL: ${label}`);
     }
   }
 }
 
 function assertSourceLinksAreReferencePages(alertId, fieldMap) {
   for (const { label, url } of extractMarkdownLinks(fieldMap.get("Sources") || "")) {
-    if (isDirectDisclosureFileUrl(url)) {
-      throw new Error(`report ${alertId} source link must be a reference page URL, not a direct file URL: ${label}`);
+    if (isDirectDisclosureLinkUrl(url)) {
+      throw new Error(`report ${alertId} source link must be a reference/listing page URL, not a direct disclosure URL: ${label}`);
     }
   }
 }
@@ -513,6 +513,23 @@ function isGenericLinkLabel(label) {
 function isDirectDisclosureFileUrl(url) {
   const text = String(url || "").trim().toLowerCase();
   return /\.pdf(?:$|[?#])/.test(text) || /td_download\.cgi/.test(text);
+}
+
+function isDirectDisclosureLinkUrl(url) {
+  return isDirectDisclosureFileUrl(url) || isDisclosureDetailPageUrl(url);
+}
+
+function isDisclosureDetailPageUrl(url) {
+  try {
+    const parsed = new URL(String(url || ""));
+    const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+    const pathname = parsed.pathname;
+    if (host === "irbank.net" && /^\/[0-9A-Z]{4,5}\/[0-9]{12,}\/?$/i.test(pathname)) return true;
+    if (host === "prtimes.jp" && /^\/main\/html\/rd\/p\/[0-9.]+\.html$/i.test(pathname)) return true;
+  } catch {
+    return false;
+  }
+  return false;
 }
 
 function resolveEmbedColor(report, fieldMap) {
@@ -1198,7 +1215,7 @@ function selfTest() {
       { name: "開示リンク", value: "[業績予想修正に関するお知らせ](https://example.com/disclosure)" },
       { name: "Sources", value: "[株主・投資家情報｜テスト株式会社](https://example.com/ir)" }
     ]
-  }), /direct file URL/);
+  }), /direct disclosure URL/);
   assert.throws(() => buildEmbed({
     alertId: "a6",
     url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
@@ -1212,7 +1229,22 @@ function selfTest() {
       { name: "開示リンク", value: "[業績予想修正に関するお知らせ](https://example.com/disclosure.pdf)" },
       { name: "Sources", value: "[業績予想修正に関するお知らせ](https://example.com/disclosure.pdf)" }
     ]
-  }), /source link must be a reference page URL/);
+  }), /source link must be a reference\/listing page URL/);
+  const detailEmbed = buildEmbed({
+    alertId: "a7",
+    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    symbolCode: "1234",
+    symbolName: "テスト",
+    fields: [
+      { name: "事業概要", value: "精密部品を扱う製造業で、国内外の顧客向けに加工品と関連サービスを提供する会社。受注環境と工場稼働率が収益に効きやすい。" },
+      { name: "足元材料", value: "直近決算では売上と利益の推移が確認材料。受注環境、原材料価格、固定費吸収の状況に加え、会社予想との進捗差も見る必要がある。単発材料ではなく継続性も確認したい。" },
+      { name: "ファンダ要点", value: "増収要因が数量増なのか価格転嫁なのかで評価が変わる。利益率、在庫、キャッシュフローの改善が続くかを確認したい。会社予想との進捗差も重要になる。" },
+      { name: "注意点", value: "短期の株価材料と中期の業績改善は分けて確認する。需要変動、為替、原材料価格、顧客集中に注意し、単発利益の有無も見たい。" },
+      { name: "開示リンク", value: "[自己株式取得結果に関するお知らせ](https://irbank.net/1234/140120260212558146)" },
+      { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
+    ]
+  });
+  assert.equal(detailEmbed.fields.find(f => f.name === "開示リンク").value, "[自己株式取得結果に関するお知らせ](https://irbank.net/1234/140120260212558146)");
   const previousHours = process.env.PREMIUM_ALLOWED_JST_HOURS;
   const previousMinutes = process.env.PREMIUM_ALLOWED_JST_MINUTES;
   process.env.PREMIUM_ALLOWED_JST_HOURS = "13,15";
