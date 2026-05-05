@@ -25,6 +25,14 @@ const DEFAULT_ALLOWED_HOURS = "14,16";
 const DEFAULT_ALLOWED_WEEKDAYS = "1,2,3,4,5";
 const CLAIM_TTL_MS = 2 * 60 * 60 * 1000;
 const DEFAULT_RETRY_AFTER_MS = 24 * 60 * 60 * 1000;
+const SHEETS_READONLY_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly";
+const SHEETS_WRITE_SCOPE = "https://www.googleapis.com/auth/spreadsheets";
+const LOG_HEADERS = [
+  "event_at", "event_type", "alert_id", "symbol_code", "symbol_name",
+  "signal_type", "title", "tradingview_url", "disclosure_links",
+  "source_urls", "reason"
+];
+const ARCHIVE_HEADERS = LOG_HEADERS.concat(["archived_at"]);
 
 loadDotEnv(path.join(REPO_ROOT, ".env"));
 loadDotEnv(path.join(WORKER_DIR, ".env"));
@@ -84,7 +92,7 @@ async function collect(opts) {
   const state = loadState(statePath);
   pruneExpiredClaims(state, now);
 
-  const token = await getGoogleAccessToken();
+  const token = await getGoogleAccessToken([SHEETS_READONLY_SCOPE]);
   const values = await readSheetValues(spreadsheetId, `${sheetName}!A4:AH`, token);
   const rows = mapRawRows(values).slice(-maxRows);
   const pending = selectPendingAlerts(rows, state, now).slice(0, maxAlerts);
@@ -144,6 +152,7 @@ async function post(opts) {
     }
 
     await postDiscord(webhookUrl, payload);
+    const claim = state.claims[report.alertId] || {};
     state.posted[report.alertId] = {
       postedAt: new Date().toISOString(),
       title: embed.title,
@@ -153,6 +162,8 @@ async function post(opts) {
     delete state.claims[report.alertId];
     delete state.failed[report.alertId];
     results.push({ alertId: report.alertId, posted: true });
+    saveState(statePath, state);
+    await writePremiumLogEventsSafe([buildPostLogEvent(report, embed, claim)]);
   }
 
   if (!dryRun) saveState(statePath, state);
@@ -185,6 +196,7 @@ async function fail(opts) {
     delete state.claims[item.alertId];
   }
   saveState(statePath, state);
+  await writePremiumLogEventsSafe(failures.map(item => buildFailureLogEvent(item, now)));
   console.log(JSON.stringify({ ok: true, failed: failures.length, failures }, null, 2));
 }
 
@@ -341,12 +353,264 @@ async function readSheetValues(spreadsheetId, range, accessToken) {
   return data.values || [];
 }
 
-async function getGoogleAccessToken() {
+async function updateSheetValues(spreadsheetId, range, values, accessToken) {
+  const url = new URL(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}`);
+  url.searchParams.set("valueInputOption", "USER_ENTERED");
+  const response = await fetch(url, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ range, majorDimension: "ROWS", values })
+  });
+  if (!response.ok) {
+    throw new Error(`Sheets update failed: HTTP ${response.status} ${(await response.text()).slice(0, 500)}`);
+  }
+  return response.json();
+}
+
+async function appendSheetValues(spreadsheetId, range, values, accessToken) {
+  const url = new URL(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}:append`);
+  url.searchParams.set("valueInputOption", "USER_ENTERED");
+  url.searchParams.set("insertDataOption", "INSERT_ROWS");
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ majorDimension: "ROWS", values })
+  });
+  if (!response.ok) {
+    throw new Error(`Sheets append failed: HTTP ${response.status} ${(await response.text()).slice(0, 500)}`);
+  }
+  return response.json();
+}
+
+async function batchUpdateSpreadsheet(spreadsheetId, requests, accessToken) {
+  if (!requests.length) return {};
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}:batchUpdate`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ requests })
+  });
+  if (!response.ok) {
+    throw new Error(`Sheets batchUpdate failed: HTTP ${response.status} ${(await response.text()).slice(0, 500)}`);
+  }
+  return response.json();
+}
+
+async function getSpreadsheetSheets(spreadsheetId, accessToken) {
+  const url = new URL(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}`);
+  url.searchParams.set("fields", "sheets.properties(sheetId,title)");
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` }
+  });
+  if (!response.ok) {
+    throw new Error(`Sheets metadata failed: HTTP ${response.status} ${(await response.text()).slice(0, 500)}`);
+  }
+  const data = await response.json();
+  return (data.sheets || []).map(sheet => sheet.properties);
+}
+
+async function ensureSheetWithHeader(spreadsheetId, sheetName, headers, accessToken) {
+  let sheets = await getSpreadsheetSheets(spreadsheetId, accessToken);
+  let sheet = sheets.find(item => item.title === sheetName);
+  if (!sheet) {
+    await batchUpdateSpreadsheet(spreadsheetId, [{ addSheet: { properties: { title: sheetName } } }], accessToken);
+    sheets = await getSpreadsheetSheets(spreadsheetId, accessToken);
+    sheet = sheets.find(item => item.title === sheetName);
+  }
+  if (!sheet) throw new Error(`Could not create or find sheet: ${sheetName}`);
+
+  const headerRange = `${quoteSheetName(sheetName)}!A1:${columnName(headers.length)}1`;
+  const headerValues = await readSheetValues(spreadsheetId, headerRange, accessToken);
+  const current = headerValues[0] || [];
+  const isEmpty = current.length === 0 || current.every(value => String(value || "").trim() === "");
+  if (isEmpty) await updateSheetValues(spreadsheetId, headerRange, [headers], accessToken);
+  return sheet.sheetId;
+}
+
+async function writePremiumLogEventsSafe(events) {
+  if (!events.length) return;
+  try {
+    const config = getPremiumLogConfig();
+    if (!config) return;
+    const token = await getGoogleAccessToken([SHEETS_WRITE_SCOPE]);
+    await ensureSheetWithHeader(config.spreadsheetId, config.logSheetName, LOG_HEADERS, token);
+    await ensureSheetWithHeader(config.spreadsheetId, config.archiveSheetName, ARCHIVE_HEADERS, token);
+    await archiveOldPremiumLogRows(config, token);
+    await appendSheetValues(
+      config.spreadsheetId,
+      `${quoteSheetName(config.logSheetName)}!A:${columnName(LOG_HEADERS.length)}`,
+      events.map(logEventToRow),
+      token
+    );
+  } catch (error) {
+    console.error(JSON.stringify({
+      ok: false,
+      warning: "premium log spreadsheet write skipped",
+      error: error.message
+    }, null, 2));
+  }
+}
+
+async function archiveOldPremiumLogRows(config, accessToken) {
+  const sheetId = await ensureSheetWithHeader(config.spreadsheetId, config.logSheetName, LOG_HEADERS, accessToken);
+  await ensureSheetWithHeader(config.spreadsheetId, config.archiveSheetName, ARCHIVE_HEADERS, accessToken);
+
+  const range = `${quoteSheetName(config.logSheetName)}!A2:${columnName(LOG_HEADERS.length)}`;
+  const values = await readSheetValues(config.spreadsheetId, range, accessToken);
+  if (!values.length) return;
+
+  const cutoffMs = Date.now() - config.retentionDays * 24 * 60 * 60 * 1000;
+  const rowsToArchive = [];
+  const rowNumbersToDelete = [];
+  values.forEach((row, index) => {
+    const eventAtMs = Date.parse(row[0] || "");
+    if (Number.isFinite(eventAtMs) && eventAtMs < cutoffMs) {
+      rowsToArchive.push(rowToWidth(row, LOG_HEADERS.length).concat([new Date().toISOString()]));
+      rowNumbersToDelete.push(index + 2);
+    }
+  });
+  if (!rowsToArchive.length) return;
+
+  await appendSheetValues(
+    config.spreadsheetId,
+    `${quoteSheetName(config.archiveSheetName)}!A:${columnName(ARCHIVE_HEADERS.length)}`,
+    rowsToArchive,
+    accessToken
+  );
+
+  const requests = buildDeleteRowRequests(sheetId, rowNumbersToDelete);
+  await batchUpdateSpreadsheet(config.spreadsheetId, requests, accessToken);
+}
+
+function getPremiumLogConfig() {
+  const spreadsheetId = env("PREMIUM_LOG_SPREADSHEET_ID");
+  if (!spreadsheetId) return null;
+  const sourceId = env("PREMIUM_SPREADSHEET_ID") || env("SPREADSHEET_ID");
+  if (sourceId && spreadsheetId === sourceId) {
+    throw new Error("PREMIUM_LOG_SPREADSHEET_ID must be different from PREMIUM_SPREADSHEET_ID to protect the existing GAS spreadsheet");
+  }
+  return {
+    spreadsheetId,
+    logSheetName: env("PREMIUM_LOG_SHEET_NAME") || "premium_alert_log",
+    archiveSheetName: env("PREMIUM_LOG_ARCHIVE_SHEET_NAME") || "premium_alert_log_archive",
+    retentionDays: positiveInt(env("PREMIUM_LOG_RETENTION_DAYS"), 90)
+  };
+}
+
+function buildPostLogEvent(report, embed, claim) {
+  const fields = fieldsToMap(report.fields || []);
+  return {
+    eventAt: new Date().toISOString(),
+    eventType: "POSTED",
+    alertId: String(report.alertId || ""),
+    symbolCode: String(report.symbolCode || claim.symbolCode || ""),
+    symbolName: String(report.symbolName || claim.symbolName || ""),
+    signalType: String(report.signalType || claim.signalType || ""),
+    title: embed.title || "",
+    tradingViewUrl: embed.url || "",
+    disclosureLinks: fields.get("開示リンク") || fields.get("髢狗､ｺ繝ｪ繝ｳ繧ｯ") || "",
+    sourceUrls: fields.get("Sources") || "",
+    reason: ""
+  };
+}
+
+function buildFailureLogEvent(item, eventAt) {
+  return {
+    eventAt,
+    eventType: "FAILED",
+    alertId: item.alertId,
+    symbolCode: "",
+    symbolName: "",
+    signalType: "",
+    title: "",
+    tradingViewUrl: "",
+    disclosureLinks: "",
+    sourceUrls: "",
+    reason: item.reason
+  };
+}
+
+function logEventToRow(event) {
+  return [
+    event.eventAt || new Date().toISOString(),
+    event.eventType || "",
+    event.alertId || "",
+    event.symbolCode || "",
+    event.symbolName || "",
+    event.signalType || "",
+    event.title || "",
+    event.tradingViewUrl || "",
+    truncate(event.disclosureLinks || "", 5000),
+    truncate(event.sourceUrls || "", 5000),
+    truncate(event.reason || "", 1000)
+  ];
+}
+
+function fieldsToMap(fields) {
+  const map = new Map();
+  for (const field of fields) {
+    const name = String(field.name || "").trim();
+    if (name) map.set(name, String(field.value || "").trim());
+  }
+  return map;
+}
+
+function buildDeleteRowRequests(sheetId, rowNumbers) {
+  const sorted = [...rowNumbers].sort((a, b) => b - a);
+  const groups = [];
+  for (const rowNumber of sorted) {
+    const last = groups[groups.length - 1];
+    if (last && rowNumber === last.startRow - 1) last.startRow = rowNumber;
+    else groups.push({ startRow: rowNumber, endRow: rowNumber });
+  }
+  return groups.map(group => ({
+    deleteDimension: {
+      range: {
+        sheetId,
+        dimension: "ROWS",
+        startIndex: group.startRow - 1,
+        endIndex: group.endRow
+      }
+    }
+  }));
+}
+
+function rowToWidth(row, width) {
+  const result = row.slice(0, width);
+  while (result.length < width) result.push("");
+  return result;
+}
+
+function quoteSheetName(sheetName) {
+  return `'${String(sheetName).replace(/'/g, "''")}'`;
+}
+
+function columnName(index) {
+  let n = index;
+  let out = "";
+  while (n > 0) {
+    n--;
+    out = String.fromCharCode(65 + (n % 26)) + out;
+    n = Math.floor(n / 26);
+  }
+  return out;
+}
+
+async function getGoogleAccessToken(scopes = [SHEETS_READONLY_SCOPE]) {
   const serviceAccount = loadServiceAccount();
   const nowSec = Math.floor(Date.now() / 1000);
   const claim = {
     iss: serviceAccount.client_email,
-    scope: "https://www.googleapis.com/auth/spreadsheets.readonly",
+    scope: scopes.join(" "),
     aud: "https://oauth2.googleapis.com/token",
     exp: nowSec + 3600,
     iat: nowSec

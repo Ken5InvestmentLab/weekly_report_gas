@@ -10,6 +10,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 - `premium_worker/` は既存GAS本体から独立したCodex automation用の読み取り専用worker。プレミアム通知対応では、既存機能保護を最優先し、`gas.txt` / `doPost` / 既存トリガー / `alerts_raw` スキーマを変更しない
 - workerはGoogle Sheets APIで `alerts_raw` を読むだけにし、投稿済み状態は `premium_worker/state/`、生成中ファイルは `premium_worker/out/` に置く（どちらもgit管理しない）
+- プレミアム投稿ログをスプレッドシートへ残す場合は、`PREMIUM_LOG_SPREADSHEET_ID` で既存GAS対象とは別のスプレッドシートを使い、古いログはworker側でアーカイブする
 - Codex automationは毎時起動してよいが、worker側のJST時間ゲート（既定 `PREMIUM_ALLOWED_JST_HOURS=14,16`）で対象時間以外は即終了する
 
 ## デプロイ・実行方法

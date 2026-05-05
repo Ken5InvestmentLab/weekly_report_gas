@@ -16,6 +16,51 @@ fundamental snapshot, then posts a Discord Embed to the premium channel.
 4. Keep `premium_worker/.env`, credentials, `premium_worker/state/`, and
    `premium_worker/out/` untracked.
 
+## Base64 credential option
+
+`GOOGLE_SERVICE_ACCOUNT_JSON_B64` is the full service-account JSON encoded as
+Base64. It is useful when the automation environment can store environment
+variables more easily than local files.
+
+PowerShell:
+
+```powershell
+$jsonPath = "C:\Users\ken5\.secrets\premium-alert-reader.json"
+$json = Get-Content -Raw -Path $jsonPath
+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)) | Set-Clipboard
+```
+
+Then paste the clipboard value into:
+
+```env
+GOOGLE_SERVICE_ACCOUNT_JSON_B64=PASTE_BASE64_VALUE_HERE
+```
+
+Quick decode check:
+
+```powershell
+$decoded = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:GOOGLE_SERVICE_ACCOUNT_JSON_B64))
+($decoded | ConvertFrom-Json).client_email
+```
+
+## Optional spreadsheet log
+
+By default, this worker records posted/failed alerts only in
+`premium_worker/state/`. If you want a spreadsheet log, set
+`PREMIUM_LOG_SPREADSHEET_ID` to a separate spreadsheet ID and share that log
+spreadsheet with the service account as **Editor**.
+
+The worker will create/update:
+
+- `premium_alert_log`
+- `premium_alert_log_archive`
+
+Rows older than `PREMIUM_LOG_RETENTION_DAYS` are moved from the active log sheet
+to the archive sheet automatically before new log rows are appended.
+
+For safety, `PREMIUM_LOG_SPREADSHEET_ID` must be different from
+`PREMIUM_SPREADSHEET_ID`.
+
 ## Commands
 
 ```powershell
