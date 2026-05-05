@@ -5,5 +5,8 @@
 token.json
 
 premium_worker/.env
+premium_worker/*.json
+!premium_worker/package.json
+!premium_worker/package-lock.json
 premium_worker/out/
 premium_worker/state/
