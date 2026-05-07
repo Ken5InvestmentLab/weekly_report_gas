@@ -1870,7 +1870,7 @@ function fetchOHLCVForNewAlertsMiddayInternal_(outerStartedAt) {
   for (let i = startIndex; i < symbols.length; i += OHLCV_BATCH_SIZE) {
     const elapsedBeforeBatch = Date.now() - startTime;
     if (elapsedBeforeBatch > LIMIT_MS || (LIMIT_MS - elapsedBeforeBatch) < MIDDAY_DEDUPE_GUARD_MS) {
-      const appended = appendAndNormalizeMiddayOhlcvRows_(ohlcvSheet, allFetchedData, "pause");
+      const appended = appendAndNormalizeMiddayOhlcvRows_(ohlcvSheet, allFetchedData, "pause", todayKey);
       props.setProperty(MIDDAY_STATE_KEY, i.toString());
       props.setProperty(MIDDAY_NEW_ALERT_COUNT_KEY, newAlertCount.toString());
       props.setProperty(MIDDAY_LAST_TS_MAP_KEY, JSON.stringify(lastTsMap));
@@ -1910,7 +1910,7 @@ function fetchOHLCVForNewAlertsMiddayInternal_(outerStartedAt) {
       props.setProperty(MIDDAY_STATE_KEY, i.toString());
       props.setProperty(MIDDAY_NEW_ALERT_COUNT_KEY, newAlertCount.toString());
       props.setProperty(MIDDAY_LAST_TS_MAP_KEY, JSON.stringify(lastTsMap));
-      appendAndNormalizeMiddayOhlcvRows_(ohlcvSheet, allFetchedData, "fetch_error");
+      appendAndNormalizeMiddayOhlcvRows_(ohlcvSheet, allFetchedData, "fetch_error", todayKey);
       scheduleMiddayOhlcvResumeIfAllowed_(60 * 1000);
       return { ok: false, incomplete: true, reason: "fetch_error", message: e.message };
     }
@@ -1945,7 +1945,7 @@ function fetchOHLCVForNewAlertsMiddayInternal_(outerStartedAt) {
     Utilities.sleep(OHLCV_BATCH_SLEEP_MS);
   }
 
-  const appended = appendAndNormalizeMiddayOhlcvRows_(ohlcvSheet, allFetchedData, "complete");
+  const appended = appendAndNormalizeMiddayOhlcvRows_(ohlcvSheet, allFetchedData, "complete", todayKey);
   clearMiddayOhlcvState_();
   sendCompletionNotice_(String(newAlertCount), "0", "AM");
   writeProcessLog_("OHLCV-AM", "13:30先行取得が完了しました。日次メンテナンス・GitHub Actions・GAP修復は起動しません。", {
@@ -1962,16 +1962,43 @@ function filterMiddayOhlcvRows_(rows, todayKey) {
     const ts = row && row.length ? row[0] : null;
     if (!(ts instanceof Date) || isNaN(ts.getTime())) return;
     const dateKey = formatYmd_(ts);
-    if (dateKey > todayKey) return;
-    if (dateKey === todayKey && getOhlcvSessionName_(ts) !== "AM") return;
+    if (dateKey !== todayKey) return;
+    if (getOhlcvSessionName_(ts) !== "AM") return;
     out.push(row);
   });
   return out;
 }
 
-function appendAndNormalizeMiddayOhlcvRows_(sheet, rows, context) {
+function appendAndNormalizeMiddayOhlcvRows_(sheet, rows, context, targetDateKey) {
   if (!rows || rows.length === 0) return 0;
-  const appended = appendRowsToSheet_(sheet, rows);
+  const normalizedRows = [];
+  const skippedSamples = [];
+  const targetKey = targetDateKey || getOhlcvBusinessDateKey_();
+  rows.forEach((row, index) => {
+    const normalized = normalizeMiddayOhlcvRowForWrite_(row, targetKey);
+    if (normalized) {
+      normalizedRows.push(normalized);
+    } else if (skippedSamples.length < 5) {
+      skippedSamples.push({
+        index: index,
+        timestamp: row && row.length ? String(row[0]) : "",
+        alertId: row && row.length > 1 ? String(row[1] || "") : "",
+        symbol: row && row.length > 2 ? String(row[2] || "") : ""
+      });
+    }
+  });
+  const skipped = rows.length - normalizedRows.length;
+  if (skipped > 0) {
+    debugLogToSheet_("ohlcv.midday.skippedInvalidRows", {
+      total: rows.length,
+      valid: normalizedRows.length,
+      skipped: skipped,
+      targetDateKey: targetKey,
+      samples: skippedSamples
+    });
+  }
+  if (normalizedRows.length === 0) return 0;
+  const appended = appendRowsToSheet_(sheet, normalizedRows);
   if (appended > 0) {
     writeProcessLog_("OHLCV-AM", "13:30先行取得で追記したOHLCVを重複排除し、timestamp昇順へ戻します。", {
       context: context || "",
@@ -2009,6 +2036,25 @@ function getMiddayOhlcvFetchEndIso_(dateKey) {
 
 function makeMiddayRefreshId_(dateKey) {
   return `MIDDAY_${normalizeBusinessDateKey_(dateKey)}`;
+}
+
+function parseMiddayAlertDateKey_(alertId) {
+  const m = String(alertId || "").trim().match(/^MIDDAY_(\d{4})-(\d{2})-(\d{2})$/);
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : "";
+}
+
+function makeMiddayTimestampFromAlertId_(alertId) {
+  const dateKey = parseMiddayAlertDateKey_(alertId);
+  if (!dateKey) return null;
+  const ts = new Date(`${dateKey}T09:00:00+09:00`);
+  return isValidOhlcvTimestamp_(ts) && getOhlcvSessionName_(ts) === "AM" ? ts : null;
+}
+
+function getMiddayTimestampRepair_(ts, alertId) {
+  const expected = makeMiddayTimestampFromAlertId_(alertId);
+  if (!expected) return null;
+  if (!isValidOhlcvTimestamp_(ts)) return expected;
+  return ts.getTime() === expected.getTime() ? null : expected;
 }
 
 function clearMiddayOhlcvState_(options) {
@@ -2424,8 +2470,9 @@ if (phase === "PHASE4") {
   debugLogToSheet_("ohlcv.phase4.start", { lastRow: lastRow, elapsedMs: Date.now() - startTime });
   if (lastRow > 1) {
     // ソート: 銘柄(3列目)順 -> 日時(1列目)順 -> alert_id(8列目)降順
+    // Column 2 is alert_id; descending order keeps new_session ahead of MIDDAY_/GAP_ duplicates.
     debugLogToSheet_("ohlcv.phase4.sort_before_dedupe.start", { rows: lastRow - 1 });
-    ohlcvSheet.getRange(2, 1, lastRow - 1, 8).sort([{column:3, ascending:true}, {column:1, ascending:true}, {column:8, ascending:false}]);
+    ohlcvSheet.getRange(2, 1, lastRow - 1, 8).sort([{column:3, ascending:true}, {column:1, ascending:true}, {column:2, ascending:false}]);
     // 重複削除: 日時(1) と 銘柄(3) が一致する行を削除
     debugLogToSheet_("ohlcv.phase4.remove_duplicates.start", { rows: lastRow - 1 });
     ohlcvSheet.getRange(2, 1, lastRow - 1, 8).removeDuplicates([1,3]);
@@ -2582,6 +2629,38 @@ function normalizeOhlcvTimestamp_(value) {
     if (isValidOhlcvTimestamp_(d)) return d;
   }
   return null;
+}
+
+function hasValidOhlcvValuesForWrite_(row) {
+  if (!row || row.length < 8) return false;
+  if (row[7] === "" || row[7] == null) return false;
+  const open = Number(row[3]);
+  const high = Number(row[4]);
+  const low = Number(row[5]);
+  const close = Number(row[6]);
+  const volume = Number(row[7]);
+  if (![open, high, low, close, volume].every(v => Number.isFinite(v))) return false;
+  if (open <= 0 || high <= 0 || low <= 0 || close <= 0) return false;
+  if (volume < 0) return false;
+  if (high < low) return false;
+  if (high < Math.max(open, close)) return false;
+  if (low > Math.min(open, close)) return false;
+  return true;
+}
+
+function normalizeMiddayOhlcvRowForWrite_(row, targetDateKey) {
+  if (!row || !row.length) return null;
+  const out = row.slice(0, 8);
+  while (out.length < 8) out.push("");
+  const alertDateKey = parseMiddayAlertDateKey_(out[1]);
+  if (!alertDateKey) return null;
+  const targetKey = targetDateKey ? normalizeBusinessDateKey_(targetDateKey) : alertDateKey;
+  if (alertDateKey !== targetKey) return null;
+  const ts = makeMiddayTimestampFromAlertId_(out[1]);
+  if (!ts) return null;
+  if (!hasValidOhlcvValuesForWrite_(out)) return null;
+  out[0] = ts;
+  return out;
 }
 
 function normalizeOhlcvRowForWrite_(row) {
@@ -2762,10 +2841,9 @@ function buildOhlcvRequestPairForEndMillis_(tvSymbol, lastTs, runEndMillis, optS
 // ★ 追加: 1h レスポンスの解析（OHLCV 行配列を返す）
 //    fetchOHLCVRecent の解析ロジックをそのまま抽出（GAP_REPAIR 修正込み）
 function getYahooIntraSessionName_(hour, minute) {
-  // Yahoo の JPX 1h 足は 10:00/11:00/... のように区間末尾側の時刻で返る。
-  // 13:00 足は 12:00-13:00 相当として前場（9:00-13:00）に含める。
+  // Yahoo 1h timestamps are bucket starts: AM=09/10/11/12, PM=13/14/15/15:30.
   if (hour < 9 || hour > 15) return "";
-  if (hour < 13 || (hour === 13 && minute === 0)) return "AM";
+  if (hour < 13) return "AM";
   return "PM";
 }
 
@@ -4318,11 +4396,27 @@ function purgeInvalidOhlcvTimestampRows_(sheet, context, maxRows) {
   const startRow = lastRow - scanRows + 1;
   const values = sheet.getRange(startRow, 1, scanRows, 3).getValues();
   const deleteRows = [];
+  const timestampRepairs = [];
   const repairSymbolSet = {};
   const samples = [];
 
   values.forEach((row, index) => {
     const ts = row[0];
+    const alertId = String(row[1] || "").trim();
+    const middayRepairTs = getMiddayTimestampRepair_(ts, alertId);
+    if (middayRepairTs) {
+      timestampRepairs.push({ index: index, row: startRow + index, timestamp: middayRepairTs, alertId: alertId });
+      if (samples.length < 10) {
+        samples.push({
+          row: startRow + index,
+          timestamp: ts == null ? "" : String(ts),
+          reason: "midday_timestamp_repair",
+          symbol: String(row[2] || "").trim(),
+          alertId: alertId
+        });
+      }
+      return;
+    }
     const invalidReason = !isValidOhlcvTimestamp_(ts)
       ? "invalid_timestamp"
       : (!isOhlcvSessionTimestamp_(ts) ? "non_session_timestamp" : "");
@@ -4342,19 +4436,27 @@ function purgeInvalidOhlcvTimestampRows_(sheet, context, maxRows) {
     }
   });
 
-  if (deleteRows.length === 0) return { deletedRows: 0, repairSymbols: 0 };
+  if (timestampRepairs.length > 0) {
+    const tsValues = sheet.getRange(startRow, 1, scanRows, 1).getValues();
+    timestampRepairs.forEach(item => { tsValues[item.index][0] = item.timestamp; });
+    sheet.getRange(startRow, 1, scanRows, 1).setValues(tsValues);
+    sheet.getRange(startRow, 1, scanRows, 1).setNumberFormat("yyyy/mm/dd hh:mm");
+  }
 
-  deleteRowsByRowNums_(sheet, deleteRows);
+  if (deleteRows.length === 0 && timestampRepairs.length === 0) return { deletedRows: 0, repairSymbols: 0, repairedRows: 0 };
+
+  if (deleteRows.length > 0) deleteRowsByRowNums_(sheet, deleteRows);
   const repairSymbols = Object.keys(repairSymbolSet).sort();
   if (repairSymbols.length > 0) setOhlcvRepairSymbols_(repairSymbols);
   writeProcessLog_("OHLCV", "空・無効・対象外時刻のOHLCV行を削除し、対象銘柄を再取得キューへ入れました。", {
     context: context || "",
     scannedRows: scanRows,
     deletedRows: deleteRows.length,
+    repairedRows: timestampRepairs.length,
     repairSymbols: repairSymbols.length,
     samples: samples
   });
-  return { deletedRows: deleteRows.length, repairSymbols: repairSymbols.length };
+  return { deletedRows: deleteRows.length, repairSymbols: repairSymbols.length, repairedRows: timestampRepairs.length };
 }
 
 function maybePurgeInvalidOhlcvTimestampRows_(sheet, context, maxRows, businessDateKey) {
@@ -4388,6 +4490,8 @@ function dedupeAndSortOhlcv_(sheet) {
   purgeInvalidOhlcvTimestampRows_(sheet, "dedupeAndSortOhlcv_", QUICK_REPAIR_TAIL_CLEANUP_ROWS);
   const lastRow = sheet.getLastRow();
   if (lastRow <= 1) return;
+  sheet.getRange(2, 1, lastRow - 1, 8)
+    .sort([{ column: 3, ascending: true }, { column: 1, ascending: true }, { column: 2, ascending: false }]);
   sheet.getRange(2, 1, lastRow - 1, 8).removeDuplicates([1, 3]);
   const afterDedup = sheet.getLastRow();
   if (afterDedup > 1) {
@@ -5536,6 +5640,7 @@ function cleanupLegacyGapFailedAndEmptyTimestamps(dryRun) {
       scannedRows: 0,
       emptyTimestamp: 0,
       invalidSessionTimestamp: 0,
+      middayTimestampRepairs: 0,
       staleGapFailed: 0,
       deletedRows: 0,
       chunks: 0
@@ -5561,6 +5666,7 @@ function cleanupLegacyGapFailedAndEmptyTimestamps(dryRun) {
         scannedRows: state.scannedRows,
         emptyTimestamp: state.emptyTimestamp,
         invalidSessionTimestamp: state.invalidSessionTimestamp || 0,
+        middayTimestampRepairs: state.middayTimestampRepairs || 0,
         staleGapFailed: state.staleGapFailed,
         deletedRows: state.deletedRows,
         chunks: state.chunks
@@ -5570,6 +5676,9 @@ function cleanupLegacyGapFailedAndEmptyTimestamps(dryRun) {
         SpreadsheetApp.flush();
         PropertiesService.getScriptProperties().deleteProperty(QUICK_REPAIR_STATE_KEY);
         PropertiesService.getScriptProperties().deleteProperty(QUICK_REPAIR_CLEANUP_STATE_KEY);
+      } else if (!isDryRun && (state.middayTimestampRepairs || 0) > 0) {
+        dedupeAndSortOhlcv_(sh);
+        SpreadsheetApp.flush();
       }
       if (!isDryRun) {
         summary.autoQuickRepair = scheduleQuickRepairTriggerAfterCleanup_(summary);
@@ -5584,6 +5693,7 @@ function cleanupLegacyGapFailedAndEmptyTimestamps(dryRun) {
     const repairSymbolSet = {};
     let chunkEmpty = 0;
     let chunkInvalidSession = 0;
+    let chunkMiddayRepairs = 0;
     let chunkStale = 0;
 
     for (let i = 0; i < values.length; i++) {
@@ -5591,6 +5701,12 @@ function cleanupLegacyGapFailedAndEmptyTimestamps(dryRun) {
       const ts = values[i][0];
       const alertId = String(values[i][1] || "").trim();
       const sym = String(values[i][2] || "").trim();
+      const middayRepairTs = getMiddayTimestampRepair_(ts, alertId);
+      if (middayRepairTs) {
+        values[i][0] = middayRepairTs;
+        chunkMiddayRepairs++;
+        continue;
+      }
 
       const isEmptyTs = !(ts instanceof Date) || isNaN(ts.getTime());
       if (isEmptyTs) {
@@ -5616,6 +5732,12 @@ function cleanupLegacyGapFailedAndEmptyTimestamps(dryRun) {
       }
     }
 
+    if (!isDryRun && chunkMiddayRepairs > 0) {
+      const tsValues = values.map(row => [row[0]]);
+      sh.getRange(state.nextRow, 1, numRows, 1).setValues(tsValues);
+      sh.getRange(state.nextRow, 1, numRows, 1).setNumberFormat("yyyy/mm/dd hh:mm");
+    }
+
     if (!isDryRun && deleteRows.length > 0) {
       deleteRowsByRowNums_(sh, deleteRows);
       const repairSymbols = Object.keys(repairSymbolSet).sort();
@@ -5629,11 +5751,12 @@ function cleanupLegacyGapFailedAndEmptyTimestamps(dryRun) {
     state.scannedRows += numRows;
     state.emptyTimestamp += chunkEmpty;
     state.invalidSessionTimestamp = (state.invalidSessionTimestamp || 0) + chunkInvalidSession;
+    state.middayTimestampRepairs = (state.middayTimestampRepairs || 0) + chunkMiddayRepairs;
     state.staleGapFailed += chunkStale;
     state.chunks += 1;
     props.setProperty(STATE_KEY, JSON.stringify(state));
 
-    console.log(`[cleanupLegacy] chunk=${state.chunks} scanned=${state.scannedRows} deleteCandidates=${chunkEmpty + chunkInvalidSession + chunkStale} invalidSession=${chunkInvalidSession} nextRow=${state.nextRow}`);
+    console.log(`[cleanupLegacy] chunk=${state.chunks} scanned=${state.scannedRows} deleteCandidates=${chunkEmpty + chunkInvalidSession + chunkStale} invalidSession=${chunkInvalidSession} middayRepairs=${chunkMiddayRepairs} nextRow=${state.nextRow}`);
   }
 
   deleteTriggersByHandler_(RESUME_HANDLER);
