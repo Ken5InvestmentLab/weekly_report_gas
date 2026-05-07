@@ -23,7 +23,7 @@ const RAW_HEADERS = [
 const REQUIRED_FIELDS = ["事業概要", "足元材料", "ファンダ要点", "注意点", "開示リンク", "Sources"];
 const OPTIONAL_FIELDS = ["材料インパクト"];
 const DEFAULT_ALLOWED_HOURS = "13,15";
-const DEFAULT_ALLOWED_MINUTES_BY_HOUR = "13:05,15:36";
+const DEFAULT_ALLOWED_MINUTES_BY_HOUR = "13:00-13:05,15:30-15:36";
 const DEFAULT_SIGNAL_TYPES = "BOTTOM";
 const DEFAULT_ALLOWED_WEEKDAYS = "1,2,3,4,5";
 const CLAIM_TTL_MS = 2 * 60 * 60 * 1000;
@@ -82,6 +82,7 @@ async function collect(opts) {
       skipped: true,
       reason: gate.reason,
       jstHour: gate.jstHour,
+      jstMinute: gate.jstMinute,
       jstWeekday: gate.jstWeekday
     }, null, 2));
     return;
@@ -1172,11 +1173,36 @@ function parseNumberSet(value) {
 function parseMinutePairs(value) {
   const text = String(value || "").trim();
   if (!text || text === "*") return null;
-  const pairs = text.split(",")
-    .map(item => item.trim().match(/^(\d{1,2}):(\d{1,2})$/))
-    .filter(Boolean)
-    .map(([, hour, minute]) => `${Number(hour)}:${String(Number(minute)).padStart(2, "0")}`);
+  const pairs = [];
+  for (const item of text.split(",")) {
+    const trimmed = item.trim();
+    const range = trimmed.match(/^(\d{1,2}):(\d{1,2})\s*-\s*(\d{1,2}):(\d{1,2})$/);
+    if (range) {
+      const [, startHour, startMinute, endHour, endMinute] = range.map(Number);
+      const start = startHour * 60 + startMinute;
+      const end = endHour * 60 + endMinute;
+      if (!isValidJstMinute(startHour, startMinute) || !isValidJstMinute(endHour, endMinute) || end < start) continue;
+      for (let minuteOfDay = start; minuteOfDay <= end; minuteOfDay++) {
+        pairs.push(formatMinutePair(Math.floor(minuteOfDay / 60), minuteOfDay % 60));
+      }
+      continue;
+    }
+
+    const point = trimmed.match(/^(\d{1,2}):(\d{1,2})$/);
+    if (point) {
+      const [, hour, minute] = point.map(Number);
+      if (isValidJstMinute(hour, minute)) pairs.push(formatMinutePair(hour, minute));
+    }
+  }
   return pairs.length ? new Set(pairs) : null;
+}
+
+function isValidJstMinute(hour, minute) {
+  return Number.isInteger(hour) && Number.isInteger(minute) && hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59;
+}
+
+function formatMinutePair(hour, minute) {
+  return `${hour}:${String(minute).padStart(2, "0")}`;
 }
 
 function loadState(statePath) {
@@ -1556,14 +1582,20 @@ function selfTest() {
   const previousHours = process.env.PREMIUM_ALLOWED_JST_HOURS;
   const previousMinutes = process.env.PREMIUM_ALLOWED_JST_MINUTES;
   process.env.PREMIUM_ALLOWED_JST_HOURS = "13,15";
-  process.env.PREMIUM_ALLOWED_JST_MINUTES = "13:05,15:36";
+  process.env.PREMIUM_ALLOWED_JST_MINUTES = "13:00-13:05,15:30-15:36";
+  const gate1300 = evaluateTimeGate(new Date("2026-05-05T04:00:00Z"), false);
   const gate1305 = evaluateTimeGate(new Date("2026-05-05T04:05:00Z"), false);
+  const gate1306 = evaluateTimeGate(new Date("2026-05-05T04:06:00Z"), false);
+  const gate1530 = evaluateTimeGate(new Date("2026-05-05T06:30:00Z"), false);
   const gate1536 = evaluateTimeGate(new Date("2026-05-05T06:36:00Z"), false);
-  const gate1535 = evaluateTimeGate(new Date("2026-05-05T06:35:00Z"), false);
+  const gate1537 = evaluateTimeGate(new Date("2026-05-05T06:37:00Z"), false);
+  assert.equal(gate1300.allowed, true);
   assert.equal(gate1305.allowed, true);
+  assert.equal(gate1306.allowed, false);
+  assert.equal(gate1530.allowed, true);
   assert.equal(gate1536.allowed, true);
-  assert.equal(gate1535.allowed, false);
-  assert.equal(gate1535.reason, "outside allowed JST minute slots");
+  assert.equal(gate1537.allowed, false);
+  assert.equal(gate1537.reason, "outside allowed JST minute slots");
   restoreEnv("PREMIUM_ALLOWED_JST_HOURS", previousHours);
   restoreEnv("PREMIUM_ALLOWED_JST_MINUTES", previousMinutes);
 

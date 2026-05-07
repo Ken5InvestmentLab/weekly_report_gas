@@ -68,8 +68,8 @@ node premium_worker/worker.mjs status
 node premium_worker/worker.mjs self-test
 ```
 
-`collect` runs only at the allowed JST slots by default. Use `--force` for a
-manual test. The default slots are `13:05` and `15:36` JST on weekdays. The
+`collect` runs only inside the allowed JST windows by default. Use `--force` for a
+manual test. The default windows are `13:00-13:05` and `15:30-15:36` JST on weekdays. The
 default signal filter is `BOTTOM`, and already-posted alert IDs are never
 selected again. The same symbol may be selected again when TradingView creates
 a different alert ID.
