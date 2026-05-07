@@ -429,6 +429,7 @@ function buildEmbed(report) {
   assertSourceLinksAreReferencePages(alertId, fieldMap);
   assertDescriptiveLinkLabels(alertId, fieldMap);
   assertJapaneseNarrativeFields(alertId, fieldMap);
+  assertConciseMaterialNarrative(alertId, fieldMap);
   assertNoNarrowDisclosureCaveat(alertId, fieldMap);
   assertNoStaleSingleMaterialSummary(alertId, fieldMap);
   assertNoStaleDisclosureProxyLabels(alertId, fieldMap);
@@ -499,6 +500,25 @@ function assertJapaneseNarrativeFields(alertId, fieldMap) {
 
 function hasJapaneseText(value) {
   return /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/u.test(String(value || ""));
+}
+
+function assertConciseMaterialNarrative(alertId, fieldMap) {
+  const materials = String(fieldMap.get("足元材料") || "").trim();
+  const fundamentals = String(fieldMap.get("ファンダ要点") || "").trim();
+  const disclosure = String(fieldMap.get("開示リンク") || "").trim();
+  if (hasUrl(disclosure) && /^公式IR\/IRBANKを(?:45日|四十五日|少なくとも45日)/.test(materials)) {
+    throw new Error(`report ${alertId} field 足元材料 must lead with material events, not an IRBANK research-log caveat`);
+  }
+
+  const materialSentences = materials
+    .split("。")
+    .map(sentence => sentence.trim())
+    .filter(sentence => sentence.length >= 35);
+  for (const sentence of materialSentences) {
+    if (fundamentals.includes(sentence)) {
+      throw new Error(`report ${alertId} repeats the same long sentence in 足元材料 and ファンダ要点`);
+    }
+  }
 }
 
 function assertNoNarrowDisclosureCaveat(alertId, fieldMap) {
@@ -684,11 +704,11 @@ function extractIrbankDisclosureId(url) {
 function extractIrbankPdfUrlFromHtml(html, disclosureId = "") {
   const escapedId = String(disclosureId || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const specificPattern = escapedId
-    ? new RegExp(`https?:\\/\\/f\\.irbank\\.net\\/pr\\/[^"'<>\\s)]+\\/${escapedId}\\.pdf`, "i")
+    ? new RegExp(`https?:\\/\\/f\\.irbank\\.net\\/(?:pr|pdf)\\/[^"'<>\\s)]+\\/${escapedId}\\.pdf`, "i")
     : null;
   const specific = specificPattern ? String(html || "").match(specificPattern) : null;
   if (specific) return specific[0];
-  const fallback = String(html || "").match(/https?:\/\/f\.irbank\.net\/pr\/[^"'<>\s)]+\.pdf/i);
+  const fallback = String(html || "").match(/https?:\/\/f\.irbank\.net\/(?:pr|pdf)\/[^"'<>\s)]+\.pdf/i);
   return fallback ? fallback[0] : "";
 }
 
@@ -1448,6 +1468,34 @@ function selfTest() {
     ]
   }), /non-descriptive link label/);
   assert.throws(() => buildEmbed({
+    alertId: "a4b",
+    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    symbolCode: "1234",
+    symbolName: "テスト",
+    fields: [
+      { name: "事業概要", value: "精密部品を扱う製造業で、国内外の顧客向けに加工品と関連サービスを提供する会社。受注環境と工場稼働率が収益に効きやすい。" },
+      { name: "足元材料", value: "公式IR/IRBANKを45日分確認したが、直近の個別開示は見当たらず、確認できる開示は限定的。2026年4月30日に業績予想修正を開示し、売上と利益の進捗が確認材料になっている。" },
+      { name: "ファンダ要点", value: "業績予想修正は本業の採算改善と一過性要因を分けて確認する必要がある。利益率、受注残、キャッシュフローの改善が続くか、次回決算で会社計画との進捗差も見たい。" },
+      { name: "注意点", value: "短期の株価材料と中期の業績改善は分けて確認する。需要変動、為替、原材料価格、顧客集中に注意し、単発利益の有無も見たい。" },
+      { name: "開示リンク", value: "[業績予想修正に関するお知らせ](https://example.com/disclosure.pdf)" },
+      { name: "Sources", value: "[株主・投資家情報｜テスト株式会社](https://example.com/ir)" }
+    ]
+  }), /research-log caveat/);
+  assert.throws(() => buildEmbed({
+    alertId: "a4c",
+    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    symbolCode: "1234",
+    symbolName: "テスト",
+    fields: [
+      { name: "事業概要", value: "精密部品を扱う製造業で、国内外の顧客向けに加工品と関連サービスを提供する会社。受注環境と工場稼働率が収益に効きやすい。" },
+      { name: "足元材料", value: "2026年4月30日に業績予想修正を開示し、売上と利益の進捗が確認材料になっている。利益率、受注残、キャッシュフローの改善が次回決算でも続くかを確認したい。" },
+      { name: "ファンダ要点", value: "利益率、受注残、キャッシュフローの改善が次回決算でも続くかを確認したい。会社予想との進捗差、在庫、資金繰りも重要になり、一過性利益と本業採算を分けて見る必要がある。" },
+      { name: "注意点", value: "短期の株価材料と中期の業績改善は分けて確認する。需要変動、為替、原材料価格、顧客集中に注意し、単発利益の有無も見たい。" },
+      { name: "開示リンク", value: "[業績予想修正に関するお知らせ](https://example.com/disclosure.pdf)" },
+      { name: "Sources", value: "[株主・投資家情報｜テスト株式会社](https://example.com/ir)" }
+    ]
+  }), /repeats the same long sentence/);
+  assert.throws(() => buildEmbed({
     alertId: "a5",
     url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
     symbolCode: "1234",
@@ -1525,9 +1573,9 @@ function selfTest() {
     fields: [
       { name: "材料インパクト", value: "様子見" },
       { name: "事業概要", value: "単一領域のサービスを展開する企業で、契約数、単価、固定費の推移が業績確認の中心になる会社。" },
-      { name: "足元材料", value: "公式IR/IRBANKを45日分確認したが、直近の個別開示は見当たらず、確認できる開示は限定的。古い公式資料で事業構成、収益源、リスク要因だけを補助確認し、新規材料としては扱わない。" },
+      { name: "足元材料", value: "確認できる新しい個別材料は乏しく、古い公式資料で事業構成、収益源、リスク要因だけを補助確認する局面。新規材料としては扱わず、次回決算や会社開示で足元の進捗を確認したい。" },
       { name: "ファンダ要点", value: "新しい個別材料が乏しいため、足元の評価は保留気味。既存事業の継続性、利益率、資金繰り、固定費の吸収状況、受注や契約数の変化、次回決算での進捗確認が重要になる。" },
-      { name: "注意点", value: "開示頻度が低い銘柄は、材料の鮮度と流動性を分けて確認したい。古い資料だけで短期材料を強く評価せず、次の会社開示や決算で裏付けを取りたい。" },
+      { name: "注意点", value: "公式IR/IRBANKを45日分確認したが、直近の個別開示は見当たらず、確認できる開示は限定的。古い資料だけで短期材料を強く評価せず、次の会社開示や決算で裏付けを取りたい。" },
       { name: "開示リンク", value: "[有価証券報告書 第29期](https://example.com/securities.pdf)" },
       { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)\n[テスト株式会社 会社概要](https://example.com/company)" }
     ]
@@ -1560,6 +1608,7 @@ function selfTest() {
   }, { title: "千趣会 (8165) | TradingView チャート", url: "https://www.tradingview.com/chart/?symbol=TSE%3A8165" }, {}, "https://discord.com/channels/1/2/3");
   assert.equal(linkedLogEvent.reason, "[混在/要確認: 1Qは売上高91.66億円で前年同期比7.1%減ながら、営業損失は9.88億円と前年同期から損失幅が縮小。](https://discord.com/channels/1/2/3)");
   assert.equal(extractIrbankPdfUrlFromHtml('<a href="https://f.irbank.net/pr/20260401/140120260326590425.pdf">PDF</a>', "140120260326590425"), "https://f.irbank.net/pr/20260401/140120260326590425.pdf");
+  assert.equal(extractIrbankPdfUrlFromHtml('<a href="https://f.irbank.net/pdf/20260430/140120260430514206.pdf">PDF</a>', "140120260430514206"), "https://f.irbank.net/pdf/20260430/140120260430514206.pdf");
   assert.equal(getPostSkipReason("posted-alert", { posted: { "posted-alert": {} }, claims: {} }, null), "already posted");
   assert.equal(getPostSkipReason("unclaimed-alert", { posted: {}, claims: {} }, null), "no active claim");
   assert.equal(getPostSkipReason("claimed-alert", { posted: {}, claims: { "claimed-alert": { claimId: "c1" } } }, { claimId: "c1" }), "");

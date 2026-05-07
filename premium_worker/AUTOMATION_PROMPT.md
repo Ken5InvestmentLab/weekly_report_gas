@@ -42,6 +42,14 @@ Run the premium alert worker for the weekly_report_gas repository.
    sentences, with source-grounded figures, dates, business drivers, or
    confirmation points where available. Avoid one-line generic summaries, but
    stay concise enough for Discord embeds.
+   `足元材料` should read like a concise event timeline, not a research log:
+   lead with the newest important disclosure date, material event, and figures
+   where available, then add one sentence connecting it to the business
+   confirmation point. Do not start with boilerplate such as "official IR/IRBANK
+   was checked for 45 days" when a usable disclosure link exists; mention sparse
+   disclosure checks in `注意点` only when needed. Avoid repeating the same
+   sentence in `足元材料` and `ファンダ要点`, and avoid dumping multiple disclosure
+   titles without explaining their impact.
    You may add an optional `材料インパクト` field with one of:
    `ポジティブ材料`, `ネガティブ材料`, `様子見`, or `混在/要確認`.
    Keep this as a source-grounded material impact label, not a trading action.
@@ -57,9 +65,9 @@ Run the premium alert worker for the weekly_report_gas repository.
    document or disclosure title as closely as possible, such as
    `2026年３月期 第３四半期決算短信〔日本基準〕（連結）` or
    `配当予想の修正（増配・特別配当）に関するお知らせ`; do not use generic
-   labels like `開示1`. IRBANK individual disclosure pages are accepted, but
-   when the page exposes an `f.irbank.net/pr/...pdf` file, the worker prefers
-   the PDF URL in the outgoing embed.
+   labels like `開示1`. IRBANK individual disclosure pages are accepted only as
+   an input fallback; when the page exposes an `f.irbank.net/pdf/...pdf` or
+   `f.irbank.net/pr/...pdf` file, use/prefer that PDF URL in the outgoing embed.
 8. Put 2-4 reference page URLs in `Sources`: company IR pages, disclosure-list
    pages, news pages, business/profile pages, or reputable financial-news pages
    used for grounding. Do not put direct PDFs, TDnet files, IRBANK individual

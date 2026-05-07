@@ -118,6 +118,11 @@ fields are not Japanese text or are too terse to be useful as analysis. Keep
 each narrative field to roughly two short sentences, adding source-grounded
 figures, dates, business drivers, or confirmation points where available while
 staying concise enough for Discord embeds.
+Write `足元材料` as a compact event timeline: newest important disclosure date,
+material event, key figure where available, and why it matters. Do not lead with
+"official IR/IRBANK was checked for 45 days" when a usable disclosure exists;
+put sparse-disclosure caveats in `注意点` only when needed. Avoid repeating the
+same sentence in `足元材料` and `ファンダ要点`.
 Before deciding that timely disclosures are unconfirmed, scan both the
 company's official IR/news disclosure list and an IRBANK/TDnet-style disclosure
 list for at least the 45 days before the alert `receivedAt`, plus any newer
@@ -147,8 +152,9 @@ Markdown link labels should use the actual page or document title as closely as 
 `配当予想の修正（増配・特別配当）に関するお知らせ`. Generic labels like
 `開示1`, `出典1`, `会社IR`, `Source1`, or `PDF1` are rejected because readers
 cannot tell what they are opening. IRBANK individual disclosure pages are
-accepted, but when the page exposes an `f.irbank.net/pr/...pdf` file, the worker
-prefers that PDF URL in the outgoing embed.
+accepted only as an input fallback. When the page exposes an
+`f.irbank.net/pdf/...pdf` or `f.irbank.net/pr/...pdf` file, the worker prefers
+that PDF URL in the outgoing embed.
 
 Do not include buy/sell recommendations, target prices, or any additional
 score. If no disclosure link can be verified, set `開示リンク` to
