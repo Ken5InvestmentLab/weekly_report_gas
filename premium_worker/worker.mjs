@@ -431,6 +431,7 @@ function buildEmbed(report) {
   assertJapaneseNarrativeFields(alertId, fieldMap);
   assertConciseMaterialNarrative(alertId, fieldMap);
   assertNoGenericNarrativeTemplates(alertId, fieldMap);
+  assertNoGenericBusinessOverview(alertId, fieldMap);
   assertNoGenericFundamentalPoint(alertId, fieldMap);
   assertNoNarrowDisclosureCaveat(alertId, fieldMap);
   assertNoStaleSingleMaterialSummary(alertId, fieldMap);
@@ -566,6 +567,38 @@ function assertNoGenericNarrativeTemplates(alertId, fieldMap) {
       if (pattern.test(value)) {
         throw new Error(`report ${alertId} field ${field} is too generic: ${reason}`);
       }
+    }
+  }
+}
+
+function assertNoGenericBusinessOverview(alertId, fieldMap) {
+  const value = String(fieldMap.get("事業概要") || "");
+  const genericPatterns = [
+    {
+      pattern: /開示資料で確認できる/,
+      reason: "describe the actual business, not the source used to identify it"
+    },
+    {
+      pattern: /主要サービス・製品を中心に事業を展開/,
+      reason: "name the actual product, service, or business line"
+    },
+    {
+      pattern: /事業を展開する上場企業/,
+      reason: "being listed is not a business overview"
+    },
+    {
+      pattern: /直近の材料は、?売上成長、?利益率、?資本政策、?事業提携/,
+      reason: "do not list generic impact buckets in the overview"
+    },
+    {
+      pattern: /どれに効くかを分けて見る必要/,
+      reason: "choose the relevant business driver instead of deferring the analysis"
+    }
+  ];
+
+  for (const { pattern, reason } of genericPatterns) {
+    if (pattern.test(value)) {
+      throw new Error(`report ${alertId} field 事業概要 is too generic: ${reason}`);
     }
   }
 }
@@ -1604,6 +1637,20 @@ function selfTest() {
       { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
     ]
   }), /ファンダ要点 is too generic/);
+  assert.throws(() => buildEmbed({
+    alertId: "a4f",
+    url: "https://www.tradingview.com/chart/?symbol=TSE%3A441A",
+    symbolCode: "441A",
+    symbolName: "NE",
+    fields: [
+      { name: "事業概要", value: "NE（441A）は、開示資料で確認できる主要サービス・製品を中心に事業を展開する上場企業です。直近の材料は、売上成長、利益率、資本政策、事業提携のどれに効くかを分けて見る必要があります。" },
+      { name: "足元材料", value: "2026年4月17日に業務提携を開示し、EC支援サービスの連携先拡大が利用店舗数と追加機能利用につながるかが確認材料になる。株主優待だけでなく本業KPIへの接続を見たい。" },
+      { name: "ファンダ要点", value: "EC支援SaaSでは利用店舗数、解約率、ARPU、連携サービス経由の取扱量が収益の見方になる。提携が新規顧客獲得か既存顧客単価の上昇かを分けて確認したい。" },
+      { name: "注意点", value: "提携は基本合意段階だと収益化時期と契約条件が読みづらい。導入社数、手数料率、開発負担、既存顧客への追加販売率が次の確認点になる。" },
+      { name: "開示リンク", value: "[Cafe24 Corp.との業務提携に関する基本合意書の締結に関するお知らせ](https://example.com/disclosure.pdf)" },
+      { name: "Sources", value: "[NE IRニュース一覧](https://example.com/ir/news)" }
+    ]
+  }), /事業概要 is too generic/);
   assert.throws(() => buildEmbed({
     alertId: "a5",
     url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",

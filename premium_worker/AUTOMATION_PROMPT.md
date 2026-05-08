@@ -44,7 +44,10 @@ Run the premium alert worker for the weekly_report_gas repository.
    stay concise enough for Discord embeds.
    Do not use boilerplate that could be copied across symbols. `事業概要`
    must name the actual business model, core product/service, customer segment,
-   or revenue driver for that company. `足元材料` must explain why the selected
+   or revenue driver for that company. Never write a company overview like
+   "開示資料で確認できる主要サービス・製品を中心に事業を展開する上場企業"
+   or "直近の材料は、売上成長、利益率、資本政策、事業提携のどれに効くか".
+   `足元材料` must explain why the selected
    disclosure matters for that specific company, such as SaaS ARR, store
    profitability, financing dilution, facility utilization, order backlog,
    acquisition integration, or governance risk. `ファンダ要点` must choose the
