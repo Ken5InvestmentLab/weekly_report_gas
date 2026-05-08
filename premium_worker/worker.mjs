@@ -430,6 +430,7 @@ function buildEmbed(report) {
   assertDescriptiveLinkLabels(alertId, fieldMap);
   assertJapaneseNarrativeFields(alertId, fieldMap);
   assertConciseMaterialNarrative(alertId, fieldMap);
+  assertNoGenericNarrativeTemplates(alertId, fieldMap);
   assertNoNarrowDisclosureCaveat(alertId, fieldMap);
   assertNoStaleSingleMaterialSummary(alertId, fieldMap);
   assertNoStaleDisclosureProxyLabels(alertId, fieldMap);
@@ -517,6 +518,53 @@ function assertConciseMaterialNarrative(alertId, fieldMap) {
   for (const sentence of materialSentences) {
     if (fundamentals.includes(sentence)) {
       throw new Error(`report ${alertId} repeats the same long sentence in 足元材料 and ファンダ要点`);
+    }
+  }
+}
+
+function assertNoGenericNarrativeTemplates(alertId, fieldMap) {
+  const fields = ["事業概要", "足元材料", "ファンダ要点", "注意点"];
+  const genericPatterns = [
+    {
+      pattern: /開示資料で確認できる主要サービス・製品を中心に事業を展開する上場企業/,
+      reason: "company overview must describe the actual business, not say it was confirmed from disclosures"
+    },
+    {
+      pattern: /売上成長、利益率、資本政策、事業提携のどれに効くか/,
+      reason: "company overview must identify the relevant driver for this company"
+    },
+    {
+      pattern: /IRBANKの開示一覧でも45日前後の新しい材料として追えるため/,
+      reason: "material narrative must explain the disclosure's impact, not the research method"
+    },
+    {
+      pattern: /事業進捗、業績変化、資本政策のいずれに影響するかが確認点/,
+      reason: "material narrative must choose the concrete impact path"
+    },
+    {
+      pattern: /継続収益の拡大、一過性損益、資金調達、提携・M&Aのどれに分類されるか/,
+      reason: "fundamental point must classify the material instead of listing generic categories"
+    },
+    {
+      pattern: /次回決算で売上、営業利益、現金収支への反映を確認したい局面/,
+      reason: "fundamental point must name the company-specific KPI or accounting line"
+    },
+    {
+      pattern: /開示単体では金額、契約期間、希薄化、一過性の区別が十分に読み切れない/,
+      reason: "risk note must name the disclosure-specific uncertainty"
+    },
+    {
+      pattern: /売買判断ではなく、追加IRと決算資料で実際の収益貢献を確認する前提/,
+      reason: "risk note must not rely on generic not-investment-advice boilerplate"
+    }
+  ];
+
+  for (const field of fields) {
+    const value = String(fieldMap.get(field) || "");
+    for (const { pattern, reason } of genericPatterns) {
+      if (pattern.test(value)) {
+        throw new Error(`report ${alertId} field ${field} is too generic: ${reason}`);
+      }
     }
   }
 }
@@ -1495,6 +1543,20 @@ function selfTest() {
       { name: "Sources", value: "[株主・投資家情報｜テスト株式会社](https://example.com/ir)" }
     ]
   }), /repeats the same long sentence/);
+  assert.throws(() => buildEmbed({
+    alertId: "a4d",
+    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    symbolCode: "1234",
+    symbolName: "テスト",
+    fields: [
+      { name: "事業概要", value: "テスト（1234）は、開示資料で確認できる主要サービス・製品を中心に事業を展開する上場企業です。直近の材料は、売上成長、利益率、資本政策、事業提携のどれに効くかを分けて見る必要があります。" },
+      { name: "足元材料", value: "2026年4月10日の適時開示で新しい契約を確認しました。IRBANKの開示一覧でも45日前後の新しい材料として追えるため、事業進捗、業績変化、資本政策のいずれに影響するかが確認点です。" },
+      { name: "ファンダ要点", value: "ファンダ面では、この開示が継続収益の拡大、一過性損益、資金調達、提携・M&Aのどれに分類されるかが重要です。後続として、次回決算で売上、営業利益、現金収支への反映を確認したい局面です。" },
+      { name: "注意点", value: "開示単体では金額、契約期間、希薄化、一過性の区別が十分に読み切れない場合があります。売買判断ではなく、追加IRと決算資料で実際の収益貢献を確認する前提です。" },
+      { name: "開示リンク", value: "[新規契約締結に関するお知らせ](https://example.com/disclosure.pdf)" },
+      { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
+    ]
+  }), /too generic/);
   assert.throws(() => buildEmbed({
     alertId: "a5",
     url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",

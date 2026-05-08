@@ -42,6 +42,17 @@ Run the premium alert worker for the weekly_report_gas repository.
    sentences, with source-grounded figures, dates, business drivers, or
    confirmation points where available. Avoid one-line generic summaries, but
    stay concise enough for Discord embeds.
+   Do not use boilerplate that could be copied across symbols. `事業概要`
+   must name the actual business model, core product/service, customer segment,
+   or revenue driver for that company. `足元材料` must explain why the selected
+   disclosure matters for that specific company, such as SaaS ARR, store
+   profitability, financing dilution, facility utilization, order backlog,
+   acquisition integration, or governance risk. `ファンダ要点` must choose the
+   relevant KPI/accounting line rather than list generic categories.
+   `注意点` must name the company-specific uncertainty; do not rely on generic
+   caveats such as "開示単体では金額、契約期間、希薄化、一過性の区別が十分に
+   読み切れない" unless the sentence immediately explains which of those
+   issues applies and why.
    `足元材料` should read like a concise event timeline, not a research log:
    lead with the newest important disclosure date, material event, and figures
    where available, then add one sentence connecting it to the business
@@ -56,18 +67,37 @@ Run the premium alert worker for the weekly_report_gas repository.
 6. Use the TradingView URL from the claim as the Embed URL. JPX symbols must use
    the TradingView `TSE:` prefix, not `TYO:`. The worker normalizes TradingView
    embed titles to `銘柄名 (証券コード) | TradingView チャート`.
-7. Put only direct disclosure URLs in `開示リンク` when verified: PDF URLs,
-   TDnet `td_download.cgi` file URLs, IRBANK individual disclosure pages, or
-   individual company/PR disclosure detail pages. Do not put IR pages,
-   disclosure-list pages, company-profile pages, or news-list pages in
-   `開示リンク`; put those in `Sources` instead. If no direct disclosure URL can
-   be verified, write `開示リンク未確認`. Link labels must use the actual
-   document or disclosure title as closely as possible, such as
-   `2026年３月期 第３四半期決算短信〔日本基準〕（連結）` or
-   `配当予想の修正（増配・特別配当）に関するお知らせ`; do not use generic
-   labels like `開示1`. IRBANK individual disclosure pages are accepted only as
-   an input fallback; when the page exposes an `f.irbank.net/pdf/...pdf` or
-   `f.irbank.net/pr/...pdf` file, use/prefer that PDF URL in the outgoing embed.
+7. Put only direct disclosure file/detail URLs in `開示リンク` when verified:
+   - direct PDF URLs such as `https://f.irbank.net/pdf/YYYYMMDD/<document_id>.pdf`
+   - direct IRBANK PR PDFs such as `https://f.irbank.net/pr/...pdf`
+   - TDnet `td_download.cgi` file URLs
+   - individual company/PR disclosure detail pages only when no direct PDF file exists
+
+   Do NOT put IRBANK HTML disclosure pages such as
+   `https://irbank.net/<code>/<document_id>` in `開示リンク`.
+   IRBANK HTML pages are allowed only as an input page to discover the real PDF URL.
+
+   When an IRBANK HTML page exposes or corresponds to an `f.irbank.net/pdf/...pdf`
+   or `f.irbank.net/pr/...pdf` file, the outgoing `開示リンク` MUST use that direct
+   `f.irbank.net` file URL, not the `irbank.net` HTML page.
+
+   Example:
+   Wrong:
+   `https://irbank.net/3910/140120260204547074#google_vignette`
+
+   Correct:
+   `https://f.irbank.net/pdf/20260204/140120260204547074.pdf`
+
+   Before writing `premium_worker/out/premium_reports.json`, validate every
+   `開示リンク`. If any URL matches `https://irbank.net/<code>/<document_id>` or
+   contains `#google_vignette`, replace it with the corresponding direct
+   `https://f.irbank.net/pdf/YYYYMMDD/<document_id>.pdf` when the document date
+   can be inferred from the document ID or verified from the page. If the direct
+   file cannot be verified, write `開示リンク未確認` instead of using the IRBANK HTML page.
+
+   Link labels must use the actual document or disclosure title as closely as possible,
+   such as `2026年３月期 第３四半期決算短信〔日本基準〕（連結）` or
+   `配当予想の修正（増配・特別配当）に関するお知らせ`; do not use generic labels like `開示1`.
 8. Put 2-4 reference page URLs in `Sources`: company IR pages, disclosure-list
    pages, news pages, business/profile pages, or reputable financial-news pages
    used for grounding. Do not put direct PDFs, TDnet files, IRBANK individual
