@@ -49,6 +49,12 @@ Run the premium alert worker for the weekly_report_gas repository.
    profitability, financing dilution, facility utilization, order backlog,
    acquisition integration, or governance risk. `ファンダ要点` must choose the
    relevant KPI/accounting line rather than list generic categories.
+   `ファンダ要点` must not start from boilerplate such as "ファンダ面では、
+   この開示が..." or "後続として、次回決算で...". Write the company-specific
+   mechanism instead: for example ARR/churn/ARPU for SaaS, same-store sales and
+   gross margin for retail, order backlog and utilization for manufacturers,
+   dilution and exercise pace for warrants, or occupancy and funding terms for
+   facility operators.
    `注意点` must name the company-specific uncertainty; do not rely on generic
    caveats such as "開示単体では金額、契約期間、希薄化、一過性の区別が十分に
    読み切れない" unless the sentence immediately explains which of those

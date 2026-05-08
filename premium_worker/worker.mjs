@@ -431,6 +431,7 @@ function buildEmbed(report) {
   assertJapaneseNarrativeFields(alertId, fieldMap);
   assertConciseMaterialNarrative(alertId, fieldMap);
   assertNoGenericNarrativeTemplates(alertId, fieldMap);
+  assertNoGenericFundamentalPoint(alertId, fieldMap);
   assertNoNarrowDisclosureCaveat(alertId, fieldMap);
   assertNoStaleSingleMaterialSummary(alertId, fieldMap);
   assertNoStaleDisclosureProxyLabels(alertId, fieldMap);
@@ -565,6 +566,38 @@ function assertNoGenericNarrativeTemplates(alertId, fieldMap) {
       if (pattern.test(value)) {
         throw new Error(`report ${alertId} field ${field} is too generic: ${reason}`);
       }
+    }
+  }
+}
+
+function assertNoGenericFundamentalPoint(alertId, fieldMap) {
+  const value = String(fieldMap.get("ファンダ要点") || "");
+  const genericPatterns = [
+    {
+      pattern: /ファンダ面では、?この開示/,
+      reason: "do not start from 'this disclosure'; name the company's business driver directly"
+    },
+    {
+      pattern: /この開示が[^。]*(?:どれに分類されるか|いずれに分類されるか|分類されるかが重要)/,
+      reason: "choose the actual impact category instead of listing possible categories"
+    },
+    {
+      pattern: /後続として、?次回決算で/,
+      reason: "avoid a generic follow-up phrase; specify the next KPI or accounting item"
+    },
+    {
+      pattern: /次回決算で(?:売上|売上高)、?営業利益、?現金収支/,
+      reason: "do not use the same sales/profit/cash-flow checklist for every company"
+    },
+    {
+      pattern: /実際の収益貢献を確認/,
+      reason: "replace generic revenue-contribution wording with a company-specific metric"
+    }
+  ];
+
+  for (const { pattern, reason } of genericPatterns) {
+    if (pattern.test(value)) {
+      throw new Error(`report ${alertId} field ファンダ要点 is too generic: ${reason}`);
     }
   }
 }
@@ -1557,6 +1590,20 @@ function selfTest() {
       { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
     ]
   }), /too generic/);
+  assert.throws(() => buildEmbed({
+    alertId: "a4e",
+    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    symbolCode: "1234",
+    symbolName: "テスト",
+    fields: [
+      { name: "事業概要", value: "店舗向けクラウド在庫管理を月額課金で提供するSaaS企業で、導入店舗数、解約率、追加機能単価が収益の中心になる会社。" },
+      { name: "足元材料", value: "2026年4月10日に大手小売チェーンへの新規導入を開示し、導入店舗数の拡大がARR増加につながるかが確認材料になっている。既存顧客への追加機能販売もあわせて見る局面。" },
+      { name: "ファンダ要点", value: "ファンダ面では、この開示が継続収益の拡大、一過性損益、資金調達、提携・M&Aのどれに分類されるかが重要です。後続として、次回決算で売上、営業利益、現金収支への反映を確認したい局面です。" },
+      { name: "注意点", value: "導入店舗数が増えても初期費用中心だとARRへの寄与は限定的になる。小売チェーン内の展開率、月額単価、解約率の開示が次の確認点。" },
+      { name: "開示リンク", value: "[大手小売チェーンへの新規導入に関するお知らせ](https://example.com/disclosure.pdf)" },
+      { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
+    ]
+  }), /ファンダ要点 is too generic/);
   assert.throws(() => buildEmbed({
     alertId: "a5",
     url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
