@@ -82,6 +82,14 @@ Run the premium alert worker for the weekly_report_gas repository.
    - TDnet `td_download.cgi` file URLs
    - individual company/PR disclosure detail pages only when no direct PDF file exists
 
+   Do not impose a one-link limit. Include every recent important disclosure
+   used to write `足元材料`, `ファンダ要点`, or `注意点`, such as a quarterly
+   result plus a guidance revision, buyback update, dividend/capital-policy
+   notice, M&A/alliance disclosure, asset-sale/special-gain notice, monthly
+   data, or governance/regulatory release. Keep weak background pages out of
+   `開示リンク`, but do not omit a verified direct disclosure merely because one
+   stronger disclosure is already linked.
+
    Do NOT put IRBANK HTML disclosure pages such as
    `https://irbank.net/<code>/<document_id>` in `開示リンク`.
    IRBANK HTML pages are allowed only as an input page to discover the real PDF URL.
