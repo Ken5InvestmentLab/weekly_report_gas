@@ -6,7 +6,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 天底極致スコアリングBot の週次レポート・OHLCV管理を担う Google Apps Script (GAS) プロジェクト。
 
-TradingView からのアラート Webhook を受信し、JPX銘柄の中期パフォーマンス（5/10/20/40営業日後）を `alerts_raw` で追跡する。OHLCVは Yahoo Finance 1h 足から前場/後場の4時間足相当へ集約し、Discordへ週次レポートを送信する。
+TradingView からのアラート Webhook を受信し、JPX銘柄の中期パフォーマンス（5/10/20/40営業日後）を `alerts_raw` で追跡する。OHLCVは Yahoo Finance 1h 足から前場AM/後場PMの4時間足相当へ集約し、Discordへ週次レポートを送信する。
 
 主な役割は以下。
 
@@ -36,6 +36,17 @@ TradingView からのアラート Webhook を受信し、JPX銘柄の中期パ�
 - 長時間処理は、再開トリガーとスクリプトプロパティで再開可能にする。
 - デバッグログは原則 `console.log`。`debug_webhook` シートへ新規書き込みしない。
 - 投資助言・売買推奨・目標株価・スコア化に見える文言を追加しない。
+
+## OHLCV取得の重要ルール
+
+通常のOHLCV取得窓は `buildOhlcvRequestPairForEndMillis_()` で決定する。
+
+基準値。
+
+```javascript
+OHLCV_DEFAULT_LOOKBACK_DAYS = 120
+RECENT_RANGE_DAYS = 7
+OVERLAP_DAYS = 3
 
 ## プレミアム通知 worker
 
