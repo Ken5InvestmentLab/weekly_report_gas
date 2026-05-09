@@ -48,6 +48,27 @@ OHLCV_DEFAULT_LOOKBACK_DAYS = 120
 RECENT_RANGE_DAYS = 7
 OVERLAP_DAYS = 3
 ```
+
+取得窓の考え方。
+
+| 状態 | 取得方法 |
+|---|---|
+| `lastTs` なし | 直近120日分を `period1/period2` で取得 |
+| `OHLCV_REPAIR_SYMBOLS` 対象 | 直近120日分を強制再取得 |
+| `lastTs` が取得終了時刻以上 | 異常値対策として直近範囲を `period1/period2` で取得 |
+| `lastTs` が直近7日以内 | Yahoo Finance の `range=5d` を使用 |
+| `lastTs` が8日〜120日以内 | `lastTs` の3日前から現在まで `period1/period2` で取得 |
+| `lastTs` が120日より古い | 直近120日分を `period1/period2` で取得 |
+
+重要。
+
+- `range=5d` を使うのは、最終取得が十分新しい場合だけ。
+- `lastTs` が40日前など中途半端に古い場合に `range=5d` を使うと、40日前〜直近5営業日前までの空白期間が生まれる。
+- そのため、8日〜120日以内の既存銘柄は `lastTs - 3日` から取得する。
+- 3日の重ね取りは、Yahoo側の欠損、祝日、前回途中終了、AM/PM合成境界のズレを吸収するため。
+- 取得後は `timestamp + symbol` で重複排除する前提。
+- 120日より古い範囲の補填は通常取得に混ぜず、必要に応じて手動補填関数で明示期間を指定する。
+
 ## プレミアム通知 worker
 
 `premium_worker/` は既存GAS本体から独立した Codex automation 用の読み取り専用worker。
@@ -153,13 +174,6 @@ OVERLAP_DAYS = 3
   - 借入条件
   - その他、銘柄固有の重要KPI
 - `注意点` は開示固有の未確認点を書く。
-  - 希薄化
-  - 契約金額
-  - 稼働率
-  - 受注残
-  - 統合費用
-  - ガバナンス
-  - その他、開示に応じた確認点
 - 開示が本当に少ない銘柄では、公式IR/IRBANKを確認したうえで新しい個別開示がないことを本文に明記すれば、古い公式開示を補助的に `開示リンク` へ置いてよい。
 - 調査/フォローアップ/新規上場レポート、社長名鑑、媒体記事などの代理資料を足元材料の代替として `開示リンク` に置かない。
 - POSTEDログの `Reason` は空欄にしない。
@@ -349,7 +363,10 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 - 対象銘柄は `alerts_raw` に登場する全銘柄。
 - 今日シグナルが出た銘柄数はメタ情報として `OHLCV_MIDDAY_NEW_ALERT_COUNT` に保持。
 - OHLCV未取得銘柄だけ120日分取得。
-- 既存OHLCVがある銘柄は `lastTs` 以降だけ差分取得。
+- 既存OHLCVがある銘柄は、最終timestampに応じて以下の取得窓を使う。
+  - `lastTs` が直近7日以内: `range=5d`
+  - `lastTs` が8日〜120日以内: `lastTs` の3日前から当日AM終端まで
+  - `lastTs` が120日より古い: 直近120日分
 - fetch終端は当日AM分まで。
 - 当日PM行や14:00以降のYahoo足、15:30終値スナップショットは保存しない。
 - 完了時は `dedupeAndSortOhlcv_()` で `ohlcv_4h` を timestamp 昇順へ戻す。
@@ -382,7 +399,10 @@ fetchOHLCVForNewAlerts
 - 対象銘柄は `alerts_raw` に登場する全銘柄 + `OHLCV_REPAIR_SYMBOLS`。
 - OHLCV未取得銘柄は120日分取得。
 - `OHLCV_REPAIR_SYMBOLS` の銘柄は120日分強制再取得。
-- 既存銘柄は `lastTs` 以降だけ差分取得。
+- 既存OHLCVがある銘柄は、最終timestampに応じて以下の取得窓を使う。
+  - `lastTs` が直近7日以内: `range=5d`
+  - `lastTs` が8日〜120日以内: `lastTs` の3日前から現在まで
+  - `lastTs` が120日より古い: 直近120日分
 
 ### OHLCV取得フェーズ
 
@@ -395,7 +415,7 @@ fetchOHLCVForNewAlerts
 
 通常の未指定取得窓は `OHLCV_DEFAULT_LOOKBACK_DAYS = 120` 日。
 
-120日より古い補填は通常処理に混ぜず、以下のような手動補填関数で銘柄・期間を明示して実行する。
+通常取得では、120日超の過去全期間を無制限に取りに行かない。120日より古い補填が必要な場合は、以下のような手動補填関数で銘柄・期間を明示して実行する。
 
 ```javascript
 refetchSymbolGap(symbol, startDate, endDate)
