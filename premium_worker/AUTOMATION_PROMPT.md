@@ -75,6 +75,92 @@ Fundamentally material disclosures include, but are not limited to:
 If the selected disclosure is older than the newest fundamentally material disclosure candidate, the report is invalid. Regenerate it before writing `premium_reports.json`.
 
 When multiple important disclosures are released at the same time, such as a financial result and a capital policy update, include all of them in `足元材料` and `開示リンク`.
+4-B. Determine `材料インパクト` by reading the disclosure content, not by title alone.
+
+The worker's title-based disclosure classification is only a pre-check to decide
+which disclosures must be considered. It is NOT enough to classify the final
+material impact from the title.
+
+For every fundamentally material disclosure selected for the report, open the
+direct PDF/detail page and read the actual content before deciding
+`材料インパクト`.
+
+When deciding `材料インパクト`, evaluate the substance of the disclosure:
+
+- actual earnings figures vs prior year
+- company guidance vs prior guidance / market context
+- upward or downward revision
+- dividend increase / decrease / new shareholder return policy
+- buyback scale and timing
+- capital allocation plan
+- PBR / ROE / capital cost response credibility
+- dilution risk from warrants, CBs, public offering, or third-party allotment
+- special gains / losses and whether they are one-time
+- M&A price, strategic fit, funding burden, and integration risk
+- monthly sales / order / utilization trend
+- governance or regulatory risk
+- whether the disclosure changes the company's medium-term fundamentals
+
+Do not classify as positive or negative merely because the title contains words
+such as:
+- dividend
+- buyback
+- capital cost
+- earnings
+- M&A
+- financing
+- personnel change
+
+Read the numbers, conditions, timing, and business context.
+
+Use one of the following labels:
+
+- `ポジティブ材料`
+- `ネガティブ材料`
+- `様子見`
+- `混在/要確認`
+
+Guidance:
+
+- Use `ポジティブ材料` when the disclosure clearly improves fundamentals,
+  shareholder returns, capital efficiency, earnings visibility, balance sheet
+  quality, or business growth prospects.
+- Use `ネガティブ材料` when the disclosure clearly worsens earnings, guidance,
+  dilution risk, financial risk, governance risk, or business outlook.
+- Use `混在/要確認` when positive and negative elements coexist, such as
+  shareholder returns but weak earnings, M&A growth but funding risk, or capital
+  policy improvement but weak execution visibility.
+- Use `様子見` when the disclosure is relevant but the financial impact,
+  timing, amount, or sustainability is not yet clear.
+
+The first sentence of `足元材料` should mention the disclosure content that
+supports the impact label, not just the disclosure title.
+
+Examples:
+
+- A dividend-related disclosure is not automatically positive. If the company
+  increases dividends despite falling profits or weak cash flow, classify as
+  `混在/要確認` unless the payout is clearly sustainable.
+- A buyback is not automatically positive. If the scale is very small or the
+  company has weak balance sheet conditions, classify as `様子見` or
+  `混在/要確認`.
+- A capital-cost / stock-price-conscious management disclosure is not
+  automatically positive. If it only repeats generic policy with no concrete
+  capital allocation, ROE/PBR target, shareholder return change, or execution
+  plan, classify as `様子見`.
+- An earnings release is not automatically positive or negative. Compare sales,
+  operating profit, ordinary profit, net profit, margins, guidance, and company
+  assumptions.
+- A financing disclosure is not automatically negative. Evaluate dilution,
+  use of proceeds, funding necessity, exercise conditions, and expected business
+  return.
+- An M&A disclosure is not automatically positive. Evaluate acquisition price,
+  earnings contribution, strategic fit, goodwill/integration risk, and funding
+  burden.
+
+Do not write `材料インパクト` until the selected disclosure content has been read.
+If the disclosure file cannot be opened or the content cannot be verified, use
+`混在/要確認` or `様子見`, and explain the uncertainty in `注意点`.
 5. Create `premium_worker/out/premium_reports.json` with one report per alert.
    Each report must include fields named exactly:
    `事業概要`, `足元材料`, `ファンダ要点`, `注意点`, `開示リンク`, `Sources`.
