@@ -272,6 +272,43 @@ Examples:
 
 ---
 
+## Material impact judgment policy
+
+The title-based disclosure classification is only a pre-check to decide which
+disclosures must be considered.
+
+`材料インパクト` must be decided by reading the actual disclosure content, not by
+the title alone.
+
+Do not classify a disclosure as positive or negative merely because the title
+contains words such as dividend, buyback, capital cost, earnings, M&A, financing,
+or personnel change.
+
+Evaluate:
+
+- actual earnings figures
+- guidance changes
+- margin trend
+- shareholder return amount and sustainability
+- buyback scale
+- dilution risk
+- capital allocation credibility
+- PBR / ROE / capital cost response
+- special gains or losses
+- M&A price, funding burden, and integration risk
+- monthly sales / orders / utilization trend
+- governance or regulatory impact
+
+Use:
+
+- `ポジティブ材料` when the content clearly improves fundamentals, shareholder
+  returns, capital efficiency, earnings visibility, or business growth prospects.
+- `ネガティブ材料` when the content clearly worsens earnings, guidance, dilution
+  risk, financial risk, governance risk, or business outlook.
+- `混在/要確認` when positive and negative elements coexist.
+- `様子見` when the disclosure is relevant but the financial impact, timing,
+  amount, or sustainability is not yet clear.
+
 ## Report JSON shape
 
 Codex should create `premium_worker/out/premium_reports.json` like this:
