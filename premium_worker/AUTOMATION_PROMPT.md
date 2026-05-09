@@ -191,7 +191,7 @@ If the disclosure file cannot be opened or the content cannot be verified, use
    読み切れない" unless the sentence immediately explains which of those
    issues applies and why.
    `足元材料` should read like a concise event timeline, not a research log:
-   lead with the newest important disclosure date, material event, and figures
+   lead with the newest fundamentally material disclosure date, material event, and figures
    where available, then add one sentence connecting it to the business
    confirmation point. Do not start with boilerplate such as "official IR/IRBANK
    was checked for 45 days" when a usable disclosure link exists; mention sparse
@@ -215,7 +215,7 @@ Keep this as a source-grounded material impact label, not a trading action.
    - TDnet `td_download.cgi` file URLs
    - individual company/PR disclosure detail pages only when no direct PDF file exists
 
-   Do not impose a one-link limit. Include every recent important disclosure
+   Do not impose a one-link limit. Include every recent fundamentally material disclosure
    used to write `足元材料`, `ファンダ要点`, or `注意点`, such as a quarterly
    result plus a guidance revision, buyback update, dividend/capital-policy
    notice, M&A/alliance disclosure, asset-sale/special-gain notice, monthly
