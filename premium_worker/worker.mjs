@@ -108,12 +108,15 @@ async function collect(opts) {
 
   for (const alert of pending) {
     state.claims[alert.alertId] = {
-      claimId,
-      claimedAt: now.toISOString(),
-      signalType: alert.signalType,
-      symbolCode: alert.symbolCode,
-      symbolName: alert.symbolName
-    };
+  claimId,
+  claimedAt: now.toISOString(),
+  receivedAt: alert.receivedAt,
+  signalDate: alert.signalDate,
+  signalType: alert.signalType,
+  symbolCode: alert.symbolCode,
+  symbolName: alert.symbolName,
+  tradingViewUrl: alert.tradingViewUrl
+};
   }
   saveState(statePath, state);
 
@@ -157,6 +160,7 @@ async function post(opts) {
         continue;
       }
 
+      await assertNoNewerIrbankDisclosureMiss(report, claim);
       await resolveIrbankPdfDisclosureLinks(report);
       const embed = buildEmbed(report);
       const payload = {
@@ -760,6 +764,290 @@ async function resolveIrbankPdfDisclosureLinks(report) {
   if (!field || !field.value || String(field.value).trim() === "開示リンク未確認") return report;
   field.value = await replaceMarkdownLinkUrls(field.value, async url => resolveIrbankDisclosurePdfUrl(url));
   return report;
+}
+
+async function assertNoNewerIrbankDisclosureMiss(report, claim) {
+  const alertId = String(report.alertId || "").trim();
+  const symbolCode = String(report.symbolCode || claim?.symbolCode || "").trim();
+  if (!symbolCode) return;
+
+  const receivedAtMs = parseReceivedAtMs(report.receivedAt || claim?.receivedAt || "");
+  const cutoffMs = receivedAtMs
+    ? receivedAtMs - 45 * 24 * 60 * 60 * 1000
+    : Date.now() - 45 * 24 * 60 * 60 * 1000;
+
+  const candidates = await fetchIrbankDisclosureCandidates(symbolCode);
+
+  const fundamentalCandidates = candidates
+    .filter(item => item.disclosedAtMs >= cutoffMs)
+    .filter(item => isFundamentalDisclosureTitle(item.title))
+    .sort((a, b) => b.disclosedAtMs - a.disclosedAtMs);
+
+  if (!fundamentalCandidates.length) return;
+
+  const newest = fundamentalCandidates[0];
+  const sameTimeNewest = fundamentalCandidates.filter(item => item.disclosedAtMs === newest.disclosedAtMs);
+
+  const reportText = getReportAllText(report);
+  const disclosureText = getReportFieldValue(report, "開示リンク");
+
+  const missing = sameTimeNewest.filter(item => {
+    const titleHit = reportText.includes(item.title) || looseTitleIncluded(reportText, item.title);
+    const urlHit = disclosureText.includes(item.url) || disclosureText.includes(item.documentId);
+    const dateHit = reportMentionsDisclosureDate(reportText, item);
+    return !(titleHit || urlHit) || !dateHit;
+  });
+
+  if (missing.length) {
+    const list = missing.map(item => `${item.dateText} ${item.timeText || ""} ${item.title}`).join(" / ");
+    throw new Error(
+      `report ${alertId} may be stale: newer IRBANK fundamentally material disclosure exists for ${symbolCode}: ${list}`
+    );
+  }
+
+  const newestDateMs = startOfJstDateMs(newest.disclosedAtMs);
+  const reportMaxDateMs = extractNewestDateMentionMs(reportText);
+
+  if (reportMaxDateMs && reportMaxDateMs < newestDateMs) {
+    throw new Error(
+      `report ${alertId} uses an older disclosure while newer IRBANK fundamentally material disclosure exists for ${symbolCode}: ${newest.dateText} ${newest.title}`
+    );
+  }
+}
+
+async function fetchIrbankDisclosureCandidates(symbolCode) {
+  const code = String(symbolCode || "").trim();
+  if (!/^[0-9A-Z]{4,5}$/i.test(code)) return [];
+
+  const url = `https://irbank.net/${encodeURIComponent(code)}/ir`;
+
+  let html = "";
+  try {
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0"
+      }
+    });
+    if (!response.ok) return [];
+    html = await response.text();
+  } catch {
+    return [];
+  }
+
+  const results = [];
+  const linkPattern = new RegExp(
+    `<a[^>]+href=["']\\/${code}\\/(\\d{12,})["'][^>]*>([\\s\\S]*?)<\\/a>`,
+    "gi"
+  );
+
+  let match;
+  while ((match = linkPattern.exec(html)) !== null) {
+    const documentId = match[1];
+    const rawTitle = stripHtml(match[2]);
+    const context = html.slice(Math.max(0, match.index - 700), Math.min(html.length, linkPattern.lastIndex + 700));
+
+    const dateInfo = extractDisclosureDateInfo(context);
+    if (!dateInfo.dateText || !dateInfo.disclosedAtMs) continue;
+
+    results.push({
+      symbolCode: code,
+      documentId,
+      title: normalizeSpaces(rawTitle),
+      dateText: dateInfo.dateText,
+      timeText: dateInfo.timeText,
+      disclosedAtMs: dateInfo.disclosedAtMs,
+      url: `https://irbank.net/${code}/${documentId}`,
+      sourceUrl: url
+    });
+  }
+
+  return dedupeDisclosureCandidates(results);
+}
+
+function extractDisclosureDateInfo(text) {
+  const value = normalizeSpaces(stripHtml(text));
+
+  const ymd =
+    value.match(/(20\d{2})[年\/.-]\s*(\d{1,2})[月\/.-]\s*(\d{1,2})日?/) ||
+    value.match(/(20\d{2})(\d{2})(\d{2})/);
+
+  if (!ymd) return { dateText: "", timeText: "", disclosedAtMs: 0 };
+
+  const year = Number(ymd[1]);
+  const month = Number(ymd[2]);
+  const day = Number(ymd[3]);
+
+  const time = value.match(/(\d{1,2}):(\d{2})/);
+  const hour = time ? Number(time[1]) : 0;
+  const minute = time ? Number(time[2]) : 0;
+
+  const disclosedAtMs = Date.UTC(year, month - 1, day, hour - 9, minute, 0);
+
+  return {
+    dateText: `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`,
+    timeText: time ? `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}` : "",
+    disclosedAtMs
+  };
+}
+
+function isFundamentalDisclosureTitle(title) {
+  return classifyDisclosureTitle(title) === "fundamental";
+}
+
+function isRoutineDisclosureTitle(title) {
+  return classifyDisclosureTitle(title) === "routine";
+}
+
+function classifyDisclosureTitle(title) {
+  const text = String(title || "");
+
+  // 1. ファンダとして必ず優先したい開示
+  if (
+    /決算短信|四半期決算|決算説明資料|決算補足説明資料/.test(text) ||
+    /業績予想|業績修正|上方修正|下方修正|通期予想|連結予想/.test(text) ||
+    /配当|増配|減配|復配|無配|剰余金|自己株式|自社株|株主還元/.test(text) ||
+    /資本コスト|株価を意識|PBR|ROE|資本政策|資本効率/.test(text) ||
+    /中期経営|中計|経営計画|事業計画/.test(text) ||
+    /月次|受注|売上速報|販売状況|稼働率/.test(text) ||
+    /買収|譲渡|取得|売却|合併|会社分割|事業譲受|事業譲渡/.test(text) ||
+    /提携|資本業務|業務提携|共同開発|大型受注|契約締結/.test(text) ||
+    /固定資産|特別利益|特別損失|減損|貸倒|投資有価証券/.test(text) ||
+    /新株予約権|第三者割当|公募増資|CB|MSワラント|希薄化/.test(text)
+  ) {
+    return "fundamental";
+  }
+
+  // 2. 人事でも、ファンダ/ガバナンス上重要になりやすいもの
+  if (
+    /代表取締役|社長交代|CEO|CFO|会長交代/.test(text) ||
+    /監査法人|会計監査人|不適切会計|不正|調査委員会|特別調査/.test(text) ||
+    /訴訟|行政処分|規制|上場維持|改善報告|監理銘柄|特設注意市場/.test(text)
+  ) {
+    return "fundamental";
+  }
+
+  // 3. 原則スルーでよい通常開示
+  if (
+    /人事異動|役員人事|執行役員|組織変更|定款一部変更|支配株主等に関する事項/.test(text) ||
+    /株主総会|招集通知|独立役員届出|コーポレート・ガバナンス報告書/.test(text)
+  ) {
+    return "routine";
+  }
+
+  return "other";
+}
+
+function getReportFieldValue(report, fieldName) {
+  const field = (report.fields || []).find(item => String(item.name || "").trim() === fieldName);
+  return String(field?.value || "");
+}
+
+function getReportAllText(report) {
+  return [
+    report.title,
+    report.symbolCode,
+    report.symbolName,
+    ...(report.fields || []).map(field => `${field.name || ""}\n${field.value || ""}`)
+  ].join("\n");
+}
+
+function looseTitleIncluded(reportText, title) {
+  const a = normalizeTitleForCompare(reportText);
+  const b = normalizeTitleForCompare(title);
+  if (!b) return false;
+
+  if (a.includes(b)) return true;
+
+  // 「資本コストや株価を意識した経営の実現に向けた対応について」系の短縮表現も拾う
+  if (/資本コスト/.test(title) && /資本コスト/.test(reportText)) return true;
+  if (/株価を意識/.test(title) && /株価を意識/.test(reportText)) return true;
+  if (/決算短信/.test(title) && /決算短信/.test(reportText)) return true;
+
+  return false;
+}
+
+function normalizeTitleForCompare(value) {
+  return String(value || "")
+    .replace(/[ \t\r\n　]/g, "")
+    .replace(/[【】「」『』（）()〔〕]/g, "")
+    .trim();
+}
+
+function reportMentionsDisclosureDate(reportText, item) {
+  const date = String(item.dateText || "");
+  const [year, month, day] = date.split("-").map(Number);
+  if (!year || !month || !day) return false;
+
+  const patterns = [
+    `${year}年${month}月${day}日`,
+    `${year}/${month}/${day}`,
+    `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`,
+    `${month}月${day}日`
+  ];
+
+  return patterns.some(pattern => reportText.includes(pattern));
+}
+
+function extractNewestDateMentionMs(text) {
+  const matches = [...String(text || "").matchAll(/(20\d{2})[年\/.-]\s*(\d{1,2})[月\/.-]\s*(\d{1,2})日?/g)];
+  let max = 0;
+
+  for (const match of matches) {
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    const ms = Date.UTC(year, month - 1, day, -9, 0, 0);
+    if (Number.isFinite(ms) && ms > max) max = ms;
+  }
+
+  return max;
+}
+
+function startOfJstDateMs(ms) {
+  const date = new Date(ms);
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(date);
+
+  const year = Number(parts.find(p => p.type === "year")?.value);
+  const month = Number(parts.find(p => p.type === "month")?.value);
+  const day = Number(parts.find(p => p.type === "day")?.value);
+
+  return Date.UTC(year, month - 1, day, -9, 0, 0);
+}
+
+function stripHtml(value) {
+  return String(value || "")
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&#39;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+}
+
+function normalizeSpaces(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function dedupeDisclosureCandidates(items) {
+  const seen = new Set();
+  const out = [];
+
+  for (const item of items) {
+    const key = `${item.documentId}:${item.title}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+
+  return out;
 }
 
 async function replaceMarkdownLinkUrls(value, resolver) {
