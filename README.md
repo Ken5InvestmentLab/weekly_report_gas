@@ -186,6 +186,35 @@ v1.{ts}.{payloadJson}
 
 ## OHLCV取得
 
+通常の取得窓は `buildOhlcvRequestPairForEndMillis_()` で決定します。
+
+基準値。
+
+```javascript
+OHLCV_DEFAULT_LOOKBACK_DAYS = 120
+RECENT_RANGE_DAYS = 7
+OVERLAP_DAYS = 3
+```
+
+取得窓。
+
+| 状態 | 取得方法 |
+|---|---|
+| OHLCV未取得銘柄 | 直近120日分 |
+| `OHLCV_REPAIR_SYMBOLS` 対象銘柄 | 直近120日分を強制再取得 |
+| `lastTs` が直近7日以内 | Yahoo Finance の `range=5d` |
+| `lastTs` が8日〜120日以内 | `lastTs` の3日前から現在まで `period1/period2` |
+| `lastTs` が120日より古い | 直近120日分 |
+| `lastTs` が取得終了時刻以上 | 異常値対策として直近範囲を `period1/period2` |
+
+ポイント。
+
+- `range=5d` は最終取得が十分新しい場合だけ使う。
+- `lastTs` が40日前など中途半端に古い場合は、`range=5d` ではなく `lastTs - 3日` から取得する。
+- これにより、40日前〜直近5営業日前のような空白期間を防ぐ。
+- 3日の重ね取りは、Yahoo側の欠損、祝日、前回途中終了、AM/PM合成境界のズレを吸収するため。
+- 重ね取りで重複した行は `timestamp + symbol` で重複排除する。
+
 ### 13:30先行取得
 
 関数。
@@ -199,7 +228,10 @@ fetchOHLCVForNewAlertsMidday()
 - AM分までのOHLCVを先行取得する。
 - 対象は `alerts_raw` に登場する全銘柄。
 - OHLCV未取得銘柄だけ120日分取得する。
-- 既存OHLCVがある銘柄は `lastTs` 以降だけ取得する。
+- 既存OHLCVがある銘柄は、最終timestampに応じて以下の取得窓を使う。
+  - `lastTs` が直近7日以内: `range=5d`
+  - `lastTs` が8日〜120日以内: `lastTs` の3日前から当日AM終端まで
+  - `lastTs` が120日より古い: 直近120日分
 - 今日シグナルが出た銘柄数はメタ情報として保持する。
 - 16:00本番チェーンには進まない。
 - 日次メンテナンス、GitHub Actions、GAP修復は起動しない。
@@ -219,7 +251,10 @@ fetchOHLCVForNewAlerts()
 - `OHLCV_REPAIR_SYMBOLS` の銘柄も対象に含める。
 - OHLCV未取得銘柄は120日分取得する。
 - 修復対象銘柄は120日分強制再取得する。
-- 既存銘柄は `lastTs` 以降だけ取得する。
+- 既存OHLCVがある銘柄は、最終timestampに応じて以下の取得窓を使う。
+  - `lastTs` が直近7日以内: `range=5d`
+  - `lastTs` が8日〜120日以内: `lastTs` の3日前から現在まで
+  - `lastTs` が120日より古い: 直近120日分
 - PHASE1〜PHASE4を進める。
 - 完了後に日次メンテナンスを起動する。
 
@@ -231,6 +266,20 @@ fetchOHLCVForNewAlerts()
 | `PHASE2` | 株式分割検出・価格調整 |
 | `PHASE3` | 分割調整キュー適用 |
 | `PHASE4` | 重複排除・timestamp昇順ソート・完了通知 |
+
+## Yahoo Finance 1h足の集約
+
+- Yahoo Finance 1h足のtimestampは区間開始時刻として扱う。
+- AMバケット:
+  - 生1h足の `09:00` / `10:00` / `11:00` / `12:00` をマージ
+  - シートtimestampは `09:00 JST`
+- PMバケット:
+  - 生1h足の `13:00` / `14:00` / `15:00` と `15:30` 終値スナップショットを使う
+  - シートtimestampは `13:00 JST`
+- Yahoo生1hの `13:00` 足はPM開始側であり、AMへ混ぜない。
+- `15:30 JST` の `volume=0` かつ `O=H=L=C` バーは後場の終値スナップショットとして扱う。
+- 終値スナップショットはPMバケットの `close` だけを更新し、`open/high/low/volume` には混ぜない。
+- Yahoo Finance の `1d` は、デバッグや分割情報確認など必要な場合に限る。
 
 ## 評価ロジック
 
@@ -415,6 +464,10 @@ purgeOldSignalArchiveRowsDaily()
 
 clearManualOhlcvBusinessDate()
 debugWeekly5bdCandidates()
+
+refetchTodayOhlcv()
+refetchSymbolGap(symbol, startDate, endDate)
+refetchSymbolRange(symbols, startDate, endDate)
 ```
 
 ## プレミアム通知workerとの関係
