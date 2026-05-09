@@ -559,6 +559,8 @@ function postDiscordPayload_(webhookUrl, payload, maxRetries = 3) {
     const body = res.getContentText();
     throw new Error(`Discord webhook failed: HTTP ${code} / ${body}`);
   }
+
+  throw new Error("Discord webhook failed: retry limit exceeded after repeated 429 responses");
 }
 
 /**
