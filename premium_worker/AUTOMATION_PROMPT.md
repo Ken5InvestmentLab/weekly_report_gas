@@ -33,6 +33,48 @@ Run the premium alert worker for the weekly_report_gas repository.
    non-earnings disclosures such as warrant exercise/transfer, M&A progress,
    headquarters relocation, capital allocation, or business progress can be the
    main material.
+4-A. For each claimed alert, before writing the report, build a `disclosure_candidates` list.
+
+You MUST open and scan at least:
+- the company's official IR/news disclosure list
+- IRBANK disclosure list for the symbol
+- TDnet/JPX-style disclosure list or equivalent
+
+Do not rely only on Google/Bing search result snippets.
+Search snippets may be stale. Always open the disclosure list page itself.
+
+For each candidate disclosure, record internally:
+- disclosure date
+- disclosure time if visible
+- title
+- direct PDF/detail URL
+- source page used to discover it
+
+Sort `disclosure_candidates` by disclosure datetime descending.
+
+If any fundamentally material disclosure exists within 45 days before `receivedAt` or newer than `receivedAt` but visible at runtime, the report MUST prioritize the newest fundamentally material disclosure(s).
+
+Do not force routine administrative disclosures into the report merely because they are newest.
+Routine personnel changes, ordinary officer personnel notices, organization changes, shareholders meeting notices, corporate governance reports, and similar administrative notices may be ignored unless they directly affect governance risk, management control, capital policy, earnings, shareholder returns, financing, M&A, business operations, or listing status.
+
+Examples:
+- If the newest disclosure is an ordinary personnel change and the latest fundamentally material disclosure is an older earnings release, using the older earnings release is acceptable.
+- If a newer earnings release exists, do not use an older earnings release as the main material.
+- If a financial result and a capital-cost / stock-price-conscious management policy update are released at the same time, include both.
+- If the disclosure is a representative director change, accounting auditor change, improper accounting investigation, lawsuit, regulatory action, or listing-maintenance issue, treat it as fundamentally material.
+
+Fundamentally material disclosures include, but are not limited to:
+- earnings releases / quarterly or full-year financial results
+- guidance revisions
+- dividends / buybacks / shareholder returns
+- capital cost / stock-price-conscious management policy
+- medium-term plans
+- M&A / alliances / asset sales / special gains or losses
+- governance or regulatory events
+
+If the selected disclosure is older than the newest fundamentally material disclosure candidate, the report is invalid. Regenerate it before writing `premium_reports.json`.
+
+When multiple important disclosures are released at the same time, such as a financial result and a capital policy update, include all of them in `足元材料` and `開示リンク`.
 5. Create `premium_worker/out/premium_reports.json` with one report per alert.
    Each report must include fields named exactly:
    `事業概要`, `足元材料`, `ファンダ要点`, `注意点`, `開示リンク`, `Sources`.
@@ -125,7 +167,56 @@ Run the premium alert worker for the weekly_report_gas repository.
 9. Do not write buy/sell recommendations, target prices, or any additional score.
    Avoid wording such as `買い推奨`, `売り推奨`, `買うべき`, `売るべき`,
    `目標株価`, `利確`, or `損切り`.
-10. Run `node premium_worker/worker.mjs post --input premium_worker/out/premium_reports.json`.
+9-A. Before the real Discord post, run a worker validation dry-run.
+
+Run:
+
+`node premium_worker/worker.mjs post --input premium_worker/out/premium_reports.json --dry-run`
+
+This dry-run is mandatory. Do not run the real post until the dry-run succeeds.
+
+If the dry-run fails, read the JSON error message carefully.
+
+If the error says any of the following:
+- `may be stale`
+- `uses an older disclosure while newer IRBANK fundamentally material disclosure exists`
+- `newer IRBANK fundamentally material disclosure exists`
+- `disclosure link must be a direct disclosure URL`
+- `source link must be a reference/listing page URL`
+- `field 足元材料`
+- `field ファンダ要点`
+- `too generic`
+- `too narrowly scoped`
+- `must include at least one URL in Sources`
+
+then do NOT stop.
+
+Instead:
+1. Identify the failed `alertId` and symbol from the error.
+2. Re-open `premium_worker/out/latest_claim.json`.
+3. Re-open the current `premium_worker/out/premium_reports.json`.
+4. Regenerate only the failed report.
+5. Keep all other valid reports unchanged.
+6. For the failed symbol, open and scan:
+   - the company's official IR/news disclosure list
+   - IRBANK disclosure list for the symbol
+   - TDnet/JPX-style disclosure list or equivalent
+7. Build a fresh `disclosure_candidates` list.
+8. Prioritize the newest fundamentally material disclosure(s), including same-date same-time disclosures.
+9. Rewrite `premium_worker/out/premium_reports.json`.
+10. Run the dry-run again.
+
+Repeat this dry-run → fix → dry-run loop up to 3 total attempts.
+
+If the dry-run still fails after 3 attempts, run:
+
+`node premium_worker/worker.mjs fail --alert-id <alertId> --reason "failed validation after auto-regeneration"`
+
+Do not post that failed alert.
+
+10. Only after the dry-run succeeds, run the real post:
+
+`node premium_worker/worker.mjs post --input premium_worker/out/premium_reports.json`
 11. If a report cannot be grounded with at least one source URL, run
     `node premium_worker/worker.mjs fail --alert-id <alertId> --reason "insufficient verified sources"`
     for that alert instead of posting it.
