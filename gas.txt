@@ -2266,100 +2266,6 @@ function collectAllRawSymbolsFromRaw_(rawSheet) {
   return Array.from(set).sort();
 }
 
-function buildMiddayLastTsMapForBackfill_(sheet, symbols, repairSymsSet, runEndMillis) {
-  const repairSet = repairSymsSet || new Set();
-  const lastTsMap = buildLastTsMapFromOhlcv_(sheet, symbols, repairSet);
-  const coverageMap = buildOhlcvCoverageMapForSymbols_(sheet, symbols, MIDDAY_HISTORY_COVERAGE_SCAN_MAX_ROWS);
-
-  const fullBackfill = {};
-  const dayMs = 24 * 60 * 60 * 1000;
-  const requiredStartMillis = runEndMillis - OHLCV_DEFAULT_LOOKBACK_DAYS * dayMs;
-  const graceMillis = MIDDAY_HISTORY_GRACE_DAYS * dayMs;
-
-  symbols.forEach(sym => {
-    const s = String(sym || "").trim();
-    if (!s) return;
-
-    const c = coverageMap[s];
-    const isRepair = repairSet.has(s);
-    const hasNoHistory = !c || !c.firstTs || !c.lastTs;
-    const historyStartsTooLate = c && c.firstTs && c.firstTs > requiredStartMillis + graceMillis;
-
-    if (isRepair || hasNoHistory || historyStartsTooLate) {
-      delete lastTsMap[s];
-      fullBackfill[s] = true;
-    }
-  });
-
-  const fullBackfillSymbols = Object.keys(fullBackfill).sort();
-
-  debugLogToSheet_("ohlcv.midday.backfillPlan", {
-    totalSymbols: symbols.length,
-    fullBackfillSymbols: fullBackfillSymbols.length,
-    repairSymbols: repairSet.size,
-    requiredStart: new Date(requiredStartMillis).toISOString(),
-    scannedCoverageSymbols: Object.keys(coverageMap).length
-  });
-
-  return {
-    lastTsMap: lastTsMap,
-    fullBackfillSymbols: fullBackfillSymbols
-  };
-}
-
-function buildOhlcvCoverageMapForSymbols_(sheet, symbols, maxRows) {
-  const lastRow = sheet.getLastRow();
-  const map = {};
-  if (lastRow < 2 || !symbols || symbols.length === 0) return map;
-
-  const target = {};
-  symbols.forEach(sym => {
-    const s = String(sym || "").trim();
-    if (s) target[s] = true;
-  });
-
-  const maxScanRows = Math.min(Math.max(1, Number(maxRows) || 1), lastRow - 1);
-  let scannedRows = 0;
-  let row = lastRow;
-  const chunkRows = 5000;
-
-  while (row >= 2 && scannedRows < maxScanRows) {
-    const remain = maxScanRows - scannedRows;
-    const numRows = Math.min(chunkRows, row - 1, remain);
-    const startRow = row - numRows + 1;
-    const values = sheet.getRange(startRow, 1, numRows, 3).getValues();
-
-    values.forEach(r => {
-      const ts = r[0];
-      const sym = String(r[2] || "").trim();
-
-      if (!target[sym]) return;
-      if (!isValidOhlcvTimestamp_(ts)) return;
-      if (!isOhlcvSessionTimestamp_(ts)) return;
-
-      const t = ts.getTime();
-      if (!map[sym]) {
-        map[sym] = { firstTs: t, lastTs: t };
-      } else {
-        if (t < map[sym].firstTs) map[sym].firstTs = t;
-        if (t > map[sym].lastTs) map[sym].lastTs = t;
-      }
-    });
-
-    scannedRows += numRows;
-    row = startRow - 1;
-  }
-
-  debugLogToSheet_("ohlcv.midday.coverageScan", {
-    targetSymbols: Object.keys(target).length,
-    foundSymbols: Object.keys(map).length,
-    scannedRows: scannedRows,
-    maxRows: maxScanRows
-  });
-
-  return map;
-}
-
 function filterMiddayOhlcvRows_(rows, todayKey) {
   const out = [];
   let skippedInvalid = 0;
@@ -3363,6 +3269,8 @@ function buildOhlcvRequestPair_(tvSymbol, lastTs, optStartSec, optEndSec) {
 function buildOhlcvRequestPairForEndMillis_(tvSymbol, lastTs, runEndMillis, optStartSec, optEndSec) {
   const yahooSymbol = convertToYahooSymbol(tvSymbol);
   let timeParam = "";
+  let useRecentRange = false;
+
   if (optStartSec && optEndSec) {
     timeParam = `period1=${optStartSec}&period2=${optEndSec}`;
   } else if (lastTs) {
@@ -3370,21 +3278,28 @@ function buildOhlcvRequestPairForEndMillis_(tvSymbol, lastTs, runEndMillis, optS
     const lastTsSec = Math.floor(lastTs / 1000);
     const diffDays = (nowSec - lastTsSec) / (24 * 60 * 60);
     const lookbackSec = OHLCV_DEFAULT_LOOKBACK_DAYS * 24 * 60 * 60;
+
     if (lastTsSec >= nowSec) {
       const p1 = nowSec - Math.min(7 * 24 * 60 * 60, lookbackSec);
       const p2 = nowSec;
       timeParam = `period1=${p1}&period2=${p2}`;
-      if (isVerboseOhlcvFetchLogEnabled_()) {
-        debugLogToSheet_("fetchOHLCVRecent.period", { symbol: tvSymbol, lastTs: new Date(lastTs).toISOString(), p1: new Date(p1*1000).toISOString(), p2: new Date(p2*1000).toISOString(), lookbackDays: OHLCV_DEFAULT_LOOKBACK_DAYS, reason: "lastTs_after_run_end" });
-      }
+      useRecentRange = false;
     } else if (diffDays > 60) {
       const p1 = nowSec - lookbackSec;
       const p2 = nowSec;
       timeParam = `period1=${p1}&period2=${p2}`;
+      useRecentRange = false;
+
       if (isVerboseOhlcvFetchLogEnabled_()) {
-        debugLogToSheet_("fetchOHLCVRecent.fullRefresh", { symbol: tvSymbol, diffDays: diffDays.toFixed(1), lookbackDays: OHLCV_DEFAULT_LOOKBACK_DAYS });
+        debugLogToSheet_("fetchOHLCVRecent.fullRefresh", {
+          symbol: tvSymbol,
+          diffDays: diffDays.toFixed(1),
+          lookbackDays: OHLCV_DEFAULT_LOOKBACK_DAYS
+        });
       }
     } else {
+      useRecentRange = true;
+
       const minBackSec = 7 * 24 * 60 * 60;
       const maxBackSec = lookbackSec;
       let p1 = lastTsSec - minBackSec;
@@ -3392,34 +3307,25 @@ function buildOhlcvRequestPairForEndMillis_(tvSymbol, lastTs, runEndMillis, optS
       if (p1 < p1Limit) p1 = p1Limit;
       const p2 = nowSec;
       timeParam = `period1=${p1}&period2=${p2}`;
-      if (isVerboseOhlcvFetchLogEnabled_()) {
-        debugLogToSheet_("fetchOHLCVRecent.period", { symbol: tvSymbol, lastTs: new Date(lastTs).toISOString(), p1: new Date(p1*1000).toISOString(), p2: new Date(p2*1000).toISOString(), lookbackDays: OHLCV_DEFAULT_LOOKBACK_DAYS });
-      }
     }
   } else {
     const p2 = Math.floor(runEndMillis / 1000);
     const p1 = p2 - OHLCV_DEFAULT_LOOKBACK_DAYS * 24 * 60 * 60;
     timeParam = `period1=${p1}&period2=${p2}`;
-    if (isVerboseOhlcvFetchLogEnabled_()) {
-      debugLogToSheet_("fetchOHLCVRecent.period", { symbol: tvSymbol, p1: new Date(p1*1000).toISOString(), p2: new Date(p2*1000).toISOString(), lookbackDays: OHLCV_DEFAULT_LOOKBACK_DAYS });
-    }
   }
-  const isIncrementalRecent = !!lastTs && !optStartSec && !optEndSec;
 
-let dailyUrl;
-let intraUrl;
+  let dailyUrl;
+  let intraUrl;
 
-if (isIncrementalRecent) {
-  // 直近更新は period1/period2 より range=5d の方が安定する
-  dailyUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooSymbol}?interval=1d&range=5d`;
-  intraUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooSymbol}?interval=1h&range=5d`;
-} else {
-  // 初回120日取得・明示期間指定は従来どおり
-  dailyUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooSymbol}?interval=1d&${timeParam}`;
-  intraUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooSymbol}?interval=1h&${timeParam}`;
-}
+  if (useRecentRange) {
+    dailyUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooSymbol}?interval=1d&range=5d`;
+    intraUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooSymbol}?interval=1h&range=5d`;
+  } else {
+    dailyUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooSymbol}?interval=1d&${timeParam}`;
+    intraUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooSymbol}?interval=1h&${timeParam}`;
+  }
 
-return { dailyUrl: dailyUrl, intraUrl: intraUrl };
+  return { dailyUrl: dailyUrl, intraUrl: intraUrl };
 }
 
 function buildDailyOhlcvMapFromYahooResponse_(dailyRes) {
@@ -3473,10 +3379,11 @@ function toFiniteNumberOrZero_(value) {
 // ★ 追加: 1h レスポンスの解析（OHLCV 行配列を返す）
 //    fetchOHLCVRecent の解析ロジックをそのまま抽出（GAP_REPAIR 修正込み）
 function getYahooIntraSessionName_(hour, minute) {
-  // YahooのJPX 1h足は区間末尾側の時刻で返ることがある。
-  // 13:00は前場側、13:01以降〜16:00は後場側として扱う。
+  // YahooのJPX 1h足は区間開始時刻として扱う。
+  // AM: 09:00 / 10:00 / 11:00 / 12:00
+  // PM: 13:00 / 14:00 / 15:00 / 15:30 or 16:00 snapshot
   if (hour < 9) return "";
-  if (hour < 13 || (hour === 13 && minute === 0)) return "AM";
+  if (hour < 13) return "AM";
   if (hour < 16 || (hour === 16 && minute === 0)) return "PM";
   return "";
 }
@@ -3804,12 +3711,6 @@ function reduceSessionVolumesEvenly_(am, pm, overAmount, ymd, dailyVol, amBefore
     amAfter: am.volume,
     pmAfter: pm.volume
   });
-}
-
-
-function toSafeVolumeNumber_(value) {
-  const n = Number(value);
-  return Number.isFinite(n) ? Math.round(n) : 0;
 }
 
 // ★ 変更: fetchOHLCVRecent は URL構築 → 1h fetch → 解析の薄いラッパー
