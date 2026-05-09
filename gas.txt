@@ -563,32 +563,69 @@ function postDiscordPayload_(webhookUrl, payload, maxRetries = 3) {
 
 /**
  * 延期された Discord ペイロードを再送する（トリガーから呼ばれる）
+ *
+ * ポイント:
+ * - 実行開始時に、自分自身の古い .after() トリガーを削除する
+ * - 再送中に再び長時間429になった場合は、postDiscordPayload_ 側で新しいトリガーが作られる
+ * - そのため、最後の finally では deleteTriggersByHandler_ を呼ばない
  */
 function sendDeferredDiscordPayload() {
+  const handlerName = "sendDeferredDiscordPayload";
   const props = PropertiesService.getScriptProperties();
   const deferredKey = "DEFERRED_DISCORD_PAYLOAD";
+
+  // 自分を起動したトリガーや、残っている同名トリガーを先に掃除する
+  // ※後で消すと、再429時に postDiscordPayload_ が作った新トリガーまで消す可能性がある
+  deleteTriggersByHandler_(handlerName);
+
   const raw = props.getProperty(deferredKey);
-  if (!raw) return;
+  if (!raw) {
+    writeProcessLog_("Discord通知", "延期Discord通知の保存データがないため、再送をスキップしました。残存トリガーは削除済みです。", {
+      handlerName: handlerName
+    });
+    return { ok: true, skipped: true, reason: "no deferred payload" };
+  }
 
   let data;
   try {
     data = JSON.parse(raw);
   } catch (e) {
     props.deleteProperty(deferredKey);
-    return;
+    writeProcessLog_("Discord通知", "延期Discord通知の保存データがJSONとして不正だったため、削除しました。", {
+      message: e && e.message ? e.message : String(e)
+    });
+    return { ok: false, deleted: true, reason: "invalid deferred payload json" };
   }
 
   try {
     const result = postDiscordPayload_(data.webhookUrl, data.payload);
-    if (!result.deferred) {
-      // 成功 or 致命的エラー（429以外）ならプロパティ削除
-      props.deleteProperty(deferredKey);
+
+    if (result && result.deferred) {
+      // 再び長時間429になった場合:
+      // postDiscordPayload_ 側で新しい sendDeferredDiscordPayload トリガーが作られている。
+      // ここでプロパティやトリガーは消さない。
+      writeProcessLog_("Discord通知", "延期Discord通知の再送中に再度レート制限となったため、次回トリガーへ再延期しました。", {
+        retryAfterMs: result.retryAfterMs || ""
+      });
+      return { ok: true, deferred: true, retryAfterMs: result.retryAfterMs || "" };
     }
-    // deferred が true なら再びトリガーが設定されるので放置
-  } catch (e) {
-    writeProcessLog_("Discord通知", "延期していたDiscord通知の再送に失敗しました。保存済みペイロードを削除します。", { message: e.message });
-    // 最終的にあきらめる場合はプロパティ削除
+
+    // 成功した場合
     props.deleteProperty(deferredKey);
+    writeProcessLog_("Discord通知", "延期していたDiscord通知の再送に成功しました。保存済みペイロードを削除しました。", {
+      status: result && result.status ? result.status : ""
+    });
+    return { ok: true, sent: true, result: result };
+
+  } catch (e) {
+    writeProcessLog_("Discord通知", "延期していたDiscord通知の再送に失敗しました。保存済みペイロードを削除します。", {
+      message: e && e.message ? e.message : String(e)
+    });
+
+    // 429以外など、postDiscordPayload_ が例外を投げた場合はあきらめる
+    props.deleteProperty(deferredKey);
+
+    return { ok: false, deleted: true, error: e && e.message ? e.message : String(e) };
   }
 }
 
