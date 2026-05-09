@@ -199,8 +199,13 @@ If the disclosure file cannot be opened or the content cannot be verified, use
    sentence in `足元材料` and `ファンダ要点`, and avoid dumping multiple disclosure
    titles without explaining their impact.
    You may add an optional `材料インパクト` field with one of:
-   `ポジティブ材料`, `ネガティブ材料`, `様子見`, or `混在/要確認`.
-   Keep this as a source-grounded material impact label, not a trading action.
+`ポジティブ材料`, `ネガティブ材料`, `様子見`, or `混在/要確認`.
+
+`材料インパクト` must be based on the content of the selected disclosure(s),
+not on the title alone. Read the actual PDF/detail page, compare the numbers,
+conditions, and business context, then choose the label.
+
+Keep this as a source-grounded material impact label, not a trading action.
 6. Use the TradingView URL from the claim as the Embed URL. JPX symbols must use
    the TradingView `TSE:` prefix, not `TYO:`. The worker normalizes TradingView
    embed titles to `銘柄名 (証券コード) | TradingView チャート`.
