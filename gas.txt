@@ -3271,8 +3271,19 @@ function buildOhlcvRequestPairForEndMillis_(tvSymbol, lastTs, runEndMillis, optS
   let timeParam = "";
   let useRecentRange = false;
 
+  // 直近扱いにする日数。
+  // lastTsがこれ以内なら、Yahooのrange=5dで十分。
+  const RECENT_RANGE_DAYS = 5;
+
+  // 差分取得時の重ね取り日数。
+  // lastTsちょうどからではなく、少し前から取り直して欠損を吸収する。
+  const OVERLAP_DAYS = 3;
+
   if (optStartSec && optEndSec) {
+    // 明示的に期間指定された場合は、その指定を最優先する。
     timeParam = `period1=${optStartSec}&period2=${optEndSec}`;
+    useRecentRange = false;
+
   } else if (lastTs) {
     const nowSec = Math.floor(runEndMillis / 1000);
     const lastTsSec = Math.floor(lastTs / 1000);
@@ -3280,11 +3291,59 @@ function buildOhlcvRequestPairForEndMillis_(tvSymbol, lastTs, runEndMillis, optS
     const lookbackSec = OHLCV_DEFAULT_LOOKBACK_DAYS * 24 * 60 * 60;
 
     if (lastTsSec >= nowSec) {
-      const p1 = nowSec - Math.min(7 * 24 * 60 * 60, lookbackSec);
+      // lastTsが未来または取得終了時刻以上なら、異常値対策として直近だけ取り直す。
+      const p1 = nowSec - Math.min(RECENT_RANGE_DAYS * 24 * 60 * 60, lookbackSec);
       const p2 = nowSec;
       timeParam = `period1=${p1}&period2=${p2}`;
       useRecentRange = false;
-    } else if (diffDays > 60) {
+
+      if (isVerboseOhlcvFetchLogEnabled_()) {
+        debugLogToSheet_("fetchOHLCVRecent.futureLastTs", {
+          symbol: tvSymbol,
+          diffDays: diffDays.toFixed(1),
+          p1: p1,
+          p2: p2
+        });
+      }
+
+    } else if (diffDays <= RECENT_RANGE_DAYS) {
+      // 最終取得がかなり新しい場合。
+      // Yahooの直近5日レンジで十分。祝日・取得漏れも吸収しやすい。
+      useRecentRange = true;
+
+      if (isVerboseOhlcvFetchLogEnabled_()) {
+        debugLogToSheet_("fetchOHLCVRecent.recentRange", {
+          symbol: tvSymbol,
+          diffDays: diffDays.toFixed(1),
+          range: "5d"
+        });
+      }
+
+    } else if (diffDays <= OHLCV_DEFAULT_LOOKBACK_DAYS) {
+      // 最終取得が古いが、120日以内の場合。
+      // range=5dでは空白期間が生まれるため、lastTsの少し前から現在まで取得する。
+      const overlapSec = OVERLAP_DAYS * 24 * 60 * 60;
+      let p1 = lastTsSec - overlapSec;
+      const p1Limit = nowSec - lookbackSec;
+      if (p1 < p1Limit) p1 = p1Limit;
+
+      const p2 = nowSec;
+      timeParam = `period1=${p1}&period2=${p2}`;
+      useRecentRange = false;
+
+      if (isVerboseOhlcvFetchLogEnabled_()) {
+        debugLogToSheet_("fetchOHLCVRecent.gapFill", {
+          symbol: tvSymbol,
+          diffDays: diffDays.toFixed(1),
+          overlapDays: OVERLAP_DAYS,
+          p1: p1,
+          p2: p2
+        });
+      }
+
+    } else {
+      // 最終取得が120日より古い場合。
+      // 評価に必要な範囲を超えているので、120日分だけ取り直す。
       const p1 = nowSec - lookbackSec;
       const p2 = nowSec;
       timeParam = `period1=${p1}&period2=${p2}`;
@@ -3297,21 +3356,15 @@ function buildOhlcvRequestPairForEndMillis_(tvSymbol, lastTs, runEndMillis, optS
           lookbackDays: OHLCV_DEFAULT_LOOKBACK_DAYS
         });
       }
-    } else {
-      useRecentRange = true;
-
-      const minBackSec = 7 * 24 * 60 * 60;
-      const maxBackSec = lookbackSec;
-      let p1 = lastTsSec - minBackSec;
-      const p1Limit = nowSec - maxBackSec;
-      if (p1 < p1Limit) p1 = p1Limit;
-      const p2 = nowSec;
-      timeParam = `period1=${p1}&period2=${p2}`;
     }
+
   } else {
+    // OHLCV未取得の完全新規銘柄。
+    // 120日分取得する。
     const p2 = Math.floor(runEndMillis / 1000);
     const p1 = p2 - OHLCV_DEFAULT_LOOKBACK_DAYS * 24 * 60 * 60;
     timeParam = `period1=${p1}&period2=${p2}`;
+    useRecentRange = false;
   }
 
   let dailyUrl;
