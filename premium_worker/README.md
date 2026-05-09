@@ -1,9 +1,17 @@
 # Premium Alert Worker
 
 This worker is intentionally separate from the existing GAS project.
+
 It does not edit `gas.txt`, does not call GAS functions, and does not write to
 the existing spreadsheet. It reads `alerts_raw`, lets Codex research a short
 fundamental snapshot, then posts a Discord Embed to the premium channel.
+
+The worker is designed to prevent stale or weak fundamental reports from being
+posted. Before the real Discord post, use `--dry-run` to validate the report JSON,
+disclosure links, source links, Japanese narrative fields, generic wording, and
+whether a newer fundamentally material disclosure was missed.
+
+---
 
 ## Required setup
 
@@ -13,8 +21,13 @@ fundamental snapshot, then posts a Discord Embed to the premium channel.
    - `PREMIUM_SPREADSHEET_ID`
    - `GOOGLE_APPLICATION_CREDENTIALS` or `GOOGLE_SERVICE_ACCOUNT_JSON`
    - `DISCORD_PREMIUM_WEBHOOK_URL`
-4. Keep `premium_worker/.env`, credentials, `premium_worker/state/`, and
-   `premium_worker/out/` untracked.
+4. Keep the following untracked:
+   - `premium_worker/.env`
+   - credentials
+   - `premium_worker/state/`
+   - `premium_worker/out/`
+
+---
 
 ## Base64 credential option
 
@@ -43,12 +56,16 @@ $decoded = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:GOOG
 ($decoded | ConvertFrom-Json).client_email
 ```
 
+---
+
 ## Optional spreadsheet log
 
 By default, this worker records posted/failed alerts only in
-`premium_worker/state/`. If you want a spreadsheet log, set
-`PREMIUM_LOG_SPREADSHEET_ID` to a separate spreadsheet ID and share that log
-spreadsheet with the service account as **Editor**.
+`premium_worker/state/`.
+
+If you want a spreadsheet log, set `PREMIUM_LOG_SPREADSHEET_ID` to a separate
+spreadsheet ID and share that log spreadsheet with the service account as
+**Editor**.
 
 The worker will create/update `premium_alert_log`. Rows older than
 `PREMIUM_LOG_RETENTION_DAYS` are deleted automatically before new log rows are
@@ -57,31 +74,203 @@ appended.
 For safety, `PREMIUM_LOG_SPREADSHEET_ID` must be different from
 `PREMIUM_SPREADSHEET_ID`.
 
+---
+
 ## Commands
+
+### From repository root
+
+Run these commands when your current directory is:
+
+```text
+weekly_report_gas>
+```
+
+```powershell
+node --check premium_worker/worker.mjs
+node premium_worker/worker.mjs self-test
+node premium_worker/worker.mjs collect
+node premium_worker/worker.mjs post --input premium_worker/out/premium_reports.json --dry-run
+node premium_worker/worker.mjs post --input premium_worker/out/premium_reports.json
+node premium_worker/worker.mjs fail --alert-id ALERT_ID --reason "insufficient verified sources"
+node premium_worker/worker.mjs lock-before --date 2026-04-30
+node premium_worker/worker.mjs status
+```
+
+### From inside `premium_worker/`
+
+Run these commands when your current directory is:
+
+```text
+weekly_report_gas\premium_worker>
+```
+
+```powershell
+node --check worker.mjs
+node worker.mjs self-test
+node worker.mjs collect
+node worker.mjs post --input out/premium_reports.json --dry-run
+node worker.mjs post --input out/premium_reports.json
+node worker.mjs fail --alert-id ALERT_ID --reason "insufficient verified sources"
+node worker.mjs lock-before --date 2026-04-30
+node worker.mjs status
+```
+
+Always run `--dry-run` before the real Discord post.
+
+---
+
+## Normal posting flow
+
+Use this flow for normal operation:
+
+```text
+collect
+↓
+Codex creates premium_worker/out/premium_reports.json
+↓
+post --dry-run
+↓
+If dry-run succeeds, run the real post
+↓
+If dry-run fails, regenerate only the failed report and dry-run again
+```
+
+Example from repository root:
 
 ```powershell
 node premium_worker/worker.mjs collect
+node premium_worker/worker.mjs post --input premium_worker/out/premium_reports.json --dry-run
 node premium_worker/worker.mjs post --input premium_worker/out/premium_reports.json
-node premium_worker/worker.mjs fail --alert-id ALERT_ID --reason "insufficient sources"
-node premium_worker/worker.mjs lock-before --date 2026-04-30
-node premium_worker/worker.mjs status
-node premium_worker/worker.mjs self-test
 ```
 
-`collect` runs only inside the allowed JST windows by default. Use `--force` for a
-manual test. The default windows are `13:00-13:10` and `15:30-15:40` JST on weekdays. The
-default signal filter is `BOTTOM`, and already-posted alert IDs are never
-selected again. The same symbol may be selected again when TradingView creates
-a different alert ID.
+Example from inside `premium_worker/`:
 
-By default, `PREMIUM_MAX_ALERTS_PER_RUN=0` and `PREMIUM_SCAN_MAX_ROWS=0`, so
-the worker scans all rows and claims every unsent matching alert ID. Set
-positive values only when intentionally capping a manual run.
+```powershell
+node worker.mjs collect
+node worker.mjs post --input out/premium_reports.json --dry-run
+node worker.mjs post --input out/premium_reports.json
+```
 
-`lock-before` is a local state maintenance command. It reads `alerts_raw` with
-Sheets read-only access and marks every alert ID with `received_at` on or before
-the given JST date as locked in `premium_worker/state/`, without writing to the
-spreadsheet.
+---
+
+## Collect behavior
+
+`collect` runs only inside the allowed JST windows by default.
+
+Default windows:
+
+```text
+13:00-13:10 JST
+15:30-15:40 JST
+Weekdays only
+```
+
+Use `--force` for a manual test.
+
+```powershell
+node premium_worker/worker.mjs collect --force
+```
+
+or, from inside `premium_worker/`:
+
+```powershell
+node worker.mjs collect --force
+```
+
+The default signal filter is `BOTTOM`, and already-posted alert IDs are never
+selected again.
+
+The same symbol may be selected again when TradingView creates a different
+alert ID.
+
+By default:
+
+```env
+PREMIUM_MAX_ALERTS_PER_RUN=0
+PREMIUM_SCAN_MAX_ROWS=0
+```
+
+This means the worker scans all rows and claims every unsent matching alert ID.
+Set positive values only when intentionally capping a manual run.
+
+---
+
+## Dry-run behavior
+
+`post --dry-run` validates the report without sending anything to Discord.
+
+The dry-run checks:
+
+- report JSON shape
+- required fields
+- Japanese narrative fields
+- generic or boilerplate wording
+- prohibited investment-advice wording
+- direct disclosure URL rules
+- source URL rules
+- descriptive Markdown link labels
+- stale or weak disclosure usage
+- whether a newer fundamentally material IRBANK disclosure was missed
+
+If every report is valid, dry-run returns a payload preview and does not post.
+
+If a report fails validation, fix only the failed report in
+`premium_worker/out/premium_reports.json`, then run dry-run again.
+
+---
+
+## Fundamentally material disclosure policy
+
+The report does **not** need to include the absolute newest disclosure if that
+newest disclosure is routine or administrative.
+
+The report must include the newest **fundamentally material** disclosure when one
+exists within the required disclosure window.
+
+Fundamentally material disclosures include, but are not limited to:
+
+- earnings releases / quarterly or full-year financial results
+- guidance revisions
+- dividends / buybacks / shareholder returns
+- capital cost / stock-price-conscious management policy
+- medium-term plans
+- M&A / alliances / asset sales / special gains or losses
+- monthly data / order data / sales data / utilization data
+- warrant exercise / transfers / financing / dilution-related disclosures
+- governance or regulatory events that can affect fundamentals
+
+Routine administrative disclosures may be ignored merely because they are newer.
+
+Routine disclosures include, but are not limited to:
+
+- ordinary personnel changes
+- ordinary officer personnel notices
+- organization changes
+- shareholders meeting notices
+- corporate governance reports
+- independent officer filings
+- routine articles-of-incorporation changes
+
+However, governance-related disclosures must be treated as fundamentally material
+when they directly affect governance risk, management control, capital policy,
+earnings, shareholder returns, financing, M&A, business operations, or listing
+status.
+
+Examples:
+
+- If the newest disclosure is an ordinary personnel change and the latest
+  fundamentally material disclosure is an older earnings release, using the older
+  earnings release is acceptable.
+- If a newer earnings release exists, do not use an older earnings release as
+  the main material.
+- If a financial result and a capital-cost / stock-price-conscious management
+  policy update are released at the same time, include both.
+- If the disclosure is a representative director change, accounting auditor
+  change, improper accounting investigation, lawsuit, regulatory action, or
+  listing-maintenance issue, treat it as fundamentally material.
+
+---
 
 ## Report JSON shape
 
@@ -97,79 +286,418 @@ Codex should create `premium_worker/out/premium_reports.json` like this:
       "symbolCode": "1234",
       "symbolName": "銘柄名",
       "fields": [
-        { "name": "材料インパクト", "value": "ポジティブ材料: 会社開示で確認できる増益要因。" },
-        { "name": "事業概要", "value": "..." },
-        { "name": "足元材料", "value": "..." },
-        { "name": "ファンダ要点", "value": "..." },
-        { "name": "注意点", "value": "..." },
-        { "name": "開示リンク", "value": "[決算短信](https://...)" },
-        { "name": "Sources", "value": "[会社IR](https://...)\n[TDnet](https://...)" }
+        {
+          "name": "材料インパクト",
+          "value": "ポジティブ材料: 会社開示で確認できる増益要因。"
+        },
+        {
+          "name": "事業概要",
+          "value": "ステンレス管や加工品を製造販売するメーカーで、建設・設備向け需要、材料市況、工場稼働率が収益を左右する。販売数量と材料スプレッドの変化が粗利率に反映されやすい。"
+        },
+        {
+          "name": "足元材料",
+          "value": "2026年5月8日に2026年3月期決算短信と、資本コストや株価を意識した経営の実現に向けた対応を同時開示。決算数値と資本効率改善方針を合わせて確認する局面。"
+        },
+        {
+          "name": "ファンダ要点",
+          "value": "販売数量、材料価格、在庫評価、固定費吸収が利益率の確認点になる。資本政策ではROE、PBR、配当方針、株主還元姿勢が中期的な評価材料になる。"
+        },
+        {
+          "name": "注意点",
+          "value": "需要回復が遅れる場合は稼働率低下と固定費負担が続く可能性がある。資本コスト対応は方針だけでなく、利益成長や還元実行が伴うかを継続確認したい。"
+        },
+        {
+          "name": "開示リンク",
+          "value": "[2026年３月期 決算短信〔日本基準〕（連結）](https://f.irbank.net/pdf/20260508/xxxxxxxxxxxx.pdf)\n[資本コストや株価を意識した経営の実現に向けた対応について](https://f.irbank.net/pdf/20260508/yyyyyyyyyyyy.pdf)"
+        },
+        {
+          "name": "Sources",
+          "value": "[銘柄名 IRニュース](https://www.example.co.jp/ir/news/)\n[銘柄名（1234）のIR情報・決算資料 | IRBANK](https://irbank.net/1234/ir)"
+        }
       ]
     }
   ]
 }
 ```
 
-The worker normalizes TradingView embed titles to
-`銘柄名 (証券コード) | TradingView チャート` when `symbolName` and
-`symbolCode` are present. Write the narrative report body in Japanese; `post`
-rejects reports whose `事業概要`, `足元材料`, `ファンダ要点`, or `注意点`
-fields are not Japanese text or are too terse to be useful as analysis. Keep
-each narrative field to roughly two short sentences, adding source-grounded
-figures, dates, business drivers, or confirmation points where available while
-staying concise enough for Discord embeds.
-Write `足元材料` as a compact event timeline: newest important disclosure date,
-material event, key figure where available, and why it matters. Do not lead with
-"official IR/IRBANK was checked for 45 days" when a usable disclosure exists;
-put sparse-disclosure caveats in `注意点` only when needed. Avoid repeating the
-same sentence in `足元材料` and `ファンダ要点`.
-Before deciding that timely disclosures are unconfirmed, scan both the
-company's official IR/news disclosure list and an IRBANK/TDnet-style disclosure
-list for at least the 45 days before the alert `receivedAt`, plus any newer
-items visible during the run. Do not treat "no earnings release" or "no
-guidance revision" as enough; warrant exercise/transfer, M&A progress,
-headquarters relocation, capital allocation, and business progress disclosures
-can be the main material.
+---
+
+## Required report fields
+
+Each report must include these fields:
+
+```text
+事業概要
+足元材料
+ファンダ要点
+注意点
+開示リンク
+Sources
+```
+
+Optional field:
+
+```text
+材料インパクト
+```
+
+`材料インパクト` may be one of:
+
+```text
+ポジティブ材料
+ネガティブ材料
+様子見
+混在/要確認
+```
+
+The worker uses `材料インパクト` to sort embeds and choose the embed color, but
+it must not be phrased as a buy/sell recommendation.
+
+---
+
+## Narrative writing rules
+
+Write the narrative report body in Japanese.
+
+The following fields must be Japanese text and must not be too terse:
+
+```text
+事業概要
+足元材料
+ファンダ要点
+注意点
+```
+
+Keep each narrative field to roughly two short sentences, adding
+source-grounded figures, dates, business drivers, or confirmation points where
+available while staying concise enough for Discord embeds.
+
+Do not use boilerplate that could be copied across symbols.
+
+`事業概要` must name the actual business model, core product/service, customer
+segment, or revenue driver for that company.
+
+Do not write generic company overviews such as:
+
+```text
+開示資料で確認できる主要サービス・製品を中心に事業を展開する上場企業
+直近の材料は、売上成長、利益率、資本政策、事業提携のどれに効くか
+```
+
+`足元材料` should read like a compact event timeline:
+
+```text
+newest fundamentally material disclosure date
+↓
+material event
+↓
+key figure where available
+↓
+why it matters for that company
+```
+
+Do not lead with:
+
+```text
+official IR/IRBANK was checked for 45 days
+```
+
+when a usable disclosure exists.
+
+Put sparse-disclosure caveats in `注意点` only when needed.
+
+Avoid repeating the same sentence in `足元材料` and `ファンダ要点`.
+
+`ファンダ要点` must choose the relevant KPI/accounting line rather than list
+generic categories.
+
+Examples:
+
+- ARR / churn / ARPU for SaaS
+- same-store sales and gross margin for retail
+- order backlog and utilization for manufacturers
+- dilution and exercise pace for warrants
+- occupancy and funding terms for facility operators
+- sales volume, material spread, inventory valuation, and plant utilization for manufacturers
+
+`注意点` must name the company-specific uncertainty.
+
+Do not rely on generic caveats such as:
+
+```text
+開示単体では金額、契約期間、希薄化、一過性の区別が十分に読み切れない
+```
+
+unless the sentence immediately explains which issue applies and why.
+
+---
+
+## Disclosure search rules
+
+Before deciding that timely disclosures are unconfirmed, scan both:
+
+- the company's official IR/news disclosure list
+- an IRBANK/TDnet-style disclosure list
+
+Check at least:
+
+```text
+45 days before the alert receivedAt
+plus any newer items visible during the run
+```
+
+Do not treat the following as enough:
+
+```text
+no earnings release
+no guidance revision
+```
+
+Non-earnings disclosures can be the main material when they are fundamentally
+important.
+
+Examples:
+
+- warrant exercise / transfer
+- M&A progress
+- headquarters relocation
+- capital allocation
+- shareholder-return policy update
+- business progress disclosure
+- monthly sales data
+- asset-sale or special-gain notice
+- governance or regulatory disclosure
+
 If a newer quarterly result, monthly data, guidance revision, asset-sale or
 special-gain notice, shareholder-return policy update, or other current IR
-library item exists, use that newer disclosure before relying on an older annual
-earnings presentation.
+library item exists, use that newer fundamentally material disclosure before
+relying on an older annual earnings presentation.
+
 If a company genuinely has very few disclosures, an older official disclosure
-may be used only after the report explicitly states that official IR and
-IRBANK checks found no newer individual/timely disclosure in the required
-window. Do not use proxy materials such as company research reports,
-new-listing reports, interview articles, or media clippings as `開示リンク`;
-treat them as background sources only.
-Use direct disclosure URLs only in `開示リンク`: PDF URLs, TDnet
-`td_download.cgi` file URLs, IRBANK individual disclosure pages, or individual
-company/PR disclosure detail pages. Use reference page URLs only in `Sources`:
-company IR pages, disclosure-list pages, news pages, profile pages, or other
-grounding webpages. Do not put direct PDFs, TDnet files, IRBANK individual
-disclosure pages, or individual PR/disclosure detail pages in `Sources`; if no
-direct disclosure URL is verified, use `開示リンク未確認`.
-Markdown link labels should use the actual page or document title as closely as possible, such as
-`2026年３月期 第３四半期決算短信〔日本基準〕（連結）` or
-`配当予想の修正（増配・特別配当）に関するお知らせ`. Generic labels like
-`開示1`, `出典1`, `会社IR`, `Source1`, or `PDF1` are rejected because readers
-cannot tell what they are opening. IRBANK individual disclosure pages are
-accepted only as an input fallback. When the page exposes an
-`f.irbank.net/pdf/...pdf` or `f.irbank.net/pr/...pdf` file, the worker prefers
-that PDF URL in the outgoing embed.
+may be used only after the report explicitly states that official IR and IRBANK
+checks found no newer individual/timely fundamentally material disclosure in the
+required window.
 
-Do not include buy/sell recommendations, target prices, or any additional
-score. If no disclosure link can be verified, set `開示リンク` to
-`開示リンク未確認`.
+Do not use proxy materials as `開示リンク`.
 
-`材料インパクト` is optional. Use it only as a source-grounded material impact
-label such as `ポジティブ材料`, `ネガティブ材料`, `様子見`, or `混在/要確認`.
-The worker uses it to sort embeds and choose the embed color, but it must not
-be phrased as a buy/sell recommendation.
+Proxy materials include:
 
-When `PREMIUM_LOG_SPREADSHEET_ID` is set, `post` writes premium log rows to
-that separate spreadsheet in one batch per run and retries transient Google
-Sheets 429/5xx responses. Discord posting is still treated as the primary
-delivery path; log write failures are reported as warnings so a rate-limit on
-the log spreadsheet does not duplicate or block alert posts. Posted rows write a
-one-line `reason` summary generated from `材料インパクト` and the report's
-fundamental point. When Discord returns a message URL, that summary is stored as
-a Markdown link to the posted analysis.
+- company research reports
+- new-listing reports
+- interview articles
+- media clippings
+- sponsored research reports
+
+Treat them as background sources only.
+
+---
+
+## 開示リンク rules
+
+Use direct disclosure URLs only in `開示リンク`.
+
+Allowed examples:
+
+```text
+direct PDF URLs
+TDnet td_download.cgi file URLs
+direct IRBANK f.irbank.net/pdf/...pdf URLs
+direct IRBANK f.irbank.net/pr/...pdf URLs
+individual company/PR disclosure detail pages when no direct PDF exists
+```
+
+Do not impose a one-link limit.
+
+Include every recent important disclosure used to write:
+
+```text
+足元材料
+ファンダ要点
+注意点
+```
+
+For example, include all of these when they are used:
+
+- quarterly result
+- guidance revision
+- buyback update
+- dividend / capital-policy notice
+- M&A / alliance disclosure
+- asset-sale / special-gain notice
+- monthly data
+- governance / regulatory release
+
+Keep weak background pages out of `開示リンク`.
+
+If no direct disclosure URL is verified, use:
+
+```text
+開示リンク未確認
+```
+
+IRBANK HTML pages such as:
+
+```text
+https://irbank.net/<code>/<document_id>
+```
+
+are accepted only as an input fallback.
+
+When the IRBANK HTML page exposes or corresponds to:
+
+```text
+https://f.irbank.net/pdf/...pdf
+https://f.irbank.net/pr/...pdf
+```
+
+the outgoing embed should use the direct `f.irbank.net` file URL, not the
+IRBANK HTML page.
+
+Wrong:
+
+```text
+https://irbank.net/3910/140120260204547074#google_vignette
+```
+
+Correct:
+
+```text
+https://f.irbank.net/pdf/20260204/140120260204547074.pdf
+```
+
+---
+
+## Sources rules
+
+Use reference page URLs only in `Sources`.
+
+Allowed examples:
+
+- company IR pages
+- company disclosure-list pages
+- IRBANK disclosure-list pages
+- news pages
+- business/profile pages
+- other reputable grounding webpages
+
+Do not put the following in `Sources`:
+
+- direct PDFs
+- TDnet file URLs
+- IRBANK individual disclosure pages
+- individual PR/disclosure detail pages
+
+Those direct disclosure links belong only in `開示リンク`.
+
+---
+
+## Markdown link label rules
+
+Markdown link labels should use the actual page or document title as closely as
+possible.
+
+Good examples:
+
+```text
+[2026年３月期 第３四半期決算短信〔日本基準〕（連結）](https://f.irbank.net/pdf/...)
+[配当予想の修正（増配・特別配当）に関するお知らせ](https://f.irbank.net/pdf/...)
+[銘柄名（1234）のIR情報・決算資料 | IRBANK](https://irbank.net/1234/ir)
+[銘柄名 IRニュース](https://www.example.co.jp/ir/news/)
+```
+
+Bad examples:
+
+```text
+[開示1](https://...)
+[出典1](https://...)
+[会社IR](https://...)
+[Source1](https://...)
+[PDF1](https://...)
+```
+
+Generic labels are rejected because readers cannot tell what they are opening.
+
+---
+
+## Prohibited wording
+
+Do not include buy/sell recommendations, target prices, or any additional score.
+
+Avoid wording such as:
+
+```text
+買い推奨
+売り推奨
+買うべき
+売るべき
+目標株価
+利確
+損切り
+追加採点
+スコア: 5
+5点満点
+```
+
+The report is a premium fundamental snapshot, not investment advice.
+
+---
+
+## Lock-before command
+
+`lock-before` is a local state maintenance command.
+
+It reads `alerts_raw` with Sheets read-only access and marks every alert ID with
+`received_at` on or before the given JST date as locked in
+`premium_worker/state/`.
+
+It does not write to the spreadsheet.
+
+Example:
+
+```powershell
+node premium_worker/worker.mjs lock-before --date 2026-04-30
+```
+
+or, from inside `premium_worker/`:
+
+```powershell
+node worker.mjs lock-before --date 2026-04-30
+```
+
+---
+
+## Premium log behavior
+
+When `PREMIUM_LOG_SPREADSHEET_ID` is set, `post` writes premium log rows to that
+separate spreadsheet in one batch per run and retries transient Google Sheets
+429/5xx responses.
+
+Discord posting is still treated as the primary delivery path.
+
+Log write failures are reported as warnings so a rate-limit on the log
+spreadsheet does not duplicate or block alert posts.
+
+Posted rows write a one-line `reason` summary generated from `材料インパクト` and
+the report's fundamental point.
+
+When Discord returns a message URL, that summary is stored as a Markdown link to
+the posted analysis.
+
+---
+
+## Safety notes
+
+This worker must stay separate from the existing GAS project.
+
+Do not edit:
+
+```text
+gas.txt
+```
+
+Do not modify GAS triggers.
+
+Do not write to the existing spreadsheet.
+
+Do not use `PREMIUM_LOG_SPREADSHEET_ID` with the same spreadsheet ID as
+`PREMIUM_SPREADSHEET_ID`.
