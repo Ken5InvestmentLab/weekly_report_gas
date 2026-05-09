@@ -47,7 +47,7 @@ TradingView からのアラート Webhook を受信し、JPX銘柄の中期パ�
 OHLCV_DEFAULT_LOOKBACK_DAYS = 120
 RECENT_RANGE_DAYS = 7
 OVERLAP_DAYS = 3
-
+```
 ## プレミアム通知 worker
 
 `premium_worker/` は既存GAS本体から独立した Codex automation 用の読み取り専用worker。
