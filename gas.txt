@@ -1709,16 +1709,16 @@ const PHASE_KEY = "OHLCV_CURRENT_PHASE";
 const SYMBOL_LIST_KEY = "OHLCV_SYMBOL_LIST";
 const NEW_ALERT_COUNT_KEY = "OHLCV_NEW_ALERT_COUNT"; 
 const SYNC_INDEX_KEY = "SYNC_ENTRY_PRICE_INDEX";
-const OHLCV_BATCH_SIZE = 25;
+const OHLCV_BATCH_SIZE = 10;
 const OHLCV_BATCH_SLEEP_MS = 300;
 const MIDDAY_OHLCV_BATCH_SIZE = 25;
 const MIDDAY_OHLCV_BATCH_SLEEP_MS = 300;
 const PHASE2_ROW_CHUNK_SIZE = 120;
 const PHASE2_SPLIT_BATCH_SIZE = 10;
 const PHASE2_SPLIT_BATCH_SLEEP_MS = 800;
-const FETCH_GUARD_MS = 15000;
+const FETCH_GUARD_MS = 90000;
 const OHLCV_LOCK_WAIT_MS = 15000;
-const OHLCV_SAFETY_RESUME_AFTER_MS = 5 * 60 * 1000;
+const OHLCV_SAFETY_RESUME_AFTER_MS = 3.5 * 60 * 1000;
 const OHLCV_DEFAULT_LOOKBACK_DAYS = 120;
 const OHLCV_LAST_TS_SCAN_CHUNK_ROWS = 5000;
 const OHLCV_LAST_TS_SCAN_MAX_ROWS = 60000;
@@ -3157,7 +3157,9 @@ function fetchOHLCVForNewAlertsInternal_(outerStartedAt) {
     const repairSymsJson = props.getProperty("OHLCV_REPAIR_SYMBOLS");
     const repairSymsSet = repairSymsJson ? new Set(JSON.parse(repairSymsJson)) : new Set();
     if (repairSymsSet.size > 0) {
-      writeProcessLog_("OHLCV", `PHASE1: 修復対象 ${repairSymsSet.size} 銘柄は、前回timestampに関係なく120日分を再取得します。`, { repairSymbols: repairSymsSet.size });
+      writeProcessLog_("OHLCV", `PHASE1: 修復対象 ${repairSymsSet.size} 銘柄を取得対象に追加します。既存OHLCVがある銘柄はlastTs以降のみ取得します。`, {
+        repairSymbols: repairSymsSet.size
+      });
     }
     // ★★★ 追加ここまで ★★★
     
@@ -3193,25 +3195,25 @@ repairSymsSet.forEach(sym => {
 
 symbols = Array.from(uniqueSymbols).sort();
 
-lastTsMap = buildLastTsMapFromOhlcv_(ohlcvSheet, symbols, repairSymsSet);
+lastTsMap = buildLastTsMapFromOhlcv_(ohlcvSheet, symbols, new Set());
 
-// 本当の新規銘柄 = OHLCVが存在しない銘柄だけ
-// repairSymsSet は buildLastTsMapFromOhlcv_ 側で lastTsMap から除外されるため120日取得になる
+// 本当の120日取得対象 = OHLCVが存在しない銘柄だけ
+// 修復対象でも、既存OHLCVがあれば lastTs 以降だけ取得する
 const trueNewFullBackfillSymbols = symbols.filter(sym => {
   const s = String(sym || "").trim();
-  return s && !lastTsMap[s] && !repairSymsSet.has(s);
+  return s && !lastTsMap[s];
 });
 
-const repairFullBackfillSymbols = symbols.filter(sym => {
+const repairDeltaSymbols = symbols.filter(sym => {
   const s = String(sym || "").trim();
-  return s && repairSymsSet.has(s);
+  return s && repairSymsSet.has(s) && !!lastTsMap[s];
 });
 
-writeProcessLog_("OHLCV", "PHASE1: OHLCV取得対象を差分取得型にしました。OHLCV未取得銘柄と修復対象銘柄は120日分、既存銘柄はlastTs以降のみ取得します。", {
+writeProcessLog_("OHLCV", "PHASE1: OHLCV取得対象を差分取得型にしました。OHLCV未取得銘柄だけ120日分、既存銘柄は修復対象でもlastTs以降のみ取得します。", {
   totalSymbols: symbols.length,
   trueNewFullBackfillSymbols: trueNewFullBackfillSymbols.length,
-  repairFullBackfillSymbols: repairFullBackfillSymbols.length,
-  existingDeltaSymbols: symbols.length - trueNewFullBackfillSymbols.length - repairFullBackfillSymbols.length,
+  repairDeltaSymbols: repairDeltaSymbols.length,
+  existingDeltaSymbols: symbols.length - trueNewFullBackfillSymbols.length,
   todaySignalSymbols: todaySet.size
 });
 
@@ -3221,6 +3223,9 @@ props.setProperties({
   [STATE_KEY]: "0",
   [NEW_ALERT_COUNT_KEY]: String(todaySet.size)
 });
+
+props.deleteProperty("OHLCV_REPAIR_SYMBOLS");
+
 newAlertCount = todaySet.size;
 }
 
@@ -4782,6 +4787,7 @@ function resetAllOhlcvProperties() {
   props.deleteProperty("SPLIT_QUEUE");
   props.deleteProperty("SPLIT_INDEX");
   props.deleteProperty("OHLCV_SPLIT_CACHE");
+  props.deleteProperty("OHLCV_REPAIR_SYMBOLS");
   props.deleteProperty(OHLCV_MANUAL_BUSINESS_DATE_KEY);
   props.deleteProperty(OHLCV_MANUAL_BUSINESS_EXPIRES_KEY);
   deleteTriggersByHandler_("resumeOHLCVFetch");
@@ -7501,4 +7507,24 @@ function toYmdKeySafe_(v) {
   const d = ("0" + m[3]).slice(-2);
 
   return `${y}-${mo}-${d}`;
+}
+
+function emergencyStopOhlcvTimeoutLoop() {
+  const props = PropertiesService.getScriptProperties();
+
+  props.deleteProperty(PHASE_KEY);
+  props.deleteProperty(STATE_KEY);
+  props.deleteProperty(SYMBOL_LIST_KEY);
+  props.deleteProperty(NEW_ALERT_COUNT_KEY);
+  props.deleteProperty("LAST_TS_MAP");
+  props.deleteProperty("CURRENT_REFRESH_ID");
+  props.deleteProperty("SPLIT_QUEUE");
+  props.deleteProperty("SPLIT_INDEX");
+  props.deleteProperty("OHLCV_SPLIT_CACHE");
+  props.deleteProperty("OHLCV_REPAIR_SYMBOLS");
+
+  deleteTriggersByHandler_("resumeOHLCVFetch");
+  clearMiddayOhlcvState_();
+
+  writeProcessLog_("OHLCV", "タイムアウトループ停止: OHLCV進捗と修復キューを強制クリアしました。", {});
 }
