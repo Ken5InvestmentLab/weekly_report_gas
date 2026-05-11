@@ -198,6 +198,12 @@ If the disclosure file cannot be opened or the content cannot be verified, use
    disclosure checks in `注意点` only when needed. Avoid repeating the same
    sentence in `足元材料` and `ファンダ要点`, and avoid dumping multiple disclosure
    titles without explaining their impact.
+   Do not prepend disclosure-title inventory sentences such as
+   `2026-05-07に「決算短信...」、「決算説明資料...」も確認。`.
+   When several same-date disclosures matter, summarize the substance in one
+   analytical sentence instead, such as earnings progress plus dividend policy
+   or M&A completion plus product launch relevance. Keep the exact document
+   titles in `開示リンク`, not at the start of `足元材料`.
    You may add an optional `材料インパクト` field with one of:
 `ポジティブ材料`, `ネガティブ材料`, `様子見`, or `混在/要確認`.
 

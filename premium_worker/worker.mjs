@@ -429,6 +429,7 @@ function buildEmbed(report) {
   if (!hasUrl(fieldMap.get("Sources"))) {
     throw new Error(`report ${alertId} must include at least one URL in Sources`);
   }
+  assertNoMojibakeText(alertId, report, fieldMap);
   assertDisclosureLinksAreDirectDisclosures(alertId, fieldMap);
   assertSourceLinksAreReferencePages(alertId, fieldMap);
   assertDescriptiveLinkLabels(alertId, fieldMap);
@@ -509,6 +510,30 @@ function hasJapaneseText(value) {
   return /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/u.test(String(value || ""));
 }
 
+function assertNoMojibakeText(alertId, report, fieldMap) {
+  const checks = [
+    ["title", report.title],
+    ["symbolName", report.symbolName],
+    ...[...fieldMap.entries()].map(([name, value]) => [`field ${name}`, value])
+  ];
+
+  for (const [label, rawValue] of checks) {
+    const value = stripMarkdownUrls(String(rawValue || ""));
+    if (/\?{4,}/.test(value)) {
+      throw new Error(`report ${alertId} ${label} contains mojibake question marks`);
+    }
+    if (/\uFFFD/.test(value)) {
+      throw new Error(`report ${alertId} ${label} contains Unicode replacement characters`);
+    }
+  }
+}
+
+function stripMarkdownUrls(value) {
+  return String(value || "")
+    .replace(/\]\(https?:\/\/[^)\s]+(?:\?[^)\s]*)?\)/gi, "]()")
+    .replace(/https?:\/\/[^\s)\]]+/gi, "");
+}
+
 function assertConciseMaterialNarrative(alertId, fieldMap) {
   const materials = String(fieldMap.get("足元材料") || "").trim();
   const fundamentals = String(fieldMap.get("ファンダ要点") || "").trim();
@@ -516,6 +541,7 @@ function assertConciseMaterialNarrative(alertId, fieldMap) {
   if (hasUrl(disclosure) && /^公式IR\/IRBANKを(?:45日|四十五日|少なくとも45日)/.test(materials)) {
     throw new Error(`report ${alertId} field 足元材料 must lead with material events, not an IRBANK research-log caveat`);
   }
+  assertNoMaterialTitleDump(alertId, materials);
 
   const materialSentences = materials
     .split("。")
@@ -525,6 +551,21 @@ function assertConciseMaterialNarrative(alertId, fieldMap) {
     if (fundamentals.includes(sentence)) {
       throw new Error(`report ${alertId} repeats the same long sentence in 足元材料 and ファンダ要点`);
     }
+  }
+}
+
+function assertNoMaterialTitleDump(alertId, materials) {
+  const firstSentence = String(materials || "").split("。")[0] || "";
+  const quotedTitleCount = (firstSentence.match(/「[^」]{8,}」/g) || []).length;
+  if (
+    /^20\d{2}[-年\/.]\s*\d{1,2}[-月\/.]\s*\d{1,2}日?に/.test(firstSentence) &&
+    quotedTitleCount >= 1 &&
+    /も確認/.test(firstSentence)
+  ) {
+    throw new Error(`report ${alertId} field 足元材料 must summarize disclosure substance, not prepend disclosure title lists`);
+  }
+  if (quotedTitleCount >= 2 && /確認/.test(firstSentence)) {
+    throw new Error(`report ${alertId} field 足元材料 must not dump multiple disclosure titles before the analysis`);
   }
 }
 
@@ -746,7 +787,7 @@ function extractMarkdownLinks(value) {
 function isGenericLinkLabel(label) {
   const text = String(label || "").trim();
   return /^(?:開示|出典|資料|リンク|link|source|sources|ir|pdf|url)\s*[0-9０-９]*$/i.test(text)
-    || /^(?:会社IR|会社IRページ|公式サイト|会社概要|製品情報|株価情報|会社プロフィール|会社開示PDF|決算短信PDF|調査レポートPDF|IRライブラリ)$/i.test(text);
+    || /^(?:会社IR|会社IRページ|公式サイト|会社概要|製品情報|株価情報|会社プロフィール|会社開示PDF|決算短信PDF|調査レポートPDF|IRライブラリ|資料情報)$/i.test(text);
 }
 
 function isDirectDisclosureFileUrl(url) {
@@ -1883,6 +1924,20 @@ function selfTest() {
       { name: "Sources", value: "[株主・投資家情報｜テスト株式会社](https://example.com/ir)" }
     ]
   }), /research-log caveat/);
+  assert.throws(() => buildEmbed({
+    alertId: "a4bb",
+    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    symbolCode: "1234",
+    symbolName: "テスト",
+    fields: [
+      { name: "事業概要", value: "医療機関向けソフトを提供するIT企業で、導入施設数、保守料、クラウド利用料、開発人員の稼働が収益を左右する会社。" },
+      { name: "足元材料", value: "2026-04-01に「子会社化完了に関するお知らせ」、「新製品提供開始に関するお知らせ」も確認。医療ITの製品ライン拡充とM&Aが同日に進み、導入施設数と保守収入の拡大が確認点になる。" },
+      { name: "ファンダ要点", value: "医療ITでは導入施設数、保守・クラウド利用料、解約率、開発人員の稼働率が重要。買収子会社の売上・利益貢献と新製品の導入ペースを見たい。既存レセプト点検ソフトとのクロスセル余地も確認点になる。" },
+      { name: "注意点", value: "M&Aは統合費用、既存製品との重複、医療機関への導入期間がリスクになる。販売開始後の契約件数と単価を確認したい。" },
+      { name: "開示リンク", value: "[子会社化完了に関するお知らせ](https://example.com/disclosure.pdf)" },
+      { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
+    ]
+  }), /disclosure title lists/);
   assert.throws(() => buildEmbed({
     alertId: "a4c",
     url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
