@@ -2183,7 +2183,7 @@ if (symbols.length === 0) {
     batch.forEach(sym => {
   try {
     const useLastTs = fullBackfillSet.has(sym) ? null : (lastTsMap[sym] || null);
-    const pair = buildOhlcvRequestPairForEndMillis_(sym, useLastTs, fetchEndMillis);
+    const pair = buildOhlcvRequestPairForEndMillis_(sym, useLastTs, fetchEndMillis, null, null, { forcePeriod: true });
 
     const intraIdx = requests.length;
     requests.push({
@@ -2407,6 +2407,371 @@ function getMiddayOhlcvFetchEndIso_(dateKey) {
 
 function makeMiddayRefreshId_(dateKey) {
   return `MIDDAY_${normalizeBusinessDateKey_(dateKey)}`;
+}
+
+function previewRepairOhlcvAm20260511Only() {
+  return repairOhlcvAmForDateOnly_("2026-05-11", true);
+}
+
+function repairOhlcvAm20260511Only() {
+  return repairOhlcvAmForDateOnly_("2026-05-11", false);
+}
+
+function repairOhlcvAmForDateOnly_(dateKey, dryRun) {
+  const targetDateKey = normalizeBusinessDateKey_(dateKey);
+  const targetTimestamp = new Date(`${targetDateKey}T09:00:00+09:00`);
+  const marker = `AM_REPAIR_${targetDateKey}`;
+  const BATCH_SIZE = 25;
+  const startedAt = Date.now();
+
+  const ss = openAppSpreadsheet_();
+  const rawSheet = ss.getSheetByName(CONFIG.RAW_SHEET);
+  const ohlcvSheet = ss.getSheetByName(CONFIG.OHLCV_SHEET);
+  if (!rawSheet) throw new Error(`${CONFIG.RAW_SHEET} sheet not found`);
+  if (!ohlcvSheet) throw new Error(`${CONFIG.OHLCV_SHEET} sheet not found`);
+
+  const existingRowMap = buildOhlcvAmRowMapForDate_(ohlcvSheet, targetDateKey);
+  const symbolSet = new Set();
+  collectAllRawSymbolsFromRaw_(rawSheet).forEach(sym => {
+    const s = String(sym || "").trim();
+    if (s) symbolSet.add(s);
+  });
+  Object.keys(existingRowMap).forEach(sym => {
+    const s = String(sym || "").trim();
+    if (s) symbolSet.add(s);
+  });
+
+  const symbols = Array.from(symbolSet).sort();
+  const updates = [];
+  const inserts = [];
+  const samples = [];
+  const noDataSymbols = [];
+  const transientSymbols = [];
+  let fetchedRows = 0;
+  let backfillRows = 0;
+  let backfillSymbols = 0;
+
+  for (let i = 0; i < symbols.length; i += BATCH_SIZE) {
+    const batch = symbols.slice(i, i + BATCH_SIZE);
+    const reqMeta = batch.map(sym => {
+      const hasTargetRow = !!(existingRowMap[sym] && existingRowMap[sym].length > 0);
+      return {
+        symbol: sym,
+        hasTargetRow: hasTargetRow,
+        url: hasTargetRow
+          ? buildYahooIntraDateWindowUrl_(sym, targetDateKey)
+          : buildYahooIntraLookbackUrlForDate_(sym, targetDateKey, OHLCV_DEFAULT_LOOKBACK_DAYS)
+      };
+    });
+    const requests = reqMeta.map(meta => ({
+      url: meta.url,
+      muteHttpExceptions: true,
+      headers: { "User-Agent": "Mozilla/5.0" }
+    }));
+
+    let responses = [];
+    try {
+      responses = requests.length ? UrlFetchApp.fetchAll(requests) : [];
+    } catch (e) {
+      batch.forEach(sym => transientSymbols.push(sym));
+      writeProcessLog_("OHLCV-AM-REPAIR", "date AM repair batch fetch failed", {
+        dateKey: targetDateKey,
+        batchStart: i,
+        message: e && e.message ? e.message : String(e)
+      });
+      continue;
+    }
+
+    reqMeta.forEach((meta, index) => {
+      const sym = meta.symbol;
+      const res = responses[index];
+      if (isTransientHttpResponse_(res)) {
+        transientSymbols.push(sym);
+        return;
+      }
+
+      if (!meta.hasTargetRow) {
+        const rows = buildOhlcvRowsFromYahooChartResponse_(sym, res, targetDateKey, marker);
+        if (!rows || rows.length === 0) {
+          noDataSymbols.push(sym);
+          return;
+        }
+
+        fetchedRows++;
+        backfillSymbols++;
+        backfillRows += rows.length;
+        inserts.push.apply(inserts, rows);
+
+        const targetRow = rows.find(row => formatYmd_(row[0]) === targetDateKey && getOhlcvSessionName_(row[0]) === "AM") || rows[rows.length - 1];
+        if (samples.length < 20) {
+          samples.push({
+            symbol: sym,
+            action: "backfill_120d",
+            rows: [],
+            appendedRows: rows.length,
+            ohlcv: targetRow ? targetRow.slice(3, 8) : []
+          });
+        }
+        return;
+      }
+
+      const parsed = buildAmOhlcvRowFromYahooChartResponse_(sym, res, targetDateKey, marker, targetTimestamp);
+      if (!parsed || !parsed.row) {
+        noDataSymbols.push(sym);
+        return;
+      }
+
+      fetchedRows++;
+      const row = parsed.row;
+      const rowNums = existingRowMap[sym] || [];
+      if (rowNums.length > 0) {
+        rowNums.forEach(rowNum => {
+          updates.push({ row: rowNum, values: row.slice(3, 8), symbol: sym });
+        });
+      } else {
+        inserts.push(row);
+      }
+
+      if (samples.length < 20) {
+        samples.push({
+          symbol: sym,
+          action: rowNums.length > 0 ? "update" : "insert",
+          rows: rowNums,
+          hours: parsed.hours,
+          ohlcv: row.slice(3, 8)
+        });
+      }
+    });
+
+    Utilities.sleep(300);
+  }
+
+  if (!dryRun) {
+    applyOhlcvValueUpdates_(ohlcvSheet, updates);
+    if (inserts.length > 0) appendRowsToSheet_(ohlcvSheet, inserts);
+    dedupeAndSortOhlcv_(ohlcvSheet);
+    SpreadsheetApp.flush();
+  }
+
+  const summary = {
+    ok: true,
+    dryRun: dryRun === true,
+    dateKey: targetDateKey,
+    timestamp: Utilities.formatDate(targetTimestamp, CONFIG.TIMEZONE, "yyyy-MM-dd HH:mm"),
+    targetSymbols: symbols.length,
+    fetchedRows: fetchedRows,
+    updateCellsRows: updates.length,
+    insertRows: inserts.length,
+    backfillSymbols: backfillSymbols,
+    backfillRows: backfillRows,
+    noDataSymbols: noDataSymbols.length,
+    transientSymbols: transientSymbols.length,
+    noDataSamples: noDataSymbols.slice(0, 30),
+    transientSamples: transientSymbols.slice(0, 30),
+    samples: samples,
+    elapsedMs: Date.now() - startedAt
+  };
+
+  writeProcessLog_("OHLCV-AM-REPAIR", "date AM repair completed", summary);
+  return summary;
+}
+
+function buildOhlcvAmRowMapForDate_(sheet, dateKey) {
+  const map = {};
+  const DATA_ROW = 2;
+  const CHUNK_ROWS = 5000;
+  const lastRow = sheet.getLastRow();
+  if (lastRow < DATA_ROW) return map;
+
+  for (let start = DATA_ROW; start <= lastRow; start += CHUNK_ROWS) {
+    const numRows = Math.min(CHUNK_ROWS, lastRow - start + 1);
+    const values = sheet.getRange(start, 1, numRows, 3).getValues();
+    values.forEach((row, index) => {
+      const ts = row[0];
+      const symbol = String(row[2] || "").trim();
+      if (!symbol || !(ts instanceof Date) || isNaN(ts.getTime())) return;
+      if (formatYmd_(ts) !== dateKey) return;
+      if (getOhlcvSessionName_(ts) !== "AM") return;
+      if (!map[symbol]) map[symbol] = [];
+      map[symbol].push(start + index);
+    });
+  }
+
+  return map;
+}
+
+function buildYahooIntraDateWindowUrl_(symbol, dateKey) {
+  const yahooSymbol = convertToYahooSymbol(symbol);
+  const p1 = Math.floor(new Date(`${dateKey}T08:00:00+09:00`).getTime() / 1000);
+  const p2 = Math.floor(new Date(`${dateKey}T13:00:59+09:00`).getTime() / 1000);
+  return `https://query1.finance.yahoo.com/v8/finance/chart/${yahooSymbol}?interval=1h&period1=${p1}&period2=${p2}`;
+}
+
+function buildYahooIntraLookbackUrlForDate_(symbol, dateKey, lookbackDays) {
+  const yahooSymbol = convertToYahooSymbol(symbol);
+  const p2 = Math.floor(new Date(`${dateKey}T13:00:59+09:00`).getTime() / 1000);
+  const p1 = p2 - Math.max(1, Number(lookbackDays) || OHLCV_DEFAULT_LOOKBACK_DAYS) * 24 * 60 * 60;
+  return `https://query1.finance.yahoo.com/v8/finance/chart/${yahooSymbol}?interval=1h&period1=${p1}&period2=${p2}`;
+}
+
+function buildOhlcvRowsFromYahooChartResponse_(symbol, res, targetDateKey, marker) {
+  try {
+    if (!res || res.getResponseCode() !== 200) return [];
+
+    const rows = parseIntraResponse_(symbol, res, null) || [];
+    return (rows || [])
+      .map(row => {
+        if (!row || !row.length) return null;
+        const copy = row.slice(0, 8);
+        copy[1] = marker;
+        return normalizeOhlcvRowForWrite_(copy);
+      })
+      .filter(row => {
+        if (!row) return false;
+        const ts = row[0];
+        const dateKey = formatYmd_(ts);
+        if (dateKey > targetDateKey) return false;
+        if (dateKey === targetDateKey && getOhlcvSessionName_(ts) !== "AM") return false;
+        return true;
+      });
+  } catch (e) {
+    debugLogToSheet_("ohlcv.amRepair.backfillParseError", {
+      symbol: symbol,
+      dateKey: targetDateKey,
+      message: e && e.message ? e.message : String(e)
+    });
+    return [];
+  }
+}
+
+function buildAmOhlcvRowFromYahooChartResponse_(symbol, res, dateKey, marker, targetTimestamp) {
+  try {
+    if (!res || res.getResponseCode() !== 200) return null;
+
+    const json = JSON.parse(res.getContentText());
+    const result = json.chart && json.chart.result && json.chart.result[0];
+    if (!result || !result.timestamp) return null;
+
+    const q = result.indicators && result.indicators.quote && result.indicators.quote[0];
+    if (!q) return null;
+
+    const hours = [];
+    const round = val => Math.round(Number(val) * 100) / 100;
+    let candle = null;
+
+    for (let i = 0; i < result.timestamp.length; i++) {
+      const ts = result.timestamp[i];
+      if (!ts) continue;
+
+      const dateObj = new Date(ts * 1000);
+      if (isNaN(dateObj.getTime())) continue;
+
+      const rowDateKey = Utilities.formatDate(dateObj, CONFIG.TIMEZONE, "yyyy-MM-dd");
+      if (rowDateKey !== dateKey) continue;
+
+      const hour = parseInt(Utilities.formatDate(dateObj, CONFIG.TIMEZONE, "HH"), 10);
+      if (hour < 9 || hour > 12) continue;
+
+      const rawOpen = q.open ? q.open[i] : null;
+      const rawHigh = q.high ? q.high[i] : null;
+      const rawLow = q.low ? q.low[i] : null;
+      const rawClose = q.close ? q.close[i] : null;
+      const rawVolume = q.volume ? q.volume[i] : null;
+      if (rawOpen == null && rawClose == null) continue;
+
+      const close = toFiniteNumberOrNull_(rawClose);
+      const open = toFiniteNumberOrNull_(rawOpen) !== null ? toFiniteNumberOrNull_(rawOpen) : close;
+      const high = toFiniteNumberOrNull_(rawHigh) !== null ? toFiniteNumberOrNull_(rawHigh) : Math.max(open, close);
+      const low = toFiniteNumberOrNull_(rawLow) !== null ? toFiniteNumberOrNull_(rawLow) : Math.min(open, close);
+      const volume = toFiniteNumberOrZero_(rawVolume);
+      if (open === null || high === null || low === null || close === null) continue;
+
+      const isFlatZeroVolume =
+        volume === 0 &&
+        open === high &&
+        high === low &&
+        low === close;
+      if (isFlatZeroVolume) continue;
+
+      hours.push(Utilities.formatDate(dateObj, CONFIG.TIMEZONE, "HH:mm"));
+
+      if (!candle) {
+        candle = {
+          open: round(open),
+          high: round(high),
+          low: round(low),
+          close: round(close),
+          volume: volume
+        };
+      } else {
+        candle.high = round(Math.max(candle.high, high));
+        candle.low = round(Math.min(candle.low, low));
+        candle.close = round(close);
+        candle.volume += volume;
+      }
+    }
+
+    if (!candle) return null;
+
+    return {
+      hours: hours,
+      row: [
+        new Date(targetTimestamp.getTime()),
+        marker,
+        String(symbol || "").trim(),
+        candle.open,
+        candle.high,
+        candle.low,
+        candle.close,
+        Math.round(candle.volume)
+      ]
+    };
+  } catch (e) {
+    debugLogToSheet_("ohlcv.amRepair.parseError", {
+      symbol: symbol,
+      dateKey: dateKey,
+      message: e && e.message ? e.message : String(e)
+    });
+    return null;
+  }
+}
+
+function applyOhlcvValueUpdates_(sheet, updates) {
+  if (!updates || updates.length === 0) return 0;
+
+  const sorted = updates.slice().sort((a, b) => a.row - b.row);
+  let applied = 0;
+  let runStart = null;
+  let runValues = [];
+  let expectedRow = null;
+
+  function flushRun_() {
+    if (runStart == null || runValues.length === 0) return;
+    sheet.getRange(runStart, 4, runValues.length, 5).setValues(runValues);
+    applied += runValues.length;
+    runStart = null;
+    runValues = [];
+    expectedRow = null;
+  }
+
+  sorted.forEach(update => {
+    const rowNum = Number(update.row);
+    if (!Number.isFinite(rowNum) || rowNum < 2) return;
+    if (runStart == null) {
+      runStart = rowNum;
+      expectedRow = rowNum;
+    }
+    if (rowNum !== expectedRow) {
+      flushRun_();
+      runStart = rowNum;
+      expectedRow = rowNum;
+    }
+    runValues.push(update.values);
+    expectedRow++;
+  });
+
+  flushRun_();
+  return applied;
 }
 
 function previewRollbackMiddayOhlcv20260511() {
@@ -2894,7 +3259,7 @@ for (let i = startIndex; i < symbols.length; i += OHLCV_BATCH_SIZE) {
       const reqMeta = [];
       batch.forEach(sym => {
         try {
-          const pair = buildOhlcvRequestPair_(sym, lastTsMap[sym] || null);
+          const pair = buildOhlcvRequestPairForEndMillis_(sym, lastTsMap[sym] || null, getOhlcvRunEndMillis_(), null, null, { forcePeriod: true });
 
 const dailyIdx = requests.length;
 requests.push({
@@ -3715,8 +4080,10 @@ function buildOhlcvRequestPair_(tvSymbol, lastTs, optStartSec, optEndSec) {
   return buildOhlcvRequestPairForEndMillis_(tvSymbol, lastTs, getOhlcvRunEndMillis_(), optStartSec, optEndSec);
 }
 
-function buildOhlcvRequestPairForEndMillis_(tvSymbol, lastTs, runEndMillis, optStartSec, optEndSec) {
+function buildOhlcvRequestPairForEndMillis_(tvSymbol, lastTs, runEndMillis, optStartSec, optEndSec, optOptions) {
   const yahooSymbol = convertToYahooSymbol(tvSymbol);
+  const options = optOptions || {};
+  const forcePeriod = options.forcePeriod === true;
   let timeParam = "";
   let useRecentRange = false;
 
@@ -3755,7 +4122,7 @@ function buildOhlcvRequestPairForEndMillis_(tvSymbol, lastTs, runEndMillis, optS
         });
       }
 
-    } else if (diffDays <= RECENT_RANGE_DAYS) {
+    } else if (!forcePeriod && diffDays <= RECENT_RANGE_DAYS) {
       // 最終取得がかなり新しい場合。
       // Yahooの直近5日レンジで十分。祝日・取得漏れも吸収しやすい。
       useRecentRange = true;

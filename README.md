@@ -202,14 +202,14 @@ OVERLAP_DAYS = 3
 |---|---|
 | OHLCV未取得銘柄 | 直近120日分 |
 | `OHLCV_REPAIR_SYMBOLS` 対象銘柄 | 直近120日分を強制再取得 |
-| `lastTs` が直近5日以内 | Yahoo Finance の `range=5d` |
+| `lastTs` が直近5日以内 | 13:30/16:00本体では `period1/period2` を強制し、`lastTs - 3日` から取得終了時刻まで取得 |
 | `lastTs` が6日〜120日以内 | `lastTs` の3日前から現在まで `period1/period2` |
 | `lastTs` が120日より古い | 直近120日分 |
 | `lastTs` が取得終了時刻以上 | 異常値対策として直近範囲を `period1/period2` |
 
 ポイント。
 
-- `range=5d` は最終取得が十分新しい場合だけ使う。
+- 13:30/16:00本体では `range=5d` を使わない。`range=5d` は取得終了時刻を明示できず、当日足のキャッシュ差異でAM集約が壊れるため、直近取得でも `period1/period2` を使う。
 - `lastTs` が40日前など中途半端に古い場合は、`range=5d` ではなく `lastTs - 3日` から取得する。
 - これにより、40日前〜直近5営業日前のような空白期間を防ぐ。
 - 3日の重ね取りは、Yahoo側の欠損、祝日、前回途中終了、AM/PM合成境界のズレを吸収するため。
@@ -229,7 +229,7 @@ fetchOHLCVForNewAlertsMidday()
 - 対象は `alerts_raw` に登場する全銘柄。
 - OHLCV未取得銘柄だけ120日分取得する。
 - 既存OHLCVがある銘柄は、最終timestampに応じて以下の取得窓を使う。
-  - `lastTs` が直近5日以内: `range=5d`
+  - `lastTs` が直近5日以内: `lastTs` の3日前から当日AM終端まで `period1/period2`
   - `lastTs` が6日〜120日以内: `lastTs` の3日前から当日AM終端まで
   - `lastTs` が120日より古い: 直近120日分
 - 今日シグナルが出た銘柄数はメタ情報として保持する。
@@ -252,7 +252,7 @@ fetchOHLCVForNewAlerts()
 - OHLCV未取得銘柄は120日分取得する。
 - 修復対象銘柄は120日分強制再取得する。
 - 既存OHLCVがある銘柄は、最終timestampに応じて以下の取得窓を使う。
-  - `lastTs` が直近5日以内: `range=5d`
+  - `lastTs` が直近5日以内: `lastTs` の3日前から現在まで `period1/period2`
   - `lastTs` が6日〜120日以内: `lastTs` の3日前から現在まで
   - `lastTs` が120日より古い: 直近120日分
 - PHASE1〜PHASE4を進める。
