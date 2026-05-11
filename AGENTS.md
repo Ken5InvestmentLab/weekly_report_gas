@@ -45,7 +45,7 @@ TradingView からのアラート Webhook を受信し、JPX銘柄の中期パ�
 
 ```javascript
 OHLCV_DEFAULT_LOOKBACK_DAYS = 120
-RECENT_RANGE_DAYS = 7
+RECENT_RANGE_DAYS = 5
 OVERLAP_DAYS = 3
 ```
 
@@ -56,15 +56,15 @@ OVERLAP_DAYS = 3
 | `lastTs` なし | 直近120日分を `period1/period2` で取得 |
 | `OHLCV_REPAIR_SYMBOLS` 対象 | 直近120日分を強制再取得 |
 | `lastTs` が取得終了時刻以上 | 異常値対策として直近範囲を `period1/period2` で取得 |
-| `lastTs` が直近7日以内 | Yahoo Finance の `range=5d` を使用 |
-| `lastTs` が8日〜120日以内 | `lastTs` の3日前から現在まで `period1/period2` で取得 |
+| `lastTs` が直近5日以内 | Yahoo Finance の `range=5d` を使用 |
+| `lastTs` が6日〜120日以内 | `lastTs` の3日前から現在まで `period1/period2` で取得 |
 | `lastTs` が120日より古い | 直近120日分を `period1/period2` で取得 |
 
 重要。
 
 - `range=5d` を使うのは、最終取得が十分新しい場合だけ。
 - `lastTs` が40日前など中途半端に古い場合に `range=5d` を使うと、40日前〜直近5営業日前までの空白期間が生まれる。
-- そのため、8日〜120日以内の既存銘柄は `lastTs - 3日` から取得する。
+- そのため、6日〜120日以内の既存銘柄は `lastTs - 3日` から取得する。
 - 3日の重ね取りは、Yahoo側の欠損、祝日、前回途中終了、AM/PM合成境界のズレを吸収するため。
 - 取得後は `timestamp + symbol` で重複排除する前提。
 - 120日より古い範囲の補填は通常取得に混ぜず、必要に応じて手動補填関数で明示期間を指定する。
@@ -215,6 +215,7 @@ OVERLAP_DAYS = 3
 | `runDailyMaintenanceTrigger` | OHLCV PHASE4完了後 | `runDailyMaintenance` を起動 |
 | `quickRepairTrigger` | `runDailyMaintenance` 完了後 / cleanup完了後 | `quickRepairRecentGaps` を起動 |
 | `resumeOHLCVFetchMidday` | 13:30先行OHLCV取得の再開時 | `fetchOHLCVForNewAlertsMidday` を再起動 |
+| `resumeMiddayOhlcvRollback` | 13:30先行OHLCV戻し処理の再開時 | 触った銘柄の120日OHLCV削除を再開 |
 | `resumeOHLCVFetch` | 16:00 OHLCV本番取得の再開時 | `fetchOHLCVForNewAlerts` を再起動 |
 | `resumeDailyMaintenance` | 日次メンテナンス再開時 | `runDailyMaintenanceInternal_` を再開 |
 | `resumeQuickRepair` | GAP修復再開時 | `quickRepairRecentGaps` を再開 |
@@ -306,6 +307,8 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 | `OHLCV_MIDDAY_LAST_TS_MAP` | 13:30先行取得用の銘柄別最終timestamp |
 | `OHLCV_MIDDAY_REFRESH_ID` | 13:30先行取得ID |
 | `OHLCV_MIDDAY_FULL_BACKFILL_SYMBOLS` | 13:30で120日取得する真の新規銘柄 |
+| `OHLCV_MIDDAY_ROLLBACK_STATE_V1` | 13:30先行取得戻し処理の再開状態 |
+| `OHLCV_MIDDAY_ROLLBACK_SYMBOLS_V1` | 13:30先行取得戻し処理で120日削除する銘柄 |
 | `DAILY_MAINT_CURSOR` | 日次メンテナンス再開カーソル |
 | `DAILY_MAINT_NEW_COUNT` | 日次メンテナンス用の新規件数メタ |
 | `DAILY_MAINT_REFRESH_ID` | 日次メンテナンス用の取得IDメタ |
@@ -364,8 +367,8 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 - 今日シグナルが出た銘柄数はメタ情報として `OHLCV_MIDDAY_NEW_ALERT_COUNT` に保持。
 - OHLCV未取得銘柄だけ120日分取得。
 - 既存OHLCVがある銘柄は、最終timestampに応じて以下の取得窓を使う。
-  - `lastTs` が直近7日以内: `range=5d`
-  - `lastTs` が8日〜120日以内: `lastTs` の3日前から当日AM終端まで
+  - `lastTs` が直近5日以内: `range=5d`
+  - `lastTs` が6日〜120日以内: `lastTs` の3日前から当日AM終端まで
   - `lastTs` が120日より古い: 直近120日分
 - fetch終端は当日AM分まで。
 - 当日PM行や14:00以降のYahoo足、15:30終値スナップショットは保存しない。
@@ -400,8 +403,8 @@ fetchOHLCVForNewAlerts
 - OHLCV未取得銘柄は120日分取得。
 - `OHLCV_REPAIR_SYMBOLS` の銘柄は120日分強制再取得。
 - 既存OHLCVがある銘柄は、最終timestampに応じて以下の取得窓を使う。
-  - `lastTs` が直近7日以内: `range=5d`
-  - `lastTs` が8日〜120日以内: `lastTs` の3日前から現在まで
+  - `lastTs` が直近5日以内: `range=5d`
+  - `lastTs` が6日〜120日以内: `lastTs` の3日前から現在まで
   - `lastTs` が120日より古い: 直近120日分
 
 ### OHLCV取得フェーズ
@@ -436,6 +439,8 @@ refetchSymbolRange(symbols, startDate, endDate)
 - 終値スナップショットはPMバケットの `close` だけを更新し、`open/high/low/volume` には混ぜない。
 - 通常取得・GAP修復・過去出来高補正では Yahoo Finance の `1h` を主に使う。
 - `1d` はデバッグや分割情報確認など必要な場合に限る。
+- 13:30先行取得、GAP修復、過去出来高補正では、日足出来高を欠損しているAM/PM片側へ寄せない。AM/PM別出来高は1h足の集約値を保存し、欠損は正規再取得で補う。
+- 16:00本番取得の当日PMだけは、日足出来高がAM出来高以上の場合に `PM出来高 = 日足出来高 - AM出来高` でPM行の出来高を補正してよい。1h足由来のPM OHLCがある場合はOHLCをそのまま使い、PM行を合成する必要がある場合だけ日足終値で `O=H=L=C` を埋める。
 
 ### 日次メンテナンス
 
@@ -482,7 +487,8 @@ refetchSymbolRange(symbols, startDate, endDate)
 - 進捗は `QUICK_REPAIR_STATE` v6 に保存する。
 - 再開時は直近スキャンをやり直し、既に埋まったグループやマーカー付き未充足日は再取得対象から外す。
 - 修復行はB列に `GAP_REPAIR` を入れる。
-- `GAP_FAILED` は不足しているAM/PMセッションに対して `09:00 JST` / `13:00 JST` の実timestampを持つマーカー行として作る。
+- 自動GAP修復でYahooから十分な1h足が返らない日は、原則として `GAP_FAILED` を作らずログに残して次回以降の正規再取得対象にする。
+- 手動補填など明示的に `GAP_FAILED` を作る経路でも、`09:00 JST` / `13:00 JST` の実timestamp以外は保存しない。
 - 空timestamp、`00:00`、Yahoo生1h足時刻をマーカーとして保存しない。
 - 時間切れで再開に回す直前にも `dedupeAndSortOhlcv_()` と `SpreadsheetApp.flush()` を実行する。
 
@@ -524,7 +530,7 @@ cleanupLegacyGapFailedAndEmptyTimestamps(false)
 - 削除した銘柄は `OHLCV_REPAIR_SYMBOLS` に積む。
 - 次回OHLCV取得で120日分を再取得して補填する。
 - 既存行のtimestampを推定で書き換えない。
-- 例外として、`alert_id` が `MIDDAY_YYYY-MM-DD` に完全一致する行だけは、`YYYY-MM-DD 09:00 JST` を正しいtimestampとして自動補正してよい。
+- `alert_id` が `MIDDAY_YYYY-MM-DD` に完全一致する行でも、B列だけからtimestampを推定補正しない。不正行は削除し、対象銘柄を `OHLCV_REPAIR_SYMBOLS` に積む。
 
 ### 評価対象銘柄の120日OHLCV補填
 
@@ -622,6 +628,10 @@ clearManualOhlcvBusinessDate()             // 手動基準日解除
 fetchOHLCVForNewAlertsMidday()             // 13:30先行取得を手動実行
 fetchOHLCVForNewAlerts()                   // 16:00本番OHLCVチェーンを手動実行
 resetAllOhlcvProperties()                  // OHLCV関連進捗プロパティをリセット
+previewRollbackMiddayOhlcv20260511()       // 2026-05-11 13:30取得戻し対象をDryRun確認
+rollbackMiddayOhlcv20260511()              // 2026-05-11 13:30取得で触った銘柄の120日OHLCVを削除して修復キューへ積む
+resumeMiddayOhlcvRollback()                // 13:30取得戻し処理の再開
+resetMiddayOhlcvRollbackState()            // 13:30取得戻し処理の状態リセット
 
 purgeOldOhlcvDataDaily()                   // 365日超のOHLCV削除
 purgeOldSignalArchiveRowsDaily()           // signals_archive保持期限超過データ削除

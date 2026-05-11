@@ -1737,6 +1737,9 @@ const MIDDAY_DEDUPE_GUARD_MS = 60 * 1000;
 const MIDDAY_FULL_BACKFILL_SYMBOLS_KEY = "OHLCV_MIDDAY_FULL_BACKFILL_SYMBOLS";
 const MIDDAY_HISTORY_COVERAGE_SCAN_MAX_ROWS = 250000;
 const MIDDAY_HISTORY_GRACE_DAYS = 10;
+const MIDDAY_ROLLBACK_STATE_KEY = "OHLCV_MIDDAY_ROLLBACK_STATE_V1";
+const MIDDAY_ROLLBACK_SYMBOLS_KEY = "OHLCV_MIDDAY_ROLLBACK_SYMBOLS_V1";
+const MIDDAY_ROLLBACK_RESUME_HANDLER = "resumeMiddayOhlcvRollback";
 
 function getOhlcvRuntimeState_() {
   const props = PropertiesService.getScriptProperties();
@@ -2244,8 +2247,6 @@ if (symbols.length === 0) {
           allFetchedData = allFetchedData.concat(filteredRows);
           fetchedRowsInBatch += filteredRows.length;
           fetchedSymbolsInBatch++;
-          newAlertCount++;
-
           if (meta.fullBackfill) fullBackfillInBatch++;
         }
       } catch (e) {
@@ -2343,7 +2344,7 @@ function filterMiddayOhlcvRows_(rows, todayKey) {
     out.push(normalized);
   });
 
-  if (skippedInvalid > 0 || skippedTodayPm > 0 || skippedFuture > 0) {
+  if (skippedInvalid > 0 || skippedFuture > 0 || isVerboseOhlcvFetchLogEnabled_()) {
     debugLogToSheet_("ohlcv.midday.filter", {
       inputRows: rows ? rows.length : 0,
       outputRows: out.length,
@@ -2406,6 +2407,296 @@ function getMiddayOhlcvFetchEndIso_(dateKey) {
 
 function makeMiddayRefreshId_(dateKey) {
   return `MIDDAY_${normalizeBusinessDateKey_(dateKey)}`;
+}
+
+function previewRollbackMiddayOhlcv20260511() {
+  return rollbackMiddayOhlcvRun_("2026-05-11", true, { deleteLookbackWindow: true });
+}
+
+function rollbackMiddayOhlcv20260511() {
+  return rollbackMiddayOhlcvRun_("2026-05-11", false, { deleteLookbackWindow: true });
+}
+
+function previewRollbackMiddayOhlcvRun(dateKey) {
+  return rollbackMiddayOhlcvRun_(dateKey, true, { deleteLookbackWindow: true });
+}
+
+function rollbackMiddayOhlcvRun(dateKey) {
+  return rollbackMiddayOhlcvRun_(dateKey, false, { deleteLookbackWindow: true });
+}
+
+function rollbackMiddayOhlcvRun_(dateKey, dryRun, options) {
+  const DATA_ROW = 2;
+  const CHUNK_ROWS = 5000;
+  const LIMIT_MS = 4 * 60 * 1000;
+  const GUARD_MS = 30 * 1000;
+  const startedAt = Date.now();
+  const resume = options && options.resume === true;
+
+  let state = resume ? readMiddayRollbackState_() : null;
+  if (!state) {
+    dryRun = dryRun !== false;
+    options = options || {};
+    const targetDateKey = normalizeBusinessDateKey_(dateKey);
+    const marker = makeMiddayRefreshId_(targetDateKey);
+    const lookbackEnd = new Date(`${targetDateKey}T23:59:59+09:00`);
+    const lookbackStart = new Date(lookbackEnd.getTime() - OHLCV_DEFAULT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+
+    clearMiddayRollbackState_();
+    state = {
+      version: 1,
+      phase: "scan_marker",
+      dateKey: targetDateKey,
+      marker: marker,
+      dryRun: dryRun,
+      deleteLookbackWindow: options.deleteLookbackWindow !== false,
+      lookbackStartMs: lookbackStart.getTime(),
+      lookbackEndMs: lookbackEnd.getTime(),
+      nextRow: 0,
+      lastRow: 0,
+      markerCandidates: 0,
+      lookbackWindowCandidates: 0,
+      deletedRows: 0,
+      scannedRows: 0,
+      dateCounts: {},
+      samples: [],
+      startedAt: new Date().toISOString()
+    };
+  }
+
+  const ss = openAppSpreadsheet_();
+  const sh = ss.getSheetByName(CONFIG.OHLCV_SHEET);
+  if (!sh) throw new Error("ohlcv_4h シートが見つかりません");
+
+  if (!state.nextRow) state.nextRow = sh.getLastRow();
+  if (!state.lastRow) state.lastRow = sh.getLastRow();
+
+  let symbols = readMiddayRollbackSymbols_();
+  const symbolSet = {};
+  symbols.forEach(sym => { if (sym) symbolSet[sym] = true; });
+
+  if (state.phase === "scan_marker") {
+    while (state.nextRow >= DATA_ROW) {
+      if (Date.now() - startedAt > LIMIT_MS - GUARD_MS) {
+        symbols = Object.keys(symbolSet).sort();
+        writeMiddayRollbackSymbols_(symbols);
+        return pauseMiddayRollback_(state, symbols, false);
+      }
+
+      const endRow = state.nextRow;
+      const startRow = Math.max(DATA_ROW, endRow - CHUNK_ROWS + 1);
+      const numRows = endRow - startRow + 1;
+      const values = sh.getRange(startRow, 1, numRows, 3).getValues();
+
+      values.forEach((row, index) => {
+        const alertId = String(row[1] || "").trim();
+        if (alertId !== state.marker) return;
+
+        const sheetRow = startRow + index;
+        const ts = row[0];
+        const symbol = String(row[2] || "").trim();
+        state.markerCandidates++;
+        if (symbol) symbolSet[symbol] = true;
+
+        if (state.samples.length < 20) {
+          state.samples.push({
+            row: sheetRow,
+            timestamp: ts instanceof Date && !isNaN(ts.getTime())
+              ? Utilities.formatDate(ts, CONFIG.TIMEZONE, "yyyy-MM-dd HH:mm")
+              : String(ts || ""),
+            symbol: symbol,
+            alertId: alertId,
+            reason: "midday_marker"
+          });
+        }
+      });
+
+      state.scannedRows += numRows;
+      state.nextRow = startRow - 1;
+    }
+
+    symbols = Object.keys(symbolSet).sort();
+    writeMiddayRollbackSymbols_(symbols);
+    state.phase = "delete_rows";
+    state.nextRow = sh.getLastRow();
+    state.updatedAt = new Date().toISOString();
+    writeMiddayRollbackState_(state);
+  }
+
+  if (state.phase === "delete_rows") {
+    while (state.nextRow >= DATA_ROW) {
+      if (Date.now() - startedAt > LIMIT_MS - GUARD_MS) {
+        symbols = Object.keys(symbolSet).sort();
+        writeMiddayRollbackSymbols_(symbols);
+        return pauseMiddayRollback_(state, symbols, false);
+      }
+
+      const endRow = Math.min(state.nextRow, sh.getLastRow());
+      if (endRow < DATA_ROW) break;
+      const startRow = Math.max(DATA_ROW, endRow - CHUNK_ROWS + 1);
+      const numRows = endRow - startRow + 1;
+      const values = sh.getRange(startRow, 1, numRows, 3).getValues();
+      const deleteRows = [];
+
+      values.forEach((row, index) => {
+        const sheetRow = startRow + index;
+        const ts = row[0];
+        const alertId = String(row[1] || "").trim();
+        const symbol = String(row[2] || "").trim();
+        const isMarkerRow = alertId === state.marker;
+        let shouldDelete = isMarkerRow;
+
+        if (!shouldDelete && state.deleteLookbackWindow && symbolSet[symbol]) {
+          shouldDelete = ts instanceof Date &&
+            !isNaN(ts.getTime()) &&
+            ts.getTime() >= state.lookbackStartMs &&
+            ts.getTime() <= state.lookbackEndMs;
+        }
+        if (!shouldDelete) return;
+
+        deleteRows.push(sheetRow);
+        const tsKey = ts instanceof Date && !isNaN(ts.getTime()) ? formatYmd_(ts) : "invalid";
+        state.dateCounts[tsKey] = (state.dateCounts[tsKey] || 0) + 1;
+        if (isMarkerRow) {
+          if (!symbolSet[symbol] && symbol) symbolSet[symbol] = true;
+        } else {
+          state.lookbackWindowCandidates++;
+        }
+
+        if (state.samples.length < 20) {
+          state.samples.push({
+            row: sheetRow,
+            timestamp: ts instanceof Date && !isNaN(ts.getTime())
+              ? Utilities.formatDate(ts, CONFIG.TIMEZONE, "yyyy-MM-dd HH:mm")
+              : String(ts || ""),
+            symbol: symbol,
+            alertId: alertId,
+            reason: isMarkerRow ? "midday_marker" : "lookback_window"
+          });
+        }
+      });
+
+      if (!state.dryRun && deleteRows.length > 0) {
+        deleteRowsByRowNums_(sh, deleteRows);
+        SpreadsheetApp.flush();
+      }
+      state.deletedRows += deleteRows.length;
+      state.nextRow = startRow - 1;
+      state.updatedAt = new Date().toISOString();
+      writeMiddayRollbackState_(state);
+    }
+  }
+
+  symbols = Object.keys(symbolSet).sort();
+  if (!state.dryRun && symbols.length > 0) {
+    setOhlcvRepairSymbols_(symbols);
+  }
+  if (!state.dryRun) clearMiddayOhlcvState_();
+
+  const summary = {
+    ok: true,
+    complete: true,
+    dryRun: state.dryRun,
+    marker: state.marker,
+    deleteLookbackWindow: state.deleteLookbackWindow,
+    lookbackStart: Utilities.formatDate(new Date(state.lookbackStartMs), CONFIG.TIMEZONE, "yyyy-MM-dd HH:mm"),
+    lookbackEnd: Utilities.formatDate(new Date(state.lookbackEndMs), CONFIG.TIMEZONE, "yyyy-MM-dd HH:mm"),
+    markerCandidates: state.markerCandidates,
+    lookbackWindowCandidates: state.lookbackWindowCandidates,
+    deleteCandidates: state.deletedRows,
+    deletedRows: state.dryRun ? 0 : state.deletedRows,
+    queuedRepairSymbols: state.dryRun ? 0 : symbols.length,
+    repairSymbols: symbols.length,
+    sampleSymbols: symbols.slice(0, 30),
+    dateCounts: state.dateCounts,
+    samples: state.samples
+  };
+
+  clearMiddayRollbackState_();
+  console.log(`[rollbackMidday] complete marker=${summary.marker} dryRun=${summary.dryRun} deleteCandidates=${summary.deleteCandidates} repairSymbols=${summary.repairSymbols}`);
+  return summary;
+}
+
+function resumeMiddayOhlcvRollback() {
+  deleteTriggersByHandler_(MIDDAY_ROLLBACK_RESUME_HANDLER);
+  const state = readMiddayRollbackState_();
+  if (!state) {
+    console.log("[rollbackMidday] 再開状態がないため終了します");
+    return { ok: true, skipped: true, reason: "no_state" };
+  }
+  return rollbackMiddayOhlcvRun_(state.dateKey, state.dryRun === true, { resume: true });
+}
+
+function resetMiddayOhlcvRollbackState() {
+  clearMiddayRollbackState_();
+  console.log("[rollbackMidday] rollback state cleared");
+}
+
+function pauseMiddayRollback_(state, symbols, forceSchedule) {
+  state.updatedAt = new Date().toISOString();
+  writeMiddayRollbackState_(state);
+  writeMiddayRollbackSymbols_(symbols);
+  if (!state.dryRun || forceSchedule === true) {
+    scheduleMiddayRollbackResume_(60 * 1000);
+  }
+  const result = {
+    ok: true,
+    incomplete: true,
+    dryRun: state.dryRun,
+    phase: state.phase,
+    nextRow: state.nextRow,
+    marker: state.marker,
+    markerCandidates: state.markerCandidates,
+    lookbackWindowCandidates: state.lookbackWindowCandidates,
+    deleteCandidatesSoFar: state.deletedRows,
+    repairSymbols: symbols.length
+  };
+  console.log(`[rollbackMidday] paused ${JSON.stringify(result)}`);
+  return result;
+}
+
+function scheduleMiddayRollbackResume_(delayMs) {
+  deleteTriggersByHandler_(MIDDAY_ROLLBACK_RESUME_HANDLER);
+  ScriptApp.newTrigger(MIDDAY_ROLLBACK_RESUME_HANDLER)
+    .timeBased()
+    .after(delayMs)
+    .create();
+}
+
+function readMiddayRollbackState_() {
+  try {
+    const raw = PropertiesService.getScriptProperties().getProperty(MIDDAY_ROLLBACK_STATE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function writeMiddayRollbackState_(state) {
+  PropertiesService.getScriptProperties().setProperty(MIDDAY_ROLLBACK_STATE_KEY, JSON.stringify(state));
+}
+
+function readMiddayRollbackSymbols_() {
+  try {
+    const raw = PropertiesService.getScriptProperties().getProperty(MIDDAY_ROLLBACK_SYMBOLS_KEY);
+    return raw ? JSON.parse(raw).map(sym => String(sym || "").trim()).filter(Boolean) : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function writeMiddayRollbackSymbols_(symbols) {
+  PropertiesService.getScriptProperties().setProperty(
+    MIDDAY_ROLLBACK_SYMBOLS_KEY,
+    JSON.stringify((symbols || []).map(sym => String(sym || "").trim()).filter(Boolean).sort())
+  );
+}
+
+function clearMiddayRollbackState_() {
+  const props = PropertiesService.getScriptProperties();
+  props.deleteProperty(MIDDAY_ROLLBACK_STATE_KEY);
+  props.deleteProperty(MIDDAY_ROLLBACK_SYMBOLS_KEY);
+  deleteTriggersByHandler_(MIDDAY_ROLLBACK_RESUME_HANDLER);
 }
 
 function repairBlankTimestampOhlcvRowsNow() {
@@ -2562,8 +2853,10 @@ writeProcessLog_("OHLCV", "PHASE1: OHLCV取得対象を差分取得型にしま�
 props.setProperties({
   "LAST_TS_MAP": JSON.stringify(lastTsMap),
   [SYMBOL_LIST_KEY]: JSON.stringify(symbols),
-  [STATE_KEY]: "0"
+  [STATE_KEY]: "0",
+  [NEW_ALERT_COUNT_KEY]: String(todaySet.size)
 });
+newAlertCount = todaySet.size;
 }
 
     let startIndex = safeParseInt_(props.getProperty(STATE_KEY), 0);
@@ -2688,7 +2981,6 @@ if (validRows.length > 0) {
               if (validRows.length < 2 && sparseResultSamples.length < 5) {
                 sparseResultSamples.push({ symbol: meta.symbol, rows: validRows.length });
               }
-              newAlertCount++;
             } else if (noRowsSymbols.length < 5) {
               noRowsSymbols.push(meta.symbol);
             }
@@ -2952,6 +3244,79 @@ if (phase === "PHASE4") {
 }
 
 function prepareMainRunRowsFastPmVolume_(symbol, rows, dailyMap, todayKey) {
+  const fastSym = String(symbol || "").trim();
+  const fastNormalizedRows = (rows || []).map(row => normalizeOhlcvRowForWrite_(row)).filter(Boolean);
+  if (!fastSym || !todayKey) return fastNormalizedRows;
+
+  const fastTodayRows = [];
+  const fastOtherRows = [];
+  fastNormalizedRows.forEach(row => {
+    const ts = row[0];
+    const rowSym = String(row[2] || "").trim();
+    if (rowSym === fastSym && formatYmd_(ts) === todayKey) {
+      fastTodayRows.push(row);
+    } else {
+      fastOtherRows.push(row);
+    }
+  });
+
+  const fastDaily = dailyMap && dailyMap[todayKey];
+  const fastDailyVol = Math.round(Number(fastDaily && fastDaily.volume));
+  const fastDailyClose = toFiniteNumberOrNull_(fastDaily && fastDaily.close);
+  if (!Number.isFinite(fastDailyVol) || fastDailyVol < 0 || fastDailyClose === null) {
+    return fastOtherRows.concat(sortTodaySessionRows_(fastTodayRows));
+  }
+
+  const fastAmRow = fastTodayRows.find(row => getOhlcvSessionName_(row[0]) === "AM") || null;
+  let fastPmRow = fastTodayRows.find(row => getOhlcvSessionName_(row[0]) === "PM") || null;
+  const fastAmVol = fastAmRow ? toSafeVolumeNumber_(fastAmRow[7]) : 0;
+  const fastHasValidDailyDiff = !fastAmRow || fastDailyVol >= fastAmVol;
+  const fastPmVolAfter = fastHasValidDailyDiff ? Math.max(0, Math.round(fastDailyVol - fastAmVol)) : null;
+
+  if (fastPmRow) {
+    if ((fastAmRow && fastHasValidDailyDiff) ||
+        (!fastAmRow && (isDailyCompatibleWithSessionRow_(fastDaily, fastPmRow) || isSinglePriceDailyOhlcv_(fastDaily)))) {
+      const fastPmBefore = toSafeVolumeNumber_(fastPmRow[7]);
+      fastPmRow[7] = fastAmRow ? fastPmVolAfter : fastDailyVol;
+      debugLogToSheet_("ohlcv.mainToday.pmVolumeAdjusted", {
+        symbol: fastSym,
+        todayKey: todayKey,
+        dailyVol: fastDailyVol,
+        amVol: fastAmVol,
+        pmBefore: fastPmBefore,
+        pmAfter: fastPmRow[7],
+        mode: fastAmRow ? "daily_minus_am" : "daily_compatible_pm_only"
+      });
+    }
+    return fastOtherRows.concat(sortTodaySessionRows_(fastTodayRows));
+  }
+
+  if (fastHasValidDailyDiff && fastPmVolAfter > 0 && (fastAmRow || isSinglePriceDailyOhlcv_(fastDaily))) {
+    const fastMarker = fastAmRow ? String(fastAmRow[1] || "new_session") : "new_session";
+    fastPmRow = [
+      new Date(`${todayKey}T13:00:00+09:00`),
+      fastMarker,
+      fastSym,
+      fastDailyClose,
+      fastDailyClose,
+      fastDailyClose,
+      fastDailyClose,
+      fastPmVolAfter
+    ];
+    fastTodayRows.push(fastPmRow);
+    debugLogToSheet_("ohlcv.mainToday.pmSynthesizedFromDaily", {
+      symbol: fastSym,
+      todayKey: todayKey,
+      dailyVol: fastDailyVol,
+      amVol: fastAmVol,
+      pmVol: fastPmVolAfter,
+      close: fastDailyClose,
+      reason: fastAmRow ? "missing_pm_with_am" : "single_price_daily"
+    });
+  }
+
+  return fastOtherRows.concat(sortTodaySessionRows_(fastTodayRows));
+
   const sym = String(symbol || "").trim();
   if (!rows || rows.length === 0 || !sym || !todayKey) return rows || [];
 
@@ -3038,6 +3403,36 @@ function prepareMainRunRowsFastPmVolume_(symbol, rows, dailyMap, todayKey) {
 function toSafeVolumeNumber_(value) {
   const n = Number(value);
   return Number.isFinite(n) ? Math.round(n) : 0;
+}
+
+function sortTodaySessionRows_(rows) {
+  return (rows || []).slice().sort((a, b) => {
+    const at = a && a[0] instanceof Date ? a[0].getTime() : 0;
+    const bt = b && b[0] instanceof Date ? b[0].getTime() : 0;
+    return at - bt;
+  });
+}
+
+function isSinglePriceDailyOhlcv_(daily) {
+  const open = toFiniteNumberOrNull_(daily && daily.open);
+  const high = toFiniteNumberOrNull_(daily && daily.high);
+  const low = toFiniteNumberOrNull_(daily && daily.low);
+  const close = toFiniteNumberOrNull_(daily && daily.close);
+  if (open === null || high === null || low === null || close === null) return false;
+  return open === high && high === low && low === close;
+}
+
+function isDailyCompatibleWithSessionRow_(daily, row) {
+  const dailyOpen = toFiniteNumberOrNull_(daily && daily.open);
+  const dailyHigh = toFiniteNumberOrNull_(daily && daily.high);
+  const dailyLow = toFiniteNumberOrNull_(daily && daily.low);
+  const dailyClose = toFiniteNumberOrNull_(daily && daily.close);
+  if (dailyOpen === null || dailyHigh === null || dailyLow === null || dailyClose === null) return false;
+  if (!row || row.length < 7) return false;
+  return Number(row[3]) === dailyOpen &&
+    Number(row[4]) === dailyHigh &&
+    Number(row[5]) === dailyLow &&
+    Number(row[6]) === dailyClose;
 }
 
 // runDailyMaintenance を引数付きで起動するためのラッパー
@@ -3186,7 +3581,21 @@ function normalizeOhlcvRowForWrite_(row) {
   const ts = normalizeOhlcvTimestamp_(out[0]);
   if (!ts) return null;
   if (!isOhlcvSessionTimestamp_(ts)) return null;
-  out[0] = ts;
+  out[0] = new Date(ts.getTime());
+  out[2] = String(out[2] || "").trim();
+  if (!out[2]) return null;
+
+  const marker = String(out[1] || "").trim();
+  if (marker !== "GAP_FAILED") {
+    for (let i = 3; i <= 6; i++) {
+      const n = Number(out[i]);
+      if (!Number.isFinite(n)) return null;
+      out[i] = n;
+    }
+    const vol = Number(out[7]);
+    if (!Number.isFinite(vol) || vol < 0) return null;
+    out[7] = Math.round(vol);
+  }
   return out;
 }
 
@@ -3212,6 +3621,7 @@ function appendRowsToSheet_(sheet, data) {
   const startRow = sheet.getLastRow() + 1;
   sheet.getRange(startRow, 1, validData.length, 8).setValues(validData);
   sheet.getRange(startRow, 1, validData.length, 1).setNumberFormat("yyyy/mm/dd hh:mm");
+  SpreadsheetApp.flush();
   return validData.length;
 }
 
@@ -3679,6 +4089,8 @@ function parseIntraResponse_(tvSymbol, intraRes, factorMap, dailyMap) {
 }
 
 function repairSessionVolumesWithDailyVolume_(candlesByPeriod, dailyMap, zeroVolumePriceSessionMap) {
+  return;
+
   dailyMap = dailyMap || {};
 
   Object.keys(dailyMap).forEach(ymd => {
@@ -3810,25 +4222,13 @@ function reduceSessionVolumesEvenly_(am, pm, overAmount, ymd, dailyVol, amBefore
 function fetchOHLCVRecent(tvSymbol, lastTs, optStartSec, optEndSec) {
   const pair = buildOhlcvRequestPair_(tvSymbol, lastTs, optStartSec, optEndSec);
 
-  let dailyRes;
   let intraRes;
 
   try {
-    const responses = UrlFetchApp.fetchAll([
-      {
-        url: pair.dailyUrl,
-        muteHttpExceptions: true,
-        headers: { "User-Agent": "Mozilla/5.0" }
-      },
-      {
-        url: pair.intraUrl,
-        muteHttpExceptions: true,
-        headers: { "User-Agent": "Mozilla/5.0" }
-      }
-    ]);
-
-    dailyRes = responses[0];
-    intraRes = responses[1];
+    intraRes = UrlFetchApp.fetch(pair.intraUrl, {
+      muteHttpExceptions: true,
+      headers: { "User-Agent": "Mozilla/5.0" }
+    });
   } catch (e) {
     debugLogToSheet_("fetchOHLCVRecent.intraException", {
       symbol: tvSymbol,
@@ -3837,8 +4237,7 @@ function fetchOHLCVRecent(tvSymbol, lastTs, optStartSec, optEndSec) {
     return [];
   }
 
-  const dailyMap = buildDailyOhlcvMapFromYahooResponse_(dailyRes);
-  return parseIntraResponse_(tvSymbol, intraRes, null, dailyMap);
+  return parseIntraResponse_(tvSymbol, intraRes, null);
 }
 
 function convertToYahooSymbol(tvSymbol) {
@@ -4620,13 +5019,6 @@ function fetchHistoricalVolumeRepairRowsForSymbols_(symbols, ranges) {
       Math.floor(start.getTime() / 1000),
       Math.floor(end.getTime() / 1000)
     );
-    const dailyIdx = requests.length;
-requests.push({
-  url: pair.dailyUrl,
-  muteHttpExceptions: true,
-  headers: { "User-Agent": "Mozilla/5.0" }
-});
-
 const intraIdx = requests.length;
 requests.push({
   url: pair.intraUrl,
@@ -4638,7 +5030,6 @@ metaList.push({
   symbol: symbol,
   minTime: range.min.getTime(),
   maxTime: range.max.getTime(),
-  dailyIdx: dailyIdx,
   intraIdx: intraIdx
 });
   });
@@ -4668,18 +5059,16 @@ metaList.push({
 
   metaList.forEach(meta => {
     try {
-      const dailyRes = responses[meta.dailyIdx];
 const intraRes = responses[meta.intraIdx];
 
-if (isTransientHttpResponse_(dailyRes) || isTransientHttpResponse_(intraRes)) {
+if (isTransientHttpResponse_(intraRes)) {
   summary.transient = true;
   summary.deferredSymbols++;
   summary.message = "transient HTTP response";
   return;
 }
 
-const dailyMap = buildDailyOhlcvMapFromYahooResponse_(dailyRes);
-const rows = parseIntraResponse_(meta.symbol, intraRes, null, dailyMap) || [];
+const rows = parseIntraResponse_(meta.symbol, intraRes, null) || [];
       let added = 0;
       rows.forEach(row => {
         const ts = row[0];
@@ -5486,6 +5875,8 @@ function processQuickRepairGroups_(sheet, groups, sessionInfo, minSessions) {
     repairedDates: 0,
     failedDates: 0,
     deferredDates: 0,
+    noDataDates: 0,
+    missingSamples: [],
     rows: 0,
     parseErrors: 0
   };
@@ -5521,9 +5912,14 @@ function processQuickRepairGroups_(sheet, groups, sessionInfo, minSessions) {
         if (afterCount >= minSessions) {
           summary.repairedDates++;
         } else {
-          makeGapFailedRows_(meta.symbol, dateStr, sessionInfo.periodMap, fetchedPeriodMap)
-            .forEach(row => failedRows.push(row));
-          sessionInfo.markerMap[key] = true;
+          summary.noDataDates++;
+          if (summary.missingSamples.length < 10) {
+            summary.missingSamples.push({
+              symbol: meta.symbol,
+              date: dateStr,
+              sessionsAfterFetch: afterCount
+            });
+          }
           summary.failedDates++;
         }
       });
