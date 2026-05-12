@@ -3978,9 +3978,44 @@ function isValidOhlcvTimestamp_(ts) {
   return ts instanceof Date && !isNaN(ts.getTime()) && ts >= MIN_VALID_DATE;
 }
 
+function jstDateToSheetSerial_(date) {
+  const d = normalizeOhlcvTimestamp_(date);
+  if (!d) return null;
+  const y = Number(Utilities.formatDate(d, CONFIG.TIMEZONE, "yyyy"));
+  const m = Number(Utilities.formatDate(d, CONFIG.TIMEZONE, "MM"));
+  const day = Number(Utilities.formatDate(d, CONFIG.TIMEZONE, "dd"));
+  const hour = Number(Utilities.formatDate(d, CONFIG.TIMEZONE, "HH"));
+  const minute = Number(Utilities.formatDate(d, CONFIG.TIMEZONE, "mm"));
+  const second = Number(Utilities.formatDate(d, CONFIG.TIMEZONE, "ss"));
+  const epoch = Date.UTC(1899, 11, 30);
+  const wholeDays = (Date.UTC(y, m - 1, day) - epoch) / (24 * 60 * 60 * 1000);
+  return wholeDays + (hour * 3600 + minute * 60 + second) / (24 * 60 * 60);
+}
+
+function sheetSerialToJstDate_(serial) {
+  const n = Number(serial);
+  if (!Number.isFinite(n) || n < 20000 || n > 100000) return null;
+  const wholeDays = Math.floor(n);
+  const seconds = Math.round((n - wholeDays) * 24 * 60 * 60);
+  const epoch = Date.UTC(1899, 11, 30);
+  const d = new Date(epoch + wholeDays * 24 * 60 * 60 * 1000);
+  const y = d.getUTCFullYear();
+  const m = d.getUTCMonth() + 1;
+  const day = d.getUTCDate();
+  const hour = Math.floor(seconds / 3600);
+  const minute = Math.floor((seconds % 3600) / 60);
+  const second = seconds % 60;
+  const iso = y + "-" + String(m).padStart(2, "0") + "-" + String(day).padStart(2, "0") +
+    "T" + String(hour).padStart(2, "0") + ":" + String(minute).padStart(2, "0") + ":" + String(second).padStart(2, "0") + "+09:00";
+  const out = new Date(iso);
+  return isValidOhlcvTimestamp_(out) ? out : null;
+}
+
 function normalizeOhlcvTimestamp_(value) {
   if (isValidOhlcvTimestamp_(value)) return value;
   if (typeof value === "number" && Number.isFinite(value)) {
+    const serialDate = sheetSerialToJstDate_(value);
+    if (serialDate) return serialDate;
     const ms = value > 1000000000000 ? value : value * 1000;
     const d = new Date(ms);
     return isValidOhlcvTimestamp_(d) ? d : null;
@@ -4082,8 +4117,8 @@ function appendOhlcvRowsToSheetDetailed_(sheet, data, context) {
 
   // Write B:H first, then write A alone so timestamp write failures are isolated.
   sheet.getRange(startRow, 2, validData.length, 7).setValues(validData.map(row => row.slice(1, 8)));
-  sheet.getRange(startRow, 1, validData.length, 1).setValues(validData.map(row => [new Date(row[0].getTime())]));
   sheet.getRange(startRow, 1, validData.length, 1).setNumberFormat("yyyy/mm/dd hh:mm");
+  sheet.getRange(startRow, 1, validData.length, 1).setValues(validData.map(row => [jstDateToSheetSerial_(row[0])]));
   SpreadsheetApp.flush();
   const readback = purgeInvalidRecentlyAppendedOhlcvRows_(sheet, startRow, validData.length, context || "appendRowsToSheet_.readback", validData, preWriteSamples);
   detail.deletedRows = readback.deletedRows || 0;
@@ -4156,7 +4191,7 @@ function purgeInvalidRecentlyAppendedOhlcvRows_(sheet, startRow, numRows, contex
   const persistedRows = [];
 
   values.forEach((row, index) => {
-    const ts = row[0];
+    const ts = normalizeOhlcvTimestamp_(row[0]);
     const invalidReason = !isValidOhlcvTimestamp_(ts)
       ? "invalid_timestamp"
       : (!isOhlcvSessionTimestamp_(ts) ? "non_session_timestamp" : "");

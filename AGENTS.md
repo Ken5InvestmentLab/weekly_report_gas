@@ -603,6 +603,7 @@ GASの実行上限は約6分。長時間処理は必ず再開可能にする。
 - `ohlcv_4h` に追記する場合は `appendRowsToSheet_` を通す。
 - 追記前にtimestampを `Date` に正規化する。
 - 追記はB:Hを書いた後にA列 timestamp を単独で書き、直後にA列を読み返す。空・不正・09:00/13:00以外の行は即削除し、preWrite/postWriteのtimestampサンプルをログに残す。
+- A列 timestamp はGoogle Sheetsの日時シリアル値で書き、readbackでは `Date` とシリアル値の両方を正規化して判定する。
 - GAP修復では、readbackで実際に保存確認できたOHLCV行だけを補填成功として数える。A列timestamp保存失敗が出た場合は再開トリガーを増やさず停止する。
 - 追記後は必要に応じて `dedupeAndSortOhlcv_()` で昇順 invariant を復元する。
 - GAP修復・監査はA列 timestamp 昇順を前提に末尾から直近分だけを読む。
