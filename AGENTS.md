@@ -312,7 +312,7 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 | `DAILY_MAINT_CURSOR` | 日次メンテナンス再開カーソル |
 | `DAILY_MAINT_NEW_COUNT` | 日次メンテナンス用の新規件数メタ |
 | `DAILY_MAINT_REFRESH_ID` | 日次メンテナンス用の取得IDメタ |
-| `QUICK_REPAIR_STATE` | GAP修復の再開状態。v6 |
+| `QUICK_REPAIR_STATE` | GAP修復の再開状態。v7 |
 | `QUICK_REPAIR_TAIL_CLEANUP_STATE` | GAP修復入口の末尾不正timestamp掃除状態 |
 | `CLEANUP_LEGACY_STATE_V1` | 旧OHLCV残骸整理の再開状態 |
 | `CLEANUP_LEGACY_AUTO_QUICK_REPAIR_V1` | cleanup完了後に `quickRepairTrigger` を予約するためのフラグ |
@@ -487,7 +487,8 @@ refetchSymbolRange(symbols, startDate, endDate)
 - `quickScanMissingSessions()` で未処理のセッション不足だけを抽出する。
 - 対象銘柄・対象日付グループだけ Yahoo Finance から再取得する。
 - 取得は `UrlFetchApp.fetchAll` を使う。
-- 進捗は `QUICK_REPAIR_STATE` v6 に保存する。
+- 進捗は `QUICK_REPAIR_STATE` v7 に保存する。
+- 再開位置は、実際に処理を通過した銘柄グループの `lastProcessedSymbol` を使う。
 - 再開時は直近スキャンをやり直し、既に埋まったグループやマーカー付き未充足日は再取得対象から外す。
 - 修復行はB列に `GAP_REPAIR` を入れる。
 - 自動GAP修復でYahooから十分な1h足が返らない日は、原則として `GAP_FAILED` を作らずログに残して次回以降の正規再取得対象にする。
@@ -601,7 +602,8 @@ GASの実行上限は約6分。長時間処理は必ず再開可能にする。
 - `ohlcv_4h` の先頭から連続削除する処理は `sheet.deleteRows(firstDataRow, N)` で行う。
 - `ohlcv_4h` に追記する場合は `appendRowsToSheet_` を通す。
 - 追記前にtimestampを `Date` に正規化する。
-- 追記直後に、今回追記したA列 timestamp を読み返し、空・不正・09:00/13:00以外の行があれば、まず追記元の正規DateをA列へ再書き込みして再確認する。それでも不正なら即削除し、対象銘柄を `OHLCV_REPAIR_SYMBOLS` に積む。
+- 追記はB:Hを書いた後にA列 timestamp を単独で書き、直後にA列を読み返す。空・不正・09:00/13:00以外の行は即削除し、preWrite/postWriteのtimestampサンプルをログに残す。
+- GAP修復では、readbackで実際に保存確認できたOHLCV行だけを補填成功として数える。A列timestamp保存失敗が出た場合は再開トリガーを増やさず停止する。
 - 追記後は必要に応じて `dedupeAndSortOhlcv_()` で昇順 invariant を復元する。
 - GAP修復・監査はA列 timestamp 昇順を前提に末尾から直近分だけを読む。
 - `getRange(2, 1, lastRow - 1, ...)` の全行読みをGAP系に追加しない。

@@ -4025,8 +4025,38 @@ function normalizeOhlcvRowForWrite_(row) {
   return out;
 }
 
+function buildOhlcvAppendPreWriteSamples_(rows, maxSamples) {
+  const samples = [];
+  (rows || []).slice(0, maxSamples || 5).forEach((row, index) => {
+    const ts = normalizeOhlcvTimestamp_(row && row.length ? row[0] : null);
+    samples.push({
+      index: index,
+      timestamp: ts ? Utilities.formatDate(ts, CONFIG.TIMEZONE, "yyyy/MM/dd HH:mm") : "",
+      marker: row && row.length > 1 ? String(row[1] || "") : "",
+      symbol: row && row.length > 2 ? String(row[2] || "") : ""
+    });
+  });
+  return samples;
+}
+
 function appendRowsToSheet_(sheet, data) {
-  if (!data || data.length === 0) return 0;
+  return appendOhlcvRowsToSheetDetailed_(sheet, data, "appendRowsToSheet_").rows;
+}
+
+function appendOhlcvRowsToSheetDetailed_(sheet, data, context) {
+  const detail = {
+    requestedRows: data ? data.length : 0,
+    validRows: 0,
+    skippedRows: 0,
+    rows: 0,
+    deletedRows: 0,
+    repairSymbols: 0,
+    persistedRows: [],
+    appendFailed: false,
+    preWriteSamples: []
+  };
+
+  if (!data || data.length === 0) return detail;
   const validData = [];
   const skippedSamples = [];
   data.forEach((row, index) => {
@@ -4038,23 +4068,30 @@ function appendRowsToSheet_(sheet, data) {
     }
   });
   const skipped = data.length - validData.length;
+  detail.validRows = validData.length;
+  detail.skippedRows = skipped;
   if (skipped > 0) {
     debugLogToSheet_("appendRowsToSheet_.skippedInvalidTs", {
       total: data.length, valid: validData.length, skipped: skipped, samples: skippedSamples
     });
   }
-  if (validData.length === 0) return 0;
+  if (validData.length === 0) return detail;
   const startRow = sheet.getLastRow() + 1;
+  const preWriteSamples = buildOhlcvAppendPreWriteSamples_(validData, 5);
+  detail.preWriteSamples = preWriteSamples;
+
+  // Write B:H first, then write A alone so timestamp write failures are isolated.
+  sheet.getRange(startRow, 2, validData.length, 7).setValues(validData.map(row => row.slice(1, 8)));
+  sheet.getRange(startRow, 1, validData.length, 1).setValues(validData.map(row => [new Date(row[0].getTime())]));
   sheet.getRange(startRow, 1, validData.length, 1).setNumberFormat("yyyy/mm/dd hh:mm");
-  sheet.getRange(startRow, 1, validData.length, 8).setValues(validData);
-  sheet.getRange(startRow, 1, validData.length, 1).setValues(validData.map(row => [row[0]]));
   SpreadsheetApp.flush();
-  restoreRecentlyAppendedOhlcvTimestamps_(sheet, startRow, validData, "appendRowsToSheet_.timestamp_restore");
-  const readback = purgeInvalidRecentlyAppendedOhlcvRows_(sheet, startRow, validData.length, "appendRowsToSheet_.readback");
-  if ((readback.deletedRows || 0) > 0) {
-    purgeInvalidOhlcvTimestampRows_(sheet, "appendRowsToSheet_.tail_after_readback", OHLCV_APPEND_INTEGRITY_SCAN_ROWS);
-  }
-  return Math.max(0, validData.length - (readback.deletedRows || 0));
+  const readback = purgeInvalidRecentlyAppendedOhlcvRows_(sheet, startRow, validData.length, context || "appendRowsToSheet_.readback", validData, preWriteSamples);
+  detail.deletedRows = readback.deletedRows || 0;
+  detail.repairSymbols = readback.repairSymbols || 0;
+  detail.persistedRows = readback.persistedRows || [];
+  detail.rows = detail.persistedRows.length;
+  detail.appendFailed = validData.length > 0 && (detail.deletedRows > 0 || (readback.readRows || 0) < validData.length);
+  return detail;
 }
 
 function restoreRecentlyAppendedOhlcvTimestamps_(sheet, startRow, validData, context) {
@@ -4101,37 +4138,43 @@ function restoreRecentlyAppendedOhlcvTimestamps_(sheet, startRow, validData, con
   return { rewrittenRows: readRows };
 }
 
-function purgeInvalidRecentlyAppendedOhlcvRows_(sheet, startRow, numRows, context) {
+function purgeInvalidRecentlyAppendedOhlcvRows_(sheet, startRow, numRows, context, expectedRows, preWriteSamples) {
   if (!sheet || !Number.isFinite(startRow) || !Number.isFinite(numRows) || numRows <= 0) {
-    return { deletedRows: 0, repairSymbols: 0 };
+    return { deletedRows: 0, repairSymbols: 0, persistedRows: [], readRows: 0 };
   }
 
   const lastRow = sheet.getLastRow();
-  if (lastRow < startRow) return { deletedRows: 0, repairSymbols: 0 };
+  if (lastRow < startRow) return { deletedRows: 0, repairSymbols: 0, persistedRows: [], readRows: 0 };
 
   const readRows = Math.min(numRows, lastRow - startRow + 1);
-  if (readRows <= 0) return { deletedRows: 0, repairSymbols: 0 };
+  if (readRows <= 0) return { deletedRows: 0, repairSymbols: 0, persistedRows: [], readRows: 0 };
 
   const values = sheet.getRange(startRow, 1, readRows, 3).getValues();
   const deleteRows = [];
   const repairSymbolSet = {};
   const samples = [];
+  const persistedRows = [];
 
   values.forEach((row, index) => {
     const ts = row[0];
     const invalidReason = !isValidOhlcvTimestamp_(ts)
       ? "invalid_timestamp"
       : (!isOhlcvSessionTimestamp_(ts) ? "non_session_timestamp" : "");
-    if (!invalidReason) return;
+    if (!invalidReason) {
+      if (expectedRows && expectedRows[index]) persistedRows.push(expectedRows[index]);
+      return;
+    }
 
     const sheetRow = startRow + index;
     const symbol = String(row[2] || "").trim();
+    const expected = expectedRows && expectedRows[index] ? expectedRows[index] : null;
     deleteRows.push(sheetRow);
     if (symbol) repairSymbolSet[symbol] = true;
     if (samples.length < 10) {
       samples.push({
         row: sheetRow,
-        timestamp: ts == null ? "" : String(ts),
+        postWriteTimestamp: ts == null ? "" : String(ts),
+        expectedTimestamp: expected && expected[0] ? Utilities.formatDate(expected[0], CONFIG.TIMEZONE, "yyyy/MM/dd HH:mm") : "",
         reason: invalidReason,
         symbol: symbol
       });
@@ -4139,7 +4182,7 @@ function purgeInvalidRecentlyAppendedOhlcvRows_(sheet, startRow, numRows, contex
   });
 
   if (deleteRows.length === 0) {
-    return { deletedRows: 0, repairSymbols: 0 };
+    return { deletedRows: 0, repairSymbols: 0, persistedRows: expectedRows ? expectedRows.slice(0, readRows) : persistedRows, readRows: readRows };
   }
 
   deleteRowsByRowNums_(sheet, deleteRows);
@@ -4154,10 +4197,11 @@ function purgeInvalidRecentlyAppendedOhlcvRows_(sheet, startRow, numRows, contex
     scannedRows: readRows,
     deletedRows: deleteRows.length,
     repairSymbols: repairSymbols.length,
+    preWriteSamples: preWriteSamples || buildOhlcvAppendPreWriteSamples_(expectedRows || [], 5),
     samples: samples
   });
 
-  return { deletedRows: deleteRows.length, repairSymbols: repairSymbols.length };
+  return { deletedRows: deleteRows.length, repairSymbols: repairSymbols.length, persistedRows: persistedRows, readRows: readRows };
 }
 
 function scheduleOhlcvResume_(handlerName, delayMs) {
@@ -5253,7 +5297,7 @@ const QUICK_REPAIR_MAX_RUN_MS = 3.5 * 60 * 1000;
 const QUICK_REPAIR_RESUME_AFTER_MS = 60 * 1000;
 const QUICK_REPAIR_SAFETY_AFTER_MS = 10 * 60 * 1000;
 const QUICK_REPAIR_LOCK_WAIT_MS = 5000;
-const QUICK_REPAIR_STATE_VERSION = 6;
+const QUICK_REPAIR_STATE_VERSION = 7;
 const QUICK_REPAIR_SCAN_BUDGET_MS = 75 * 1000;
 const QUICK_REPAIR_SCAN_ROWS_PER_SYMBOL_DAY = 3;
 const QUICK_REPAIR_SCAN_MIN_ROWS = 20000;
@@ -6182,6 +6226,52 @@ function countQuickRepairGroupTasks_(groups) {
   return (groups || []).reduce((sum, g) => sum + (g.dates ? g.dates.length : 0), 0);
 }
 
+function createQuickRepairState_(version, businessDate, daysBack, minSessions) {
+  return {
+    version: version,
+    businessDate: businessDate,
+    daysBack: daysBack,
+    minSessions: minSessions,
+    totalRows: 0,
+    processedGroups: 0,
+    processedTasks: 0,
+    repairedDates: 0,
+    failedDates: 0,
+    deferredDates: 0,
+    deferredSymbols: 0,
+    parseErrors: 0,
+    batches: 0,
+    lastScanSymbols: 0,
+    lastScanTasks: 0,
+    lastProcessedSymbol: "",
+    startedAt: new Date().toISOString()
+  };
+}
+
+function loadQuickRepairResumeState_(props, version, businessDate, daysBack, minSessions) {
+  try {
+    const raw = props.getProperty(QUICK_REPAIR_STATE_KEY);
+    if (!raw) return null;
+    const state = JSON.parse(raw);
+    if (!state || Number(state.version) !== Number(version)) return null;
+    if (state.businessDate !== businessDate) return null;
+    if (Number(state.daysBack) !== Number(daysBack)) return null;
+    if (Number(state.minSessions) !== Number(minSessions)) return null;
+    return state;
+  } catch (e) {
+    return null;
+  }
+}
+
+function findQuickRepairStartGroupIndex_(groups, lastProcessedSymbol) {
+  const last = String(lastProcessedSymbol || "").trim();
+  if (!last) return 0;
+  for (let i = 0; i < groups.length; i++) {
+    if (String(groups[i].symbol || "") > last) return i;
+  }
+  return groups.length;
+}
+
 function buildQuickRepairSessionInfo_(sheet, tasks) {
   const targetSymbols = {};
   const targetDayToDateStr = {};
@@ -6473,7 +6563,9 @@ function processQuickRepairGroups_(sheet, groups, sessionInfo, minSessions) {
     noDataDates: 0,
     missingSamples: [],
     rows: 0,
-    parseErrors: 0
+    parseErrors: 0,
+    appendFailed: false,
+    appendFailure: null
   };
   if (requests.length === 0) return summary;
 
@@ -6481,12 +6573,14 @@ function processQuickRepairGroups_(sheet, groups, sessionInfo, minSessions) {
   const repairRows = [];
   const failedRows = [];
   const fetchedPeriodMap = {};
+  const deferredDateMap = {};
 
   metaList.forEach(meta => {
     try {
       const intraRes = responses[meta.intraIdx];
       if (isTransientHttpResponse_(intraRes)) {
         summary.deferredDates += meta.dates.length;
+        meta.dates.forEach(dateStr => { deferredDateMap[meta.symbol + "|" + dateStr] = true; });
         return;
       }
 
@@ -6501,26 +6595,10 @@ function processQuickRepairGroups_(sheet, groups, sessionInfo, minSessions) {
         addSessionPeriod_(fetchedPeriodMap, meta.symbol + "|" + rowDateStr, getOhlcvSessionName_(ts));
       });
 
-      meta.dates.forEach(dateStr => {
-        const key = meta.symbol + "|" + dateStr;
-        const afterCount = countMergedSessionPeriods_(sessionInfo.periodMap, fetchedPeriodMap, key);
-        if (afterCount >= minSessions) {
-          summary.repairedDates++;
-        } else {
-          summary.noDataDates++;
-          if (summary.missingSamples.length < 10) {
-            summary.missingSamples.push({
-              symbol: meta.symbol,
-              date: dateStr,
-              sessionsAfterFetch: afterCount
-            });
-          }
-          summary.failedDates++;
-        }
-      });
     } catch (e) {
       summary.parseErrors++;
       summary.deferredDates += meta.dates.length;
+      meta.dates.forEach(dateStr => { deferredDateMap[meta.symbol + "|" + dateStr] = true; });
       writeProcessLog_("ギャップ修復", `${meta.symbol} の補填レスポンスを解析できませんでした。この銘柄の日付は次回へ回します。`, {
         symbol: meta.symbol,
         dates: meta.dates,
@@ -6529,15 +6607,61 @@ function processQuickRepairGroups_(sheet, groups, sessionInfo, minSessions) {
     }
   });
 
-  Object.keys(fetchedPeriodMap).forEach(key => {
-    Object.keys(fetchedPeriodMap[key]).forEach(period => addSessionPeriod_(sessionInfo.periodMap, key, period));
+  const rowsToAppend = repairRows.concat(failedRows);
+  let appendDetail = { rows: 0, persistedRows: [], deletedRows: 0, appendFailed: false };
+  if (rowsToAppend.length > 0) {
+    appendDetail = appendOhlcvRowsToSheetDetailed_(sheet, rowsToAppend, "quickRepair.append");
+    summary.rows = appendDetail.rows || 0;
+    summary.appendFailed = !!appendDetail.appendFailed;
+    if (summary.appendFailed) {
+      summary.appendFailure = {
+        requestedRows: appendDetail.requestedRows || rowsToAppend.length,
+        validRows: appendDetail.validRows || 0,
+        persistedRows: appendDetail.rows || 0,
+        deletedRows: appendDetail.deletedRows || 0,
+        preWriteSamples: appendDetail.preWriteSamples || []
+      };
+    }
+  }
+
+  const savedPeriodMap = {};
+  (appendDetail.persistedRows || []).forEach(row => {
+    const ts = row[0];
+    const marker = String(row[1] || "").trim();
+    const symbol = String(row[2] || "").trim();
+    if (marker !== "GAP_REPAIR" || !symbol || !(ts instanceof Date) || isNaN(ts.getTime())) return;
+    const dateStr = Utilities.formatDate(ts, CONFIG.TIMEZONE, "yyyy/MM/dd");
+    addSessionPeriod_(savedPeriodMap, symbol + "|" + dateStr, getOhlcvSessionName_(ts));
+  });
+
+  Object.keys(savedPeriodMap).forEach(key => {
+    Object.keys(savedPeriodMap[key]).forEach(period => addSessionPeriod_(sessionInfo.periodMap, key, period));
     sessionInfo.countMap[key] = countSessionPeriods_(sessionInfo.periodMap, key);
   });
 
-  const rowsToAppend = repairRows.concat(failedRows);
-  if (rowsToAppend.length > 0) {
-    summary.rows = appendRowsToSheet_(sheet, rowsToAppend);
-  }
+  metaList.forEach(meta => {
+    meta.dates.forEach(dateStr => {
+      const key = meta.symbol + "|" + dateStr;
+      if (deferredDateMap[key]) return;
+      const savedCount = countMergedSessionPeriods_(sessionInfo.periodMap, savedPeriodMap, key);
+      const fetchedCount = countMergedSessionPeriods_(sessionInfo.periodMap, fetchedPeriodMap, key);
+      if (savedCount >= minSessions) {
+        summary.repairedDates++;
+      } else {
+        summary.noDataDates++;
+        if (summary.missingSamples.length < 10) {
+          summary.missingSamples.push({
+            symbol: meta.symbol,
+            date: dateStr,
+            sessionsAfterFetch: fetchedCount,
+            sessionsAfterSave: savedCount
+          });
+        }
+        summary.failedDates++;
+      }
+    });
+  });
+
   return summary;
 }
 
@@ -6917,24 +7041,8 @@ function quickRepairRecentGaps(options) {
     const ohlcvSh = ss.getSheetByName(CONFIG.OHLCV_SHEET);
     if (!ohlcvSh) throw new Error("ohlcv_4h シートが見つかりません");
 
-    const state = {
-      version: STATE_VERSION,
-      businessDate: businessDateKey,
-      daysBack: daysBack,
-      minSessions: minSessions,
-      totalRows: 0,
-      processedGroups: 0,
-      processedTasks: 0,
-      repairedDates: 0,
-      failedDates: 0,
-      deferredDates: 0,
-      deferredSymbols: 0,
-      parseErrors: 0,
-      batches: 0,
-      lastScanSymbols: 0,
-      lastScanTasks: 0,
-      startedAt: new Date().toISOString()
-    };
+    const state = loadQuickRepairResumeState_(props, STATE_VERSION, businessDateKey, daysBack, minSessions)
+      || createQuickRepairState_(STATE_VERSION, businessDateKey, daysBack, minSessions);
     props.setProperty(QUICK_REPAIR_STATE_KEY, JSON.stringify(state));
 
     const DEDUPE_GUARD_MS = 90 * 1000;
@@ -6988,7 +7096,14 @@ function quickRepairRecentGaps(options) {
     }
 
     const sessionInfo = scan.sessionInfo || { countMap: {}, periodMap: {}, markerMap: {} };
-    let groupIndex = 0;
+    let groupIndex = findQuickRepairStartGroupIndex_(groups, state.lastProcessedSymbol);
+    if (groupIndex > 0) {
+      writeProcessLog_("繧ｮ繝｣繝・・菫ｮ蠕ｩ", "保存済みの再開位置からGAP修復を続行します。", {
+        lastProcessedSymbol: state.lastProcessedSymbol || "",
+        resumeGroupIndex: groupIndex,
+        totalGroups: groups.length
+      });
+    }
     while (groupIndex < groups.length) {
       if (Date.now() - startTime > QUICK_REPAIR_MAX_RUN_MS - DEDUPE_GUARD_MS) break;
 
@@ -7000,6 +7115,20 @@ function quickRepairRecentGaps(options) {
       const result = processQuickRepairGroups_(ohlcvSh, batchGroups, sessionInfo, minSessions);
       SpreadsheetApp.flush();
 
+      if (result.appendFailed) {
+        state.stopReason = "append_write_failed";
+        state.appendFailure = result.appendFailure || {};
+        state.updatedAt = new Date().toISOString();
+        props.setProperty(QUICK_REPAIR_STATE_KEY, JSON.stringify(state));
+        deleteTriggersByHandler_("resumeQuickRepair");
+        writeProcessLog_("繧ｮ繝｣繝・・菫ｮ蠕ｩ", "OHLCV補填行のA列timestampを保存できなかったため、再開ループを止めました。", {
+          groupStart: groupIndex + 1,
+          groupEnd: groupIndex + batchGroups.length,
+          appendFailure: state.appendFailure
+        });
+        return { ok: false, stopped: true, reason: "append_write_failed", appendFailure: state.appendFailure };
+      }
+
       groupIndex += batchGroups.length;
       state.processedGroups += batchGroups.length;
       state.processedTasks += countQuickRepairGroupTasks_(batchGroups);
@@ -7009,6 +7138,9 @@ function quickRepairRecentGaps(options) {
       state.totalRows += result.rows || 0;
       state.parseErrors += result.parseErrors || 0;
       state.batches++;
+      if ((result.deferredDates || 0) === 0) {
+        state.lastProcessedSymbol = batchGroups.length ? batchGroups[batchGroups.length - 1].symbol : (state.lastProcessedSymbol || "");
+      }
       state.updatedAt = new Date().toISOString();
       props.setProperty(QUICK_REPAIR_STATE_KEY, JSON.stringify(state));
 
