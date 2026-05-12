@@ -817,7 +817,10 @@ async function assertNoNewerIrbankDisclosureMiss(report, claim) {
     ? receivedAtMs - 45 * 24 * 60 * 60 * 1000
     : Date.now() - 45 * 24 * 60 * 60 * 1000;
 
-  const candidates = await fetchIrbankDisclosureCandidates(symbolCode);
+  const candidates = dedupeDisclosureCandidates([
+    ...(await fetchIrbankDisclosureCandidates(symbolCode)),
+    ...(await fetchYahooFinanceDisclosureCandidates(symbolCode))
+  ]);
 
   const fundamentalCandidates = candidates
     .filter(item => item.disclosedAtMs >= cutoffMs)
@@ -840,9 +843,12 @@ async function assertNoNewerIrbankDisclosureMiss(report, claim) {
   });
 
   if (missing.length) {
-    const list = missing.map(item => `${item.dateText} ${item.timeText || ""} ${item.title}`).join(" / ");
+    const list = missing.map(item => {
+      const source = item.sourceName ? ` [${item.sourceName}]` : "";
+      return `${item.dateText} ${item.timeText || ""} ${item.title}${source}`;
+    }).join(" / ");
     throw new Error(
-      `report ${alertId} may be stale: newer IRBANK fundamentally material disclosure exists for ${symbolCode}: ${list}`
+      `report ${alertId} may be stale: newer fundamentally material disclosure exists for ${symbolCode}: ${list}`
     );
   }
 
@@ -851,7 +857,7 @@ async function assertNoNewerIrbankDisclosureMiss(report, claim) {
 
   if (reportMaxDateMs && reportMaxDateMs < newestDateMs) {
     throw new Error(
-      `report ${alertId} uses an older disclosure while newer IRBANK fundamentally material disclosure exists for ${symbolCode}: ${newest.dateText} ${newest.title}`
+      `report ${alertId} uses an older disclosure while newer fundamentally material disclosure exists for ${symbolCode}: ${newest.dateText} ${newest.title}`
     );
   }
 }
@@ -885,9 +891,10 @@ async function fetchIrbankDisclosureCandidates(symbolCode) {
   while ((match = linkPattern.exec(html)) !== null) {
     const documentId = match[1];
     const rawTitle = stripHtml(match[2]);
+    const beforeContext = html.slice(Math.max(0, match.index - 500), match.index);
     const context = html.slice(Math.max(0, match.index - 700), Math.min(html.length, linkPattern.lastIndex + 700));
 
-    const dateInfo = extractDisclosureDateInfo(context);
+    const dateInfo = extractNearestDisclosureDateInfo(beforeContext, rawTitle) || extractDisclosureDateInfo(context);
     if (!dateInfo.dateText || !dateInfo.disclosedAtMs) continue;
 
     results.push({
@@ -903,6 +910,131 @@ async function fetchIrbankDisclosureCandidates(symbolCode) {
   }
 
   return dedupeDisclosureCandidates(results);
+}
+
+function extractNearestDisclosureDateInfo(beforeText, titleText = "") {
+  const value = normalizeSpaces(stripHtml(beforeText));
+  const matches = [...value.matchAll(/(20\d{2})[\/.-](\d{1,2})[\/.-](\d{1,2})/g)];
+  if (!matches.length) return null;
+
+  const match = matches[matches.length - 1];
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (!year || !month || !day) return null;
+
+  const time = normalizeSpaces(stripHtml(titleText)).match(/(\d{1,2}):(\d{2})/);
+  const hour = time ? Number(time[1]) : 0;
+  const minute = time ? Number(time[2]) : 0;
+  const disclosedAtMs = Date.UTC(year, month - 1, day, hour - 9, minute, 0);
+
+  return {
+    dateText: `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`,
+    timeText: time ? `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}` : "",
+    disclosedAtMs
+  };
+}
+
+async function fetchYahooFinanceDisclosureCandidates(symbolCode) {
+  const code = String(symbolCode || "").trim();
+  if (!/^[0-9A-Z]{4,5}$/i.test(code)) return [];
+
+  const suffixes = ["T", "O", "N", "S", "F"];
+  const results = [];
+
+  for (const suffix of suffixes) {
+    const sourceUrl = `https://finance.yahoo.co.jp/quote/${encodeURIComponent(code)}.${suffix}/disclosure`;
+    let html = "";
+    try {
+      const response = await fetch(sourceUrl, {
+        headers: {
+          "User-Agent": "Mozilla/5.0"
+        }
+      });
+      if (!response.ok) continue;
+      html = await response.text();
+    } catch {
+      continue;
+    }
+
+    const linkPattern = /<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+    let match;
+    while ((match = linkPattern.exec(html)) !== null) {
+      const href = normalizeHtmlUrl(match[1], sourceUrl);
+      const rawText = normalizeSpaces(stripHtml(match[2]));
+      if (!/TDnet\s+PDF/i.test(rawText)) continue;
+
+      const parsed = parseYahooFinanceDisclosureText(rawText);
+      if (!parsed.title || !parsed.dateText || !parsed.disclosedAtMs) continue;
+
+      results.push({
+        symbolCode: code,
+        documentId: href,
+        title: parsed.title,
+        dateText: parsed.dateText,
+        timeText: parsed.timeText,
+        disclosedAtMs: parsed.disclosedAtMs,
+        url: href,
+        sourceUrl,
+        sourceName: `Yahoo Finance ${suffix}`
+      });
+    }
+  }
+
+  return dedupeDisclosureCandidates(results);
+}
+
+function parseYahooFinanceDisclosureText(text, now = new Date()) {
+  const value = normalizeSpaces(text);
+  const meta = value.match(/\s((?:20\d{2}[\/.-])?\d{1,2}[\/.-]\d{1,2})\s+(\d{1,2}):(\d{2})\s+TDnet\s+PDF/i);
+  if (!meta) return { title: "", dateText: "", timeText: "", disclosedAtMs: 0 };
+
+  const title = normalizeSpaces(value.slice(0, meta.index));
+  const dateParts = meta[1].split(/[\/.-]/).map(part => Number(part));
+  const hour = Number(meta[2]);
+  const minute = Number(meta[3]);
+  if (!title || !Number.isInteger(hour) || !Number.isInteger(minute)) {
+    return { title: "", dateText: "", timeText: "", disclosedAtMs: 0 };
+  }
+
+  let year;
+  let month;
+  let day;
+  if (dateParts.length === 3) {
+    [year, month, day] = dateParts;
+  } else {
+    year = getJstYear(now);
+    [month, day] = dateParts;
+    const candidateMs = Date.UTC(year, month - 1, day, hour - 9, minute, 0);
+    if (candidateMs > now.getTime() + 24 * 60 * 60 * 1000) year -= 1;
+  }
+
+  if (!year || !month || !day) return { title: "", dateText: "", timeText: "", disclosedAtMs: 0 };
+
+  const disclosedAtMs = Date.UTC(year, month - 1, day, hour - 9, minute, 0);
+  return {
+    title,
+    dateText: `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`,
+    timeText: `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`,
+    disclosedAtMs
+  };
+}
+
+function getJstYear(now = new Date()) {
+  return Number(new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric"
+  }).format(now));
+}
+
+function normalizeHtmlUrl(href, baseUrl) {
+  const text = String(href || "").trim();
+  if (!text) return "";
+  try {
+    return new URL(text, baseUrl).toString();
+  } catch {
+    return text;
+  }
 }
 
 function extractDisclosureDateInfo(text) {
@@ -1082,7 +1214,7 @@ function dedupeDisclosureCandidates(items) {
   const out = [];
 
   for (const item of items) {
-    const key = `${item.documentId}:${item.title}`;
+    const key = item.documentId ? String(item.documentId) : `${item.url || ""}:${item.title}`;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(item);
@@ -2173,6 +2305,16 @@ function selfTest() {
   assert.ok(parseReceivedAtMs("2026/05/01 23:59:59") <= cutoff);
   assert.ok(parseReceivedAtMs("2026/05/02 00:00:00") > cutoff);
   assert.equal(extractSymbolCodeFromUrl("https://www.tradingview.com/chart/?symbol=TYO%3A8285"), "8285");
+  const yahooDisclosure = parseYahooFinanceDisclosureText(
+    "Full-year earnings 5/11 15:30 TDnet PDF (348KB)",
+    new Date("2026-05-12T00:00:00Z")
+  );
+  assert.equal(yahooDisclosure.dateText, "2026-05-11");
+  assert.equal(yahooDisclosure.timeText, "15:30");
+  assert.equal(yahooDisclosure.title, "Full-year earnings");
+  const nearestDisclosureDate = extractNearestDisclosureDateInfo("quote date 2026/05/11 previous disclosure 2026/02/10", "Q3 earnings (15:30)");
+  assert.equal(nearestDisclosureDate.dateText, "2026-02-10");
+  assert.equal(nearestDisclosureDate.timeText, "15:30");
   console.log(JSON.stringify({ ok: true, selfTest: "passed" }, null, 2));
 }
 
