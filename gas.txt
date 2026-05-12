@@ -1733,7 +1733,7 @@ const MIDDAY_NEW_ALERT_COUNT_KEY = "OHLCV_MIDDAY_NEW_ALERT_COUNT";
 const MIDDAY_LAST_TS_MAP_KEY = "OHLCV_MIDDAY_LAST_TS_MAP";
 const MIDDAY_REFRESH_ID_KEY = "OHLCV_MIDDAY_REFRESH_ID";
 const MIDDAY_RESUME_HANDLER = "resumeOHLCVFetchMidday";
-const MIDDAY_DEDUPE_GUARD_MS = 60 * 1000;
+const MIDDAY_DEDUPE_GUARD_MS = 120 * 1000;
 const MIDDAY_FULL_BACKFILL_SYMBOLS_KEY = "OHLCV_MIDDAY_FULL_BACKFILL_SYMBOLS";
 const MIDDAY_HISTORY_COVERAGE_SCAN_MAX_ROWS = 250000;
 const MIDDAY_HISTORY_GRACE_DAYS = 10;
@@ -2151,7 +2151,19 @@ if (symbols.length === 0) {
     fullBackfillSymbols: fullBackfillSet.size
   });
 
-  purgeInvalidOhlcvTimestampRows_(ohlcvSheet, "midday.before_fetch", QUICK_REPAIR_TAIL_CLEANUP_ROWS);
+  if (startIndex === 0) {
+    maybePurgeInvalidOhlcvTimestampRows_(
+      ohlcvSheet,
+      "midday.before_fetch",
+      QUICK_REPAIR_ENTRY_CLEANUP_ROWS,
+      todayKey
+    );
+  } else {
+    writeProcessLog_("OHLCV-AM", "13:30先行取得の再開実行では、広範囲の不正timestamp掃除をスキップします。", {
+      cursor: startIndex,
+      cleanupRows: 0
+    });
+  }
 
   for (let i = startIndex; i < symbols.length; i += MIDDAY_OHLCV_BATCH_SIZE) {
     const elapsedBeforeBatch = Date.now() - startTime;
@@ -2275,8 +2287,6 @@ if (symbols.length === 0) {
 
   const appended = appendAndNormalizeMiddayOhlcvRows_(ohlcvSheet, allFetchedData, "complete");
 
-  purgeInvalidOhlcvTimestampRows_(ohlcvSheet, "midday.after_complete", QUICK_REPAIR_TAIL_CLEANUP_ROWS);
-
   clearMiddayOhlcvState_();
   sendCompletionNotice_(String(newAlertCount), "0", "AM");
 
@@ -2369,8 +2379,9 @@ function appendAndNormalizeMiddayOhlcvRows_(sheet, rows, context) {
       appendedRows: appended
     });
 
-    if (context === "complete") {
-      writeProcessLog_("OHLCV-AM", "AM版OHLCV取得完了後のため、重複排除とtimestamp昇順ソートを実行します。", {
+    if (context === "complete" || context === "pause" || context === "fetch_error") {
+      writeProcessLog_("OHLCV-AM", "13:30先行取得の追記後に、重複排除とtimestamp昇順ソートを実行します。", {
+        context: context || "",
         appendedRows: appended
       });
       dedupeAndSortOhlcv_(sheet);
@@ -3992,7 +4003,67 @@ function appendRowsToSheet_(sheet, data) {
   sheet.getRange(startRow, 1, validData.length, 8).setValues(validData);
   sheet.getRange(startRow, 1, validData.length, 1).setNumberFormat("yyyy/mm/dd hh:mm");
   SpreadsheetApp.flush();
-  return validData.length;
+  const readback = purgeInvalidRecentlyAppendedOhlcvRows_(sheet, startRow, validData.length, "appendRowsToSheet_.readback");
+  return Math.max(0, validData.length - (readback.deletedRows || 0));
+}
+
+function purgeInvalidRecentlyAppendedOhlcvRows_(sheet, startRow, numRows, context) {
+  if (!sheet || !Number.isFinite(startRow) || !Number.isFinite(numRows) || numRows <= 0) {
+    return { deletedRows: 0, repairSymbols: 0 };
+  }
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < startRow) return { deletedRows: 0, repairSymbols: 0 };
+
+  const readRows = Math.min(numRows, lastRow - startRow + 1);
+  if (readRows <= 0) return { deletedRows: 0, repairSymbols: 0 };
+
+  const values = sheet.getRange(startRow, 1, readRows, 3).getValues();
+  const deleteRows = [];
+  const repairSymbolSet = {};
+  const samples = [];
+
+  values.forEach((row, index) => {
+    const ts = row[0];
+    const invalidReason = !isValidOhlcvTimestamp_(ts)
+      ? "invalid_timestamp"
+      : (!isOhlcvSessionTimestamp_(ts) ? "non_session_timestamp" : "");
+    if (!invalidReason) return;
+
+    const sheetRow = startRow + index;
+    const symbol = String(row[2] || "").trim();
+    deleteRows.push(sheetRow);
+    if (symbol) repairSymbolSet[symbol] = true;
+    if (samples.length < 10) {
+      samples.push({
+        row: sheetRow,
+        timestamp: ts == null ? "" : String(ts),
+        reason: invalidReason,
+        symbol: symbol
+      });
+    }
+  });
+
+  if (deleteRows.length === 0) {
+    return { deletedRows: 0, repairSymbols: 0 };
+  }
+
+  deleteRowsByRowNums_(sheet, deleteRows);
+  SpreadsheetApp.flush();
+
+  const repairSymbols = Object.keys(repairSymbolSet).sort();
+  if (repairSymbols.length > 0) setOhlcvRepairSymbols_(repairSymbols);
+
+  writeProcessLog_("OHLCV", "OHLCV追記直後の読み返しで空・無効timestamp行を検出したため削除しました。", {
+    context: context || "",
+    startRow: startRow,
+    scannedRows: readRows,
+    deletedRows: deleteRows.length,
+    repairSymbols: repairSymbols.length,
+    samples: samples
+  });
+
+  return { deletedRows: deleteRows.length, repairSymbols: repairSymbols.length };
 }
 
 function scheduleOhlcvResume_(handlerName, delayMs) {

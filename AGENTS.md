@@ -373,6 +373,8 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 - fetch終端は当日AM分まで。
 - 当日PM行や14:00以降のYahoo足、15:30終値スナップショットは保存しない。
 - 完了時は `dedupeAndSortOhlcv_()` で `ohlcv_4h` を timestamp 昇順へ戻す。
+- pause / fetch_error / complete の各追記後も `dedupeAndSortOhlcv_()` と `SpreadsheetApp.flush()` で timestamp 昇順 invariant を戻す。
+- 13:30再開時は毎回末尾12,000行の不正timestamp掃除を走らせない。初回入口の軽量掃除と `appendRowsToSheet_` 直後の読み返し削除で吸収する。
 - 日次メンテナンス、GitHub Actions、GAP修復には進まない。
 - 完了通知のみ送る。
 
@@ -598,6 +600,7 @@ GASの実行上限は約6分。長時間処理は必ず再開可能にする。
 - `ohlcv_4h` の先頭から連続削除する処理は `sheet.deleteRows(firstDataRow, N)` で行う。
 - `ohlcv_4h` に追記する場合は `appendRowsToSheet_` を通す。
 - 追記前にtimestampを `Date` に正規化する。
+- 追記直後に、今回追記したA列 timestamp を読み返し、空・不正・09:00/13:00以外の行があれば即削除し、対象銘柄を `OHLCV_REPAIR_SYMBOLS` に積む。
 - 追記後は必要に応じて `dedupeAndSortOhlcv_()` で昇順 invariant を復元する。
 - GAP修復・監査はA列 timestamp 昇順を前提に末尾から直近分だけを読む。
 - `getRange(2, 1, lastRow - 1, ...)` の全行読みをGAP系に追加しない。
