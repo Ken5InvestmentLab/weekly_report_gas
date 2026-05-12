@@ -400,6 +400,7 @@ fetchOHLCVForNewAlerts
 - 13:30専用プロパティをクリア。
 - 13:30で書き込まれたOHLCV行はシート上の成果として引き継ぐ。
 - 16:00側で通常どおり再取得・重複排除する。
+- 16:00本番で同じ日付・銘柄のAM行を再取得できた場合、`MIDDAY_yyyy-mm-dd` のAM行より本番行を優先し、MIDDAY行は削除対象にする。
 - 当日が休場日の場合はスキップ。
 - 対象銘柄は `alerts_raw` に登場する全銘柄 + `OHLCV_REPAIR_SYMBOLS`。
 - OHLCV未取得銘柄は120日分取得。
@@ -416,7 +417,7 @@ fetchOHLCVForNewAlerts
 | `PHASE1` | Yahoo Finance 1h足からOHLCV取得 |
 | `PHASE2` | 株式分割検出・価格調整 |
 | `PHASE3` | 分割調整キューを `ohlcv_4h` に適用 |
-| `PHASE4` | 重複排除・timestamp昇順ソート・完了通知・日次メンテ予約 |
+| `PHASE4` | 重複排除・timestamp昇順ソート・日次メンテ予約 |
 
 通常の未指定取得窓は `OHLCV_DEFAULT_LOOKBACK_DAYS = 120` 日。
 
@@ -457,7 +458,7 @@ refetchSymbolRange(symbols, startDate, endDate)
 - 評価日を迎えた `alerts_raw` 行を更新。
 - 5/10/20/40営業日後の評価価格、騰落率、勝敗を埋める。
 - 全チェックポイントが埋まると `status=COMPLETE`。
-- 完了後にDiscord通知。
+- DiscordのOHLCV完了通知は、日次メンテナンス直後ではなく、後続の `quickRepairRecentGaps` が完了してから送る。
 - `GITHUB_PAT` があれば `Ken5InvestmentLab/screening-bot` の `optimize.yml` を起動。
 - 完了後に `quickRepairTrigger` を1分後に予約。
 
@@ -600,7 +601,7 @@ GASの実行上限は約6分。長時間処理は必ず再開可能にする。
 - `ohlcv_4h` の先頭から連続削除する処理は `sheet.deleteRows(firstDataRow, N)` で行う。
 - `ohlcv_4h` に追記する場合は `appendRowsToSheet_` を通す。
 - 追記前にtimestampを `Date` に正規化する。
-- 追記直後に、今回追記したA列 timestamp を読み返し、空・不正・09:00/13:00以外の行があれば即削除し、対象銘柄を `OHLCV_REPAIR_SYMBOLS` に積む。
+- 追記直後に、今回追記したA列 timestamp を読み返し、空・不正・09:00/13:00以外の行があれば、まず追記元の正規DateをA列へ再書き込みして再確認する。それでも不正なら即削除し、対象銘柄を `OHLCV_REPAIR_SYMBOLS` に積む。
 - 追記後は必要に応じて `dedupeAndSortOhlcv_()` で昇順 invariant を復元する。
 - GAP修復・監査はA列 timestamp 昇順を前提に末尾から直近分だけを読む。
 - `getRange(2, 1, lastRow - 1, ...)` の全行読みをGAP系に追加しない。
