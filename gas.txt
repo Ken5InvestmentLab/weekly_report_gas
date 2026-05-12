@@ -1774,6 +1774,7 @@ const MIDDAY_HISTORY_GRACE_DAYS = 10;
 const MIDDAY_ROLLBACK_STATE_KEY = "OHLCV_MIDDAY_ROLLBACK_STATE_V1";
 const MIDDAY_ROLLBACK_SYMBOLS_KEY = "OHLCV_MIDDAY_ROLLBACK_SYMBOLS_V1";
 const MIDDAY_ROLLBACK_RESUME_HANDLER = "resumeMiddayOhlcvRollback";
+const REPAIR_DATE_20260512_KEY = "OHLCV_REPAIR_DATE_20260512_CURSOR";
 
 function getOhlcvRuntimeState_() {
   const props = PropertiesService.getScriptProperties();
@@ -2460,6 +2461,486 @@ function previewRepairOhlcvAm20260511Only() {
 
 function repairOhlcvAm20260511Only() {
   return repairOhlcvAmForDateOnly_("2026-05-11", false);
+}
+
+/**
+ * 2026/05/12 のOHLCVを安全に復旧する。
+ * 初回だけ対象日の既存行を削除し、その後チャンク分割で再取得する。
+ */
+function startRepairOhlcvForDate_20260512() {
+  const props = PropertiesService.getScriptProperties();
+  props.deleteProperty(REPAIR_DATE_20260512_KEY);
+
+  const ss = openAppSpreadsheet_();
+  const ohlcvSheet = ss.getSheetByName(CONFIG.OHLCV_SHEET);
+  if (!ohlcvSheet) throw new Error("ohlcv_4h シートが見つかりません");
+
+  const symbols = getQuickRepairTargetSymbols_(ss);
+
+  // 既存の2026/05/12行を一度だけ削除
+  const deleted = deleteOhlcvRowsForDateAndSymbolsFast_(ohlcvSheet, "2026-05-12", symbols);
+
+  writeProcessLog_("OHLCV修復", "2026/05/12 OHLCV修復を開始しました。既存行を削除しました。", {
+    dateKey: "2026-05-12",
+    targetSymbols: symbols.length,
+    deletedRows: deleted.deletedRows
+  });
+
+  return continueRepairOhlcvForDate_20260512();
+}
+
+/**
+ * 2026/05/12 のOHLCV修復を続きから実行する。
+ * タイムアウト対策でチャンク処理。
+ */
+function continueRepairOhlcvForDate_20260512() {
+  const dateKey = "2026-05-12";
+  const props = PropertiesService.getScriptProperties();
+
+  const ss = openAppSpreadsheet_();
+  const ohlcvSheet = ss.getSheetByName(CONFIG.OHLCV_SHEET);
+  if (!ohlcvSheet) throw new Error("ohlcv_4h シートが見つかりません");
+
+  const symbols = getQuickRepairTargetSymbols_(ss);
+  const cursor = Number(props.getProperty(REPAIR_DATE_20260512_KEY) || "0");
+
+  if (cursor >= symbols.length) {
+    props.deleteProperty(REPAIR_DATE_20260512_KEY);
+    deleteTriggersByHandler_("continueRepairOhlcvForDate_20260512");
+
+    writeProcessLog_("OHLCV修復", "2026/05/12 OHLCV修復はすでに完了しています。", {
+      dateKey: dateKey,
+      targetSymbols: symbols.length
+    });
+
+    return {
+      ok: true,
+      completed: true,
+      dateKey: dateKey,
+      targetSymbols: symbols.length
+    };
+  }
+
+  const startedAt = Date.now();
+  const softLimitMs = 4.5 * 60 * 1000;
+  const batchSize = 25;
+  const maxSymbolsPerRun = 250;
+
+  const start = new Date(dateKey + "T00:00:00+09:00");
+  const end = new Date(dateKey + "T23:59:59+09:00");
+  const startSec = Math.floor(start.getTime() / 1000);
+  const endSec = Math.floor(end.getTime() / 1000);
+
+  const refreshId = "REPAIR_" + dateKey;
+
+  let index = cursor;
+  let totalFetchedRows = 0;
+  let totalAppendedRows = 0;
+  let parseErrCount = 0;
+  let processedSymbols = 0;
+
+  while (
+    index < symbols.length &&
+    processedSymbols < maxSymbolsPerRun &&
+    Date.now() - startedAt < softLimitMs
+  ) {
+    const batch = symbols.slice(index, index + batchSize);
+
+    const requests = [];
+    const metaList = [];
+
+    batch.forEach(symbol => {
+      try {
+        const pair = buildOhlcvRequestPair_(symbol, null, startSec, endSec);
+
+        const dailyIdx = requests.length;
+        requests.push({
+          url: pair.dailyUrl,
+          muteHttpExceptions: true,
+          headers: { "User-Agent": "Mozilla/5.0" }
+        });
+
+        const intraIdx = requests.length;
+        requests.push({
+          url: pair.intraUrl,
+          muteHttpExceptions: true,
+          headers: { "User-Agent": "Mozilla/5.0" }
+        });
+
+        metaList.push({
+          symbol: symbol,
+          dailyIdx: dailyIdx,
+          intraIdx: intraIdx
+        });
+      } catch (e) {
+        parseErrCount++;
+        debugLogToSheet_("repair20260512.buildUrlError", {
+          symbol: symbol,
+          message: e && e.message ? e.message : String(e)
+        });
+      }
+    });
+
+    let responses = [];
+    try {
+      responses = UrlFetchApp.fetchAll(requests);
+    } catch (e) {
+      props.setProperty(REPAIR_DATE_20260512_KEY, String(index));
+      scheduleContinueRepairOhlcvForDate20260512_();
+
+      writeProcessLog_("OHLCV修復", "fetchAllで一時エラーが出たため、続きから再開します。", {
+        dateKey: dateKey,
+        cursor: index,
+        message: e && e.message ? e.message : String(e)
+      });
+
+      return {
+        ok: false,
+        deferred: true,
+        dateKey: dateKey,
+        cursor: index,
+        message: e && e.message ? e.message : String(e)
+      };
+    }
+
+    const rowsToAppend = [];
+
+    metaList.forEach(meta => {
+      try {
+        const dailyRes = responses[meta.dailyIdx];
+        const intraRes = responses[meta.intraIdx];
+
+        // 既存コードで使われている正しい日足Map関数
+        const dailyMap = buildDailyOhlcvMapFromYahooResponse_(dailyRes);
+
+        // 今日分は parseIntraResponse_ 内の日足補正を外す。
+        // その後 prepareMainRunRowsFastPmVolume_ で日足出来高を使ってPM補正する。
+        const dailyMapForParse = Object.assign({}, dailyMap);
+        delete dailyMapForParse[dateKey];
+
+        const result = parseIntraResponse_(meta.symbol, intraRes, null, dailyMapForParse);
+
+        const rawRows = normalizeParseIntraResultRows_(result)
+          .filter(row => {
+            const ts = normalizeOhlcvTimestamp_(row[0]);
+            return ts && formatYmd_(ts) === dateKey;
+          })
+          .map(row => {
+            row[1] = refreshId;
+            return row;
+          });
+
+        const adjustedRows = prepareMainRunRowsFastPmVolume_(
+          meta.symbol,
+          rawRows,
+          dailyMap,
+          dateKey
+        );
+
+        adjustedRows.forEach(row => {
+          row[1] = refreshId;
+          const normalized = normalizeOhlcvRowForWrite_(row);
+          if (normalized) rowsToAppend.push(normalized);
+        });
+
+      } catch (e) {
+        parseErrCount++;
+        debugLogToSheet_("repair20260512.parseError", {
+          symbol: meta.symbol,
+          message: e && e.message ? e.message : String(e)
+        });
+      }
+    });
+
+    if (rowsToAppend.length > 0) {
+      const appended = appendRowsToSheet_(ohlcvSheet, rowsToAppend);
+      totalAppendedRows += appended;
+      totalFetchedRows += rowsToAppend.length;
+    }
+
+    index += batch.length;
+    processedSymbols += batch.length;
+    props.setProperty(REPAIR_DATE_20260512_KEY, String(index));
+
+    writeProcessLog_("OHLCV修復", "2026/05/12 OHLCV修復バッチを処理しました。", {
+      dateKey: dateKey,
+      cursor: index,
+      targetSymbols: symbols.length,
+      batchSymbols: batch.length,
+      fetchedRows: rowsToAppend.length,
+      totalFetchedRows: totalFetchedRows,
+      totalAppendedRows: totalAppendedRows,
+      parseErrCount: parseErrCount
+    });
+  }
+
+  SpreadsheetApp.flush();
+
+  if (index < symbols.length) {
+    props.setProperty(REPAIR_DATE_20260512_KEY, String(index));
+    scheduleContinueRepairOhlcvForDate20260512_();
+
+    writeProcessLog_("OHLCV修復", "2026/05/12 OHLCV修復を一時停止し、続きのトリガーを予約しました。", {
+      dateKey: dateKey,
+      nextCursor: index,
+      targetSymbols: symbols.length,
+      processedSymbolsThisRun: processedSymbols,
+      totalFetchedRows: totalFetchedRows,
+      totalAppendedRows: totalAppendedRows,
+      parseErrCount: parseErrCount
+    });
+
+    return {
+      ok: true,
+      completed: false,
+      dateKey: dateKey,
+      nextCursor: index,
+      targetSymbols: symbols.length,
+      processedSymbolsThisRun: processedSymbols,
+      totalFetchedRows: totalFetchedRows,
+      totalAppendedRows: totalAppendedRows,
+      parseErrCount: parseErrCount
+    };
+  }
+
+  props.deleteProperty(REPAIR_DATE_20260512_KEY);
+  deleteTriggersByHandler_("continueRepairOhlcvForDate_20260512");
+
+  writeProcessLog_("OHLCV修復", "2026/05/12 OHLCV修復が完了しました。", {
+    dateKey: dateKey,
+    targetSymbols: symbols.length,
+    totalFetchedRows: totalFetchedRows,
+    totalAppendedRows: totalAppendedRows,
+    parseErrCount: parseErrCount
+  });
+
+  return {
+    ok: true,
+    completed: true,
+    dateKey: dateKey,
+    targetSymbols: symbols.length,
+    totalFetchedRows: totalFetchedRows,
+    totalAppendedRows: totalAppendedRows,
+    parseErrCount: parseErrCount
+  };
+}
+
+/**
+ * parseIntraResponse_ の戻り値が rows形式でも配列形式でも吸収する。
+ */
+function normalizeParseIntraResultRows_(result) {
+  if (!result) return [];
+  if (Array.isArray(result)) return result;
+  if (Array.isArray(result.rows)) return result.rows;
+  return [];
+}
+
+function scheduleContinueRepairOhlcvForDate20260512_() {
+  const handlerName = "continueRepairOhlcvForDate_20260512";
+
+  try {
+    deleteTriggersByHandler_(handlerName);
+  } catch (e) {
+    writeProcessLog_("OHLCV修復", "続きトリガー削除で一時エラーが出ました。処理状態は保存済みなので、手動または次回実行で続行できます。", {
+      handlerName: handlerName,
+      message: e && e.message ? e.message : String(e)
+    });
+  }
+
+  try {
+    ScriptApp.newTrigger(handlerName)
+      .timeBased()
+      .after(60 * 1000)
+      .create();
+
+    writeProcessLog_("OHLCV修復", "続きトリガーを予約しました。", {
+      handlerName: handlerName
+    });
+
+    return { ok: true, scheduled: true };
+
+  } catch (e) {
+    writeProcessLog_("OHLCV修復", "続きトリガー作成で一時エラーが出ました。continueRepairOhlcvForDate_20260512 を手動実行すれば続きから再開できます。", {
+      handlerName: handlerName,
+      message: e && e.message ? e.message : String(e)
+    });
+
+    return {
+      ok: false,
+      scheduled: false,
+      message: e && e.message ? e.message : String(e)
+    };
+  }
+}
+
+function deleteRowsByRowNumsFast_(sheet, rowNums) {
+  const nums = Array.from(new Set((rowNums || [])
+    .map(n => Number(n))
+    .filter(n => Number.isFinite(n) && n >= 2)
+  )).sort((a, b) => b - a);
+
+  if (nums.length === 0) return 0;
+
+  let deleted = 0;
+  let blockStart = nums[0];
+  let blockEnd = nums[0];
+
+  for (let i = 1; i < nums.length; i++) {
+    const n = nums[i];
+
+    if (n === blockEnd - 1) {
+      blockEnd = n;
+      continue;
+    }
+
+    sheet.deleteRows(blockEnd, blockStart - blockEnd + 1);
+    deleted += blockStart - blockEnd + 1;
+
+    blockStart = n;
+    blockEnd = n;
+  }
+
+  sheet.deleteRows(blockEnd, blockStart - blockEnd + 1);
+  deleted += blockStart - blockEnd + 1;
+
+  return deleted;
+}
+
+function deleteOhlcvRowsForDateAndSymbolsFast_(sheet, dateKey, symbols) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow <= 1) {
+    return { ok: true, deletedRows: 0 };
+  }
+
+  const symbolSet = new Set((symbols || []).map(String));
+  const targetDateKey = String(dateKey || "").trim();
+
+  const scanRows = Math.min(30000, lastRow - 1);
+  const startRow = lastRow - scanRows + 1;
+
+  const values = sheet.getRange(startRow, 1, scanRows, 3).getValues();
+  const rowsToDelete = [];
+
+  values.forEach((row, index) => {
+    const ts = normalizeOhlcvTimestamp_(row[0]);
+    if (!ts) return;
+
+    const rowDateKey = formatYmd_(ts);
+    if (rowDateKey !== targetDateKey) return;
+
+    const symbol = String(row[2] || "").trim();
+    if (!symbolSet.has(symbol)) return;
+
+    rowsToDelete.push(startRow + index);
+  });
+
+  const deletedRows = deleteRowsByRowNumsFast_(sheet, rowsToDelete);
+
+  return {
+    ok: true,
+    dateKey: targetDateKey,
+    scannedRows: scanRows,
+    deletedRows: deletedRows
+  };
+}
+
+function normalizeOhlcvTimestampText_20260512() {
+  return normalizeOhlcvTimestampTextForDate_("2026-05-12");
+}
+
+/**
+ * 指定日のOHLCV timestampを yyyy/MM/dd HH:mm 形式へ統一する。
+ * 例: 2026/05/12 9:00 -> 2026/05/12 09:00
+ */
+function normalizeOhlcvTimestampTextForDate_(dateKey) {
+  const ss = openAppSpreadsheet_();
+  const sheet = ss.getSheetByName(CONFIG.OHLCV_SHEET);
+  if (!sheet) throw new Error("ohlcv_4h シートが見つかりません");
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow <= 1) {
+    return { ok: true, updatedRows: 0, reason: "empty sheet" };
+  }
+
+  const targetDateKey = String(dateKey || "").trim();
+  if (!targetDateKey) throw new Error("dateKey が空です");
+
+  const targetSlashDate = targetDateKey.replace(/-/g, "/");
+
+  // 直近だけ見れば十分。足りなければ 30000 -> 50000 に増やしてOK。
+  const scanRows = Math.min(30000, lastRow - 1);
+  const startRow = lastRow - scanRows + 1;
+
+  // A列だけ見る
+  const range = sheet.getRange(startRow, 1, scanRows, 1);
+  const values = range.getDisplayValues();
+
+  let updatedRows = 0;
+  const samples = [];
+
+  const newValues = values.map((row, i) => {
+    const text = String(row[0] || "").trim();
+
+    // 対象日以外はそのまま
+    if (!text.startsWith(targetSlashDate)) {
+      return [text];
+    }
+
+    const normalized = normalizeTimestampTextToYmdHm_(text);
+
+    if (normalized !== text) {
+      updatedRows++;
+      if (samples.length < 10) {
+        samples.push({
+          row: startRow + i,
+          before: text,
+          after: normalized
+        });
+      }
+    }
+
+    return [normalized];
+  });
+
+  // A列を文字列扱いにしてから書き戻す
+  range.setNumberFormat("@");
+  range.setValues(newValues);
+
+  SpreadsheetApp.flush();
+
+  writeProcessLog_("OHLCV", "指定日のOHLCV timestampを yyyy/MM/dd HH:mm 形式へ統一しました。", {
+    dateKey: targetDateKey,
+    scannedRows: scanRows,
+    updatedRows: updatedRows,
+    samples: samples
+  });
+
+  return {
+    ok: true,
+    dateKey: targetDateKey,
+    scannedRows: scanRows,
+    updatedRows: updatedRows,
+    samples: samples
+  };
+}
+
+/**
+ * 2026/05/12 9:00 や 2026-05-12 9:00 を
+ * 2026/05/12 09:00 に揃える。
+ */
+function normalizeTimestampTextToYmdHm_(value) {
+  const text = String(value || "").trim();
+  const m = text.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})\s+(\d{1,2}):(\d{2})$/);
+
+  if (!m) return text;
+
+  const yyyy = m[1];
+  const mm = String(Number(m[2])).padStart(2, "0");
+  const dd = String(Number(m[3])).padStart(2, "0");
+  const hh = String(Number(m[4])).padStart(2, "0");
+  const min = String(Number(m[5])).padStart(2, "0");
+
+  return `${yyyy}/${mm}/${dd} ${hh}:${min}`;
 }
 
 function repairOhlcvAmForDateOnly_(dateKey, dryRun) {
