@@ -263,9 +263,11 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 重要な保存ルール。
 
 - timestamp は `09:00 JST` または `13:00 JST`。
+- A列 timestamp の保存・表示形式は `yyyy/MM/dd HH:mm` に統一し、`yyyy/MM/dd 9:00` を混在させない。
 - `09:00 JST` はAM代表行。
 - `13:00 JST` はPM代表行。
-- B列 `alert_id` には通常取得、`MIDDAY_yyyy-mm-dd`、`GAP_REPAIR` などのマーカーが入る。
+- B列 `alert_id` には通常取得、`MIDDAY_yyyy-mm-dd`、`MIDDAY_LOCKED_yyyy-mm-dd`、`GAP_REPAIR` などのマーカーが入る。
+- `MIDDAY_LOCKED_yyyy-mm-dd` は13:30に `alerts_raw` の出来高を転記したAM保護行。16:00本番、GAP修復、重複整理、MIDDAY掃除でも削除・上書きしない。
 - 重複排除は `timestamp + symbol`。
 - 最終状態は必ず timestamp 昇順へ戻す。
 
@@ -373,8 +375,8 @@ timestamp, alert_id, symbol, open, high, low, close, volume
   - `lastTs` が120日より古い: 直近120日分
 - fetch終端は当日AM分まで。
 - 当日PM行や14:00以降のYahoo足、15:30終値スナップショットは保存しない。
-- 完了時は `dedupeAndSortOhlcv_()` で `ohlcv_4h` を timestamp 昇順へ戻す。
-- pause / fetch_error / complete の各追記後も `dedupeAndSortOhlcv_()` と `SpreadsheetApp.flush()` で timestamp 昇順 invariant を戻す。
+- 追記後はtimestamp readback検証と軽量な不正timestamp掃除を行うが、GAP修復前の重複整理はしない。
+- 13:30で `alerts_raw` から出来高を転記したAM行は `MIDDAY_LOCKED_yyyy-mm-dd` として保存し、後続処理では保護する。
 - 13:30再開時は毎回末尾12,000行の不正timestamp掃除を走らせない。初回入口の軽量掃除と `appendRowsToSheet_` 直後の読み返し削除で吸収する。
 - 日次メンテナンス、GitHub Actions、GAP修復には進まない。
 - 完了通知のみ送る。
@@ -400,8 +402,9 @@ fetchOHLCVForNewAlerts
 - 残っている `resumeOHLCVFetchMidday` を削除。
 - 13:30専用プロパティをクリア。
 - 13:30で書き込まれたOHLCV行はシート上の成果として引き継ぐ。
-- 16:00側で通常どおり再取得・重複排除する。
-- 16:00本番で同じ日付・銘柄のAM行を再取得できた場合、`MIDDAY_yyyy-mm-dd` のAM行より本番行を優先し、MIDDAY行は削除対象にする。
+- 16:00側で通常どおり再取得し、重複整理はGAP修復後の最終処理へ回す。
+- 16:00本番で同じ日付・銘柄のAM行を再取得できた場合、通常の `MIDDAY_yyyy-mm-dd` のAM行は削除対象にできるが、`MIDDAY_LOCKED_yyyy-mm-dd` は保護する。
+- 16:00本番の当日PM出来高は、保護AM出来高があればそれを優先して `日足出来高 - AM出来高` で補正する。AM行自体は上書きしない。
 - 当日が休場日の場合はスキップ。
 - 対象銘柄は `alerts_raw` に登場する全銘柄 + `OHLCV_REPAIR_SYMBOLS`。
 - OHLCV未取得銘柄は120日分取得。
@@ -495,7 +498,7 @@ refetchSymbolRange(symbols, startDate, endDate)
 - 自動GAP修復でYahooから十分な1h足が返らない日は、原則として `GAP_FAILED` を作らずログに残して次回以降の正規再取得対象にする。
 - 手動補填など明示的に `GAP_FAILED` を作る経路でも、`09:00 JST` / `13:00 JST` の実timestamp以外は保存しない。
 - 空timestamp、`00:00`、Yahoo生1h足時刻をマーカーとして保存しない。
-- 時間切れで再開に回す直前にも `dedupeAndSortOhlcv_()` と `SpreadsheetApp.flush()` を実行する。
+- 時間切れで再開に回す直前はtimestampガードと `SpreadsheetApp.flush()` に留め、GAP修復完了後に保護AM行優先で最終重複整理を1回だけ行う。
 
 ### 不正timestamp・GAP修復タイムアウト復旧
 
@@ -602,11 +605,11 @@ GASの実行上限は約6分。長時間処理は必ず再開可能にする。
 - 変更した行のみ個別または小バッチで `setValues()` する。
 - `ohlcv_4h` の先頭から連続削除する処理は `sheet.deleteRows(firstDataRow, N)` で行う。
 - `ohlcv_4h` に追記する場合は `appendRowsToSheet_` を通す。
-- 追記前にtimestampを `Date` に正規化する。
+- 追記前にtimestampを `Date` に正規化し、A列へ書く前から `yyyy/MM/dd 09:00` または `yyyy/MM/dd 13:00` のゼロ埋め文字列へ変換する。
 - 追記はB:Hを書いた後にA列 timestamp を単独で書き、直後にA列を読み返す。空・不正・09:00/13:00以外の行は即削除し、preWrite/postWriteのtimestampサンプルをログに残す。
-- A列 timestamp はGoogle Sheetsの日時シリアル値で書き、readbackでは `Date` とシリアル値の両方を正規化して判定する。
+- A列 timestamp は文字列 `yyyy/MM/dd HH:mm` として書き、readbackでは `Date`、シリアル値、文字列のすべてを正規化して判定する。
 - GAP修復では、readbackで実際に保存確認できたOHLCV行だけを補填成功として数える。A列timestamp保存失敗が出た場合は再開トリガーを増やさず停止する。
-- 追記後は必要に応じて `dedupeAndSortOhlcv_()` で昇順 invariant を復元する。
+- 日次チェーンの追記後はGAP修復前に `dedupeAndSortOhlcv_()` を呼ばず、timestamp readback検証と軽量ガードに留める。最終重複整理はGAP修復完了後に1回だけ行う。
 - GAP修復・監査はA列 timestamp 昇順を前提に末尾から直近分だけを読む。
 - `getRange(2, 1, lastRow - 1, ...)` の全行読みをGAP系に追加しない。
 - 株式分割調整で `ohlcv_4h` を更新する場合は、C列 `symbol` を `TextFinder` などで絞って対象銘柄の行だけ処理する。
@@ -657,6 +660,8 @@ repairEmptyTimestampRows(false)            // 空/無効timestamp削除 本番
 cleanupLegacyGapFailedAndEmptyTimestamps(true)   // 旧OHLCV残骸整理 DryRun
 cleanupLegacyGapFailedAndEmptyTimestamps(false)  // 旧OHLCV残骸整理 本番
 emergencyStopQuickRepairAndCleanOhlcv()    // GAP修復停止→OHLCV整理→完了後quickRepairTrigger予約
+previewOhlcvRecovery20260513()              // DryRun audit for 2026/05/13 OHLCV recovery
+startOhlcvRecovery20260513()                // start timestamp normalization, cleanup, and GAP repair scheduling
 purgeBogusGapRepairRows()                  // 不正GAP_REPAIR行削除
 
 auditEvaluationOhlcvCoverage120()          // 評価対象銘柄の120日OHLCV監査
