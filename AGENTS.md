@@ -220,6 +220,7 @@ OVERLAP_DAYS = 3
 | `resumeOHLCVFetch` | 16:00 OHLCV本番取得の再開時 | `fetchOHLCVForNewAlerts` を再起動 |
 | `resumeDailyMaintenance` | 日次メンテナンス再開時 | `runDailyMaintenanceInternal_` を再開 |
 | `resumeQuickRepair` | GAP修復再開時 | `quickRepairRecentGaps` を再開 |
+| `resumeOhlcvPostRepairCleanup` | GAP修復後cleanup再開時 | timestamp正規化、AM保護マーキング、日付バケット重複整理、最終sortを再開 |
 | `purgeOldOhlcvResumeTrigger` | OHLCV削除未完了時 | `purgeOldOhlcvDataDaily` を再開 |
 | `resumeCleanupLegacyGapFailedAndEmptyTimestamps` | 旧OHLCV残骸整理未完了時 | 空timestamp・非09:00/13:00・長期GAP_FAILED整理を再開 |
 | `resumeEvaluationOhlcvCoverageRepair` | 評価対象銘柄の120日OHLCV補填未完了時 | `repairEvaluationOhlcvCoverage120` を再開 |
@@ -317,6 +318,8 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 | `DAILY_MAINT_REFRESH_ID` | 日次メンテナンス用の取得IDメタ |
 | `QUICK_REPAIR_STATE` | GAP修復の再開状態。v7 |
 | `QUICK_REPAIR_TAIL_CLEANUP_STATE` | GAP修復入口の末尾不正timestamp掃除状態 |
+| `OHLCV_POST_REPAIR_CLEANUP_STATE_V1` | GAP修復完了後の小分けcleanup状態 |
+| `OHLCV_INTRADAY_STALE_SYMBOLS_V1` | Yahoo 1hのOHLCが対象期間で古い/nullの銘柄の一時保留リスト |
 | `CLEANUP_LEGACY_STATE_V1` | 旧OHLCV残骸整理の再開状態 |
 | `CLEANUP_LEGACY_AUTO_QUICK_REPAIR_V1` | cleanup完了後に `quickRepairTrigger` を予約するためのフラグ |
 | `EVAL_OHLCV_COVERAGE_REPAIR_STATE_V1` | 評価対象銘柄120日OHLCV補填の再開状態 |
@@ -462,7 +465,7 @@ refetchSymbolRange(symbols, startDate, endDate)
 - 評価日を迎えた `alerts_raw` 行を更新。
 - 5/10/20/40営業日後の評価価格、騰落率、勝敗を埋める。
 - 全チェックポイントが埋まると `status=COMPLETE`。
-- DiscordのOHLCV完了通知は、日次メンテナンス直後ではなく、後続の `quickRepairRecentGaps` が完了してから送る。
+- DiscordのOHLCV完了通知は、日次メンテナンス直後ではなく、`quickRepairRecentGaps` 後の `resumeOhlcvPostRepairCleanup` が完了してから送る。
 - `GITHUB_PAT` があれば `Ken5InvestmentLab/screening-bot` の `optimize.yml` を起動。
 - 完了後に `quickRepairTrigger` を1分後に予約。
 
@@ -496,9 +499,11 @@ refetchSymbolRange(symbols, startDate, endDate)
 - 再開時は直近スキャンをやり直し、既に埋まったグループやマーカー付き未充足日は再取得対象から外す。
 - 修復行はB列に `GAP_REPAIR` を入れる。
 - 自動GAP修復でYahooから十分な1h足が返らない日は、原則として `GAP_FAILED` を作らずログに残して次回以降の正規再取得対象にする。
+- Yahoo 1hのtimestamp配列が新しくてもOHLCが対象期間でnull/古い銘柄は `OHLCV_INTRADAY_STALE_SYMBOLS_V1` に記録し、当日のGAP修復から除外する。日足でAM/PMを仮造りしない。
 - 手動補填など明示的に `GAP_FAILED` を作る経路でも、`09:00 JST` / `13:00 JST` の実timestamp以外は保存しない。
 - 空timestamp、`00:00`、Yahoo生1h足時刻をマーカーとして保存しない。
-- 時間切れで再開に回す直前はtimestampガードと `SpreadsheetApp.flush()` に留め、GAP修復完了後に保護AM行優先で最終重複整理を1回だけ行う。
+- `quickRepairRecentGaps()` 完了時は `dedupeAndSortOhlcv_()` を直接呼ばず、`OHLCV_POST_REPAIR_CLEANUP_STATE_V1` を作って `resumeOhlcvPostRepairCleanup` に委譲する。
+- post-repair cleanupは全行timestamp正規化、保護AMマーキング、日付バケット重複整理、最終sortを小分けで進める。保護AM行は削除候補に入れない。
 
 ### 不正timestamp・GAP修復タイムアウト復旧
 
@@ -609,7 +614,7 @@ GASの実行上限は約6分。長時間処理は必ず再開可能にする。
 - 追記はB:Hを書いた後にA列 timestamp を単独で書き、直後にA列を読み返す。空・不正・09:00/13:00以外の行は即削除し、preWrite/postWriteのtimestampサンプルをログに残す。
 - A列 timestamp は文字列 `yyyy/MM/dd HH:mm` として書き、readbackでは `Date`、シリアル値、文字列のすべてを正規化して判定する。
 - GAP修復では、readbackで実際に保存確認できたOHLCV行だけを補填成功として数える。A列timestamp保存失敗が出た場合は再開トリガーを増やさず停止する。
-- 日次チェーンの追記後はGAP修復前に `dedupeAndSortOhlcv_()` を呼ばず、timestamp readback検証と軽量ガードに留める。最終重複整理はGAP修復完了後に1回だけ行う。
+- 日次チェーンの追記後はGAP修復前に `dedupeAndSortOhlcv_()` を呼ばず、timestamp readback検証と軽量ガードに留める。最終整理はGAP修復完了後の `resumeOhlcvPostRepairCleanup` で小分けに行う。
 - GAP修復・監査はA列 timestamp 昇順を前提に末尾から直近分だけを読む。
 - `getRange(2, 1, lastRow - 1, ...)` の全行読みをGAP系に追加しない。
 - 株式分割調整で `ohlcv_4h` を更新する場合は、C列 `symbol` を `TextFinder` などで絞って対象銘柄の行だけ処理する。
@@ -652,6 +657,10 @@ quickRepairRecentGaps()                    // GAP修復
 resumeQuickRepair()                        // GAP修復再開
 resetQuickRepairState()                    // GAP修復状態リセット
 auditGapRepairCoverage(14, 2)              // GAP修復結果監査
+previewOhlcvPostRepairCleanup()            // GAP修復後cleanupのDryRun確認
+startOhlcvPostRepairCleanupNow()           // GAP修復後cleanupを手動開始
+resumeOhlcvPostRepairCleanup()             // GAP修復後cleanup再開
+resetOhlcvPostRepairCleanupNow()           // GAP修復後cleanup状態リセット
 
 diagOhlcvTimestamps()                      // 無効timestamp診断
 diagOneSessionDays()                       // 1セッション日診断
