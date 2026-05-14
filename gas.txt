@@ -5578,6 +5578,8 @@ const OHLCV_POST_REPAIR_RESUME_AFTER_MS = 60 * 1000;
 const OHLCV_POST_REPAIR_SORT_MAX_ROWS = OHLCV_SAFE_SORT_MAX_ROWS;
 const OHLCV_POST_REPAIR_MIN_DEDUP_REMAINING_MS = 40000;
 const OHLCV_POST_REPAIR_SAFETY_AFTER_MS = 10 * 60 * 1000;
+// targetDatesは最大82営業日≈120暦日分。365日保持の末尾33%以内に収まる想定。1.5倍バッファ
+const OHLCV_POST_REPAIR_DEDUP_READ_ROWS = 110000;
 const OHLCV_INTRADAY_STALE_SYMBOLS_KEY = "OHLCV_INTRADAY_STALE_SYMBOLS_V1";
 const OHLCV_INTRADAY_STALE_MAX_RECORDS = 200;
 const EVAL_OHLCV_COVERAGE_STATE_KEY = "EVAL_OHLCV_COVERAGE_REPAIR_STATE_V1";
@@ -10087,9 +10089,12 @@ function dedupeOhlcvAllTargetDates_(sheet, targetDates, maxDeleteRows, deadlineM
     return { timedOut: true, deletedRows: 0, duplicateRows: 0, remainingDuplicateRows: -1, scannedRows: 0 };
   }
 
-  // シート全体を1回で読み込む（45回の小分けgetValues()を1回に集約して高速化）
+  // 末尾 OHLCV_POST_REPAIR_DEDUP_READ_ROWS 行だけ読む（全行読むと1.78Mセルで6分超タイムアウト）
+  // targetDatesは最大82営業日≈120暦日分なので末尾110,000行に確実に収まる
   const numDataRows = lastRow - 1;
-  const values = sheet.getRange(2, 1, numDataRows, 8).getValues();
+  const readRows = Math.min(numDataRows, OHLCV_POST_REPAIR_DEDUP_READ_ROWS);
+  const readFromRow = lastRow - readRows + 1;
+  const values = sheet.getRange(readFromRow, 1, readRows, 8).getValues();
 
   const bestByKey = {};
   const items = [];
@@ -10102,7 +10107,7 @@ function dedupeOhlcvAllTargetDates_(sheet, targetDates, maxDeleteRows, deadlineM
     if (!dateSet[dateStr]) continue;
     const symbol = String(valueRow[2] || "").trim();
     if (!symbol) continue;
-    const sheetRow = i + 2;
+    const sheetRow = readFromRow + i;
     const key = formatOhlcvTimestampTextForSheet_(ts) + "|" + symbol;
     const item = { key: key, row: valueRow, sheetRow: sheetRow };
     items.push(item);
@@ -10135,7 +10140,9 @@ function dedupeOhlcvAllTargetDates_(sheet, targetDates, maxDeleteRows, deadlineM
   const remaining = Math.max(0, deleteRows.length - limitedDeleteRows.length);
   writeProcessLog_("OHLCV_POST_REPAIR", "Multi-date duplicate cleanup finished one pass.", {
     targetDates: (targetDates || []).length,
-    scannedRows: numDataRows,
+    totalRows: numDataRows,
+    scannedRows: readRows,
+    readFromRow: readFromRow,
     duplicateRows: deleteRows.length,
     deletedRows: limitedDeleteRows.length,
     remainingDuplicateRows: remaining,
@@ -10144,7 +10151,7 @@ function dedupeOhlcvAllTargetDates_(sheet, targetDates, maxDeleteRows, deadlineM
 
   return {
     timedOut: false,
-    scannedRows: numDataRows,
+    scannedRows: readRows,
     duplicateRows: deleteRows.length,
     deletedRows: limitedDeleteRows.length,
     remainingDuplicateRows: remaining
