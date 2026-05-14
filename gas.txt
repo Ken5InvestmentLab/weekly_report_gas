@@ -5717,7 +5717,7 @@ const OHLCV_POST_REPAIR_RESUME_AFTER_MS = 60 * 1000;
 const OHLCV_POST_REPAIR_SORT_MAX_ROWS = OHLCV_SAFE_SORT_MAX_ROWS;
 const OHLCV_POST_REPAIR_MIN_DEDUP_REMAINING_MS = 40000;
 const OHLCV_POST_REPAIR_SAFETY_AFTER_MS = 10 * 60 * 1000;
-// targetDatesは最大82営業日?120暦日分。365日保持の末尾33%以内に収まる想定。1.5倍バッファ
+// tailスキャン行数。シートが365日未満の間はtailだけでは不足するため、early行スキャンを併用する
 const OHLCV_POST_REPAIR_DEDUP_READ_ROWS = 110000;
 // PropertiesServiceへの削除対象行番号キャッシュ用
 const OHLCV_DEDUP_ROWS_META_KEY = "OHLCV_DEDUP_ROWS_META";
@@ -10476,11 +10476,36 @@ function dedupeOhlcvAllTargetDates_(sheet, targetDates, deadlineMs) {
     if (samples.length < 10) samples.push({ row: item.sheetRow, key: item.key, keptRow: best.sheetRow });
   }
 
+  // early行スキャン: rows 2〜readFromRow-1 にある同一キーの「古い」コピーを追加検出
+  // tailスキャンが末尾110k行しか読まないため、それより前の行にオリジナルが残る場合を補完する
+  let earlyDupCount = 0;
+  if (readFromRow > 2) {
+    const earlyRows = readFromRow - 2;
+    console.log("[OHLCV_POST_REPAIR] Scanning early rows for cross-boundary duplicates.", { earlyRows, readFromRow });
+    const earlyData = sheet.getRange(2, 1, earlyRows, 3).getValues();
+    for (let j = 0; j < earlyRows; j++) {
+      const ts = normalizeOhlcvTimestamp_(earlyData[j][0]);
+      if (!ts) continue;
+      if (!dateSet[formatYmd_(ts)]) continue;
+      const symbol = String(earlyData[j][2] || "").trim();
+      if (!symbol) continue;
+      const key = formatOhlcvTimestampTextForSheet_(ts) + "|" + symbol;
+      if (!bestByKey[key]) continue;
+      const marker = String(earlyData[j][1] || "").trim();
+      if (isProtectedMiddayOhlcvMarker_(marker)) continue;
+      allDeleteRows.push(2 + j);
+      earlyDupCount++;
+    }
+    console.log("[OHLCV_POST_REPAIR] Early row cross-boundary scan done.", { earlyDupCount });
+  }
+
   writeProcessLog_("OHLCV_POST_REPAIR", "Multi-date dedup scan completed.", {
     targetDates: (targetDates || []).length,
     totalRows: numDataRows,
     scannedRows: readRows,
     readFromRow: readFromRow,
+    tailDuplicateRows: allDeleteRows.length - earlyDupCount,
+    earlyDuplicateRows: earlyDupCount,
     duplicateRows: allDeleteRows.length,
     samples: samples
   });
