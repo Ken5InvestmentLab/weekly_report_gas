@@ -10026,7 +10026,8 @@ function runOhlcvPostRepairCleanup_() {
 
       if (state.step === "DEDUP_DATES") {
         if (state.dateIndex >= state.targetDates.length) {
-          state.step = "SORT";
+          state.step = "EARLY_DEDUP";
+          state.earlyDedupComplete = false;
           state.cursor = Number(state.scanStartRow || 2) - 1;
           saveOhlcvPostRepairCleanupState_(state);
           continue;
@@ -10069,6 +10070,56 @@ function runOhlcvPostRepairCleanup_() {
         } else {
           state.dateIndex = state.targetDates.length;
           state.totals.duplicateDatesProcessed = state.targetDates.length;
+        }
+        state.updatedAt = new Date().toISOString();
+        saveOhlcvPostRepairCleanupState_(state);
+        continue;
+      }
+
+      if (state.step === "EARLY_DEDUP") {
+        // DELETE phase: キャッシュ済みの削除対象行があれば再スキャンなしで削除のみ実行
+        if (hasPendingOhlcvDedupDeleteRows_()) {
+          const del = loadAndDequeueOhlcvDedupDeleteRows_(OHLCV_POST_REPAIR_MAX_DELETE_ROWS);
+          if (del && del.rowsToDelete.length > 0) {
+            deleteRowsByRowNums_(sh, del.rowsToDelete);
+            SpreadsheetApp.flush();
+            state.totals.duplicateDeletedRows += del.rowsToDelete.length;
+            writeProcessLog_("OHLCV_POST_REPAIR", "Early-dedup delete batch processed.", {
+              deletedRows: del.rowsToDelete.length,
+              remainingRows: del.remainingTotal
+            });
+          }
+          if (!del || del.remainingTotal <= 0) {
+            clearOhlcvDedupDeleteRows_();
+            state.earlyDedupComplete = true;
+          }
+          state.updatedAt = new Date().toISOString();
+          saveOhlcvPostRepairCleanupState_(state);
+          continue;
+        }
+
+        // スキャン済みで削除対象なし（または削除完了）の場合はSORTへ
+        if (state.earlyDedupComplete) {
+          state.step = "SORT";
+          state.cursor = Number(state.scanStartRow || 2) - 1;
+          saveOhlcvPostRepairCleanupState_(state);
+          continue;
+        }
+
+        // SCAN phase: tailスキャン後のbestByKeyを再構築し、early行（rows 2〜readFromRow-1）の重複を検出
+        if (OHLCV_POST_REPAIR_LIMIT_MS - (Date.now() - startedAt) < OHLCV_POST_REPAIR_MIN_DEDUP_REMAINING_MS) break;
+
+        const earlyDeadlineMs = startedAt + OHLCV_POST_REPAIR_LIMIT_MS;
+        const er = dedupeOhlcvEarlyRows_(sh, state.targetDates, earlyDeadlineMs);
+        if (er.timedOut) {
+          state.updatedAt = new Date().toISOString();
+          saveOhlcvPostRepairCleanupState_(state);
+          break;
+        }
+        if ((er.duplicateRows || 0) > 0) {
+          saveOhlcvDedupDeleteRows_(er.allDeleteRows);
+        } else {
+          state.earlyDedupComplete = true;
         }
         state.updatedAt = new Date().toISOString();
         saveOhlcvPostRepairCleanupState_(state);
@@ -10476,41 +10527,92 @@ function dedupeOhlcvAllTargetDates_(sheet, targetDates, deadlineMs) {
     if (samples.length < 10) samples.push({ row: item.sheetRow, key: item.key, keptRow: best.sheetRow });
   }
 
-  // early行スキャン: rows 2〜readFromRow-1 にある同一キーの「古い」コピーを追加検出
-  // tailスキャンが末尾110k行しか読まないため、それより前の行にオリジナルが残る場合を補完する
-  let earlyDupCount = 0;
-  if (readFromRow > 2) {
-    const earlyRows = readFromRow - 2;
-    console.log("[OHLCV_POST_REPAIR] Scanning early rows for cross-boundary duplicates.", { earlyRows, readFromRow });
-    const earlyData = sheet.getRange(2, 1, earlyRows, 3).getValues();
-    for (let j = 0; j < earlyRows; j++) {
-      const ts = normalizeOhlcvTimestamp_(earlyData[j][0]);
-      if (!ts) continue;
-      if (!dateSet[formatYmd_(ts)]) continue;
-      const symbol = String(earlyData[j][2] || "").trim();
-      if (!symbol) continue;
-      const key = formatOhlcvTimestampTextForSheet_(ts) + "|" + symbol;
-      if (!bestByKey[key]) continue;
-      const marker = String(earlyData[j][1] || "").trim();
-      if (isProtectedMiddayOhlcvMarker_(marker)) continue;
-      allDeleteRows.push(2 + j);
-      earlyDupCount++;
-    }
-    console.log("[OHLCV_POST_REPAIR] Early row cross-boundary scan done.", { earlyDupCount });
-  }
-
   writeProcessLog_("OHLCV_POST_REPAIR", "Multi-date dedup scan completed.", {
     targetDates: (targetDates || []).length,
     totalRows: numDataRows,
     scannedRows: readRows,
     readFromRow: readFromRow,
-    tailDuplicateRows: allDeleteRows.length - earlyDupCount,
-    earlyDuplicateRows: earlyDupCount,
     duplicateRows: allDeleteRows.length,
     samples: samples
   });
 
   return { timedOut: false, totalRows: numDataRows, scannedRows: readRows, duplicateRows: allDeleteRows.length, allDeleteRows: allDeleteRows };
+}
+
+// EARLY_DEDUPステップ専用。DEDUP_DATESの削除完了後に呼ぶ。
+// tailスキャン後のbestByKeyを再構築し、early行（rows 2〜readFromRow-1）にある重複を検出する。
+function dedupeOhlcvEarlyRows_(sheet, targetDates, deadlineMs) {
+  const numDataRows = Math.max(0, sheet.getLastRow() - 1);
+  if (numDataRows === 0) return { timedOut: false, totalRows: 0, duplicateRows: 0, allDeleteRows: [] };
+
+  const readRows = Math.min(numDataRows, OHLCV_POST_REPAIR_DEDUP_READ_ROWS);
+  const readFromRow = numDataRows - readRows + 2;
+  if (readFromRow <= 2) {
+    // シート全体がtailに収まる場合はearlyスキャン不要
+    writeProcessLog_("OHLCV_POST_REPAIR", "Early-dedup skipped: entire sheet fits within tail scan window.", { numDataRows, readRows });
+    return { timedOut: false, totalRows: numDataRows, duplicateRows: 0, allDeleteRows: [] };
+  }
+
+  const dateSet = {};
+  for (const d of (targetDates || [])) dateSet[d] = true;
+
+  // tailを再読み込みしてbestByKeyを再構築（DEDUP_DATES削除後の状態を反映）
+  const tailData = sheet.getRange(readFromRow, 1, readRows, 4).getValues();
+  if (deadlineMs && Date.now() > deadlineMs - 90000) return { timedOut: true };
+
+  const bestByKey = {};
+  for (let i = 0; i < tailData.length; i++) {
+    const sheetRow = readFromRow + i;
+    const ts = normalizeOhlcvTimestamp_(tailData[i][0]);
+    if (!ts) continue;
+    if (!dateSet[formatYmd_(ts)]) continue;
+    const symbol = String(tailData[i][2] || "").trim();
+    if (!symbol) continue;
+    const key = formatOhlcvTimestampTextForSheet_(ts) + "|" + symbol;
+    const item = { key, sheetRow, row: tailData[i] };
+    const current = bestByKey[key];
+    if (!current) { bestByKey[key] = item; continue; }
+    const cmp = compareOhlcvDuplicatePriority_(tailData[i], current.row);
+    if (cmp < 0 || (cmp === 0 && sheetRow > current.sheetRow)) {
+      bestByKey[key] = item;
+    }
+  }
+
+  if (deadlineMs && Date.now() > deadlineMs - 60000) return { timedOut: true };
+
+  // earlyゾーン（rows 2〜readFromRow-1）をスキャン
+  const earlyRows = readFromRow - 2;
+  console.log("[OHLCV_POST_REPAIR] Scanning early rows for cross-boundary duplicates.", { earlyRows, readFromRow });
+  const earlyData = sheet.getRange(2, 1, earlyRows, 3).getValues();
+
+  if (deadlineMs && Date.now() > deadlineMs - 30000) return { timedOut: true };
+
+  const allDeleteRows = [];
+  const samples = [];
+  for (let j = 0; j < earlyRows; j++) {
+    const ts = normalizeOhlcvTimestamp_(earlyData[j][0]);
+    if (!ts) continue;
+    if (!dateSet[formatYmd_(ts)]) continue;
+    const symbol = String(earlyData[j][2] || "").trim();
+    if (!symbol) continue;
+    const key = formatOhlcvTimestampTextForSheet_(ts) + "|" + symbol;
+    if (!bestByKey[key]) continue;
+    const marker = String(earlyData[j][1] || "").trim();
+    if (isProtectedMiddayOhlcvMarker_(marker)) continue;
+    allDeleteRows.push(2 + j);
+    if (samples.length < 10) samples.push({ row: 2 + j, key });
+  }
+
+  writeProcessLog_("OHLCV_POST_REPAIR", "Early-dedup scan completed.", {
+    targetDates: (targetDates || []).length,
+    totalRows: numDataRows,
+    earlyRows: earlyRows,
+    readFromRow: readFromRow,
+    duplicateRows: allDeleteRows.length,
+    samples: samples
+  });
+
+  return { timedOut: false, totalRows: numDataRows, earlyRows: earlyRows, duplicateRows: allDeleteRows.length, allDeleteRows: allDeleteRows };
 }
 
 function tryOhlcvPostRepairSortOnce_(sheet) {
