@@ -5771,6 +5771,10 @@ const OHLCV_DEDUP_CHUNK_ITEMS = 1200; // 1チャンク~8.4KB（9KB上限以内�
 const OHLCV_POST_REPAIR_COMPACT_CHUNK_ROWS = 2000;
 // コンパクト削除のデッドライン安全マージン（ms）。getValues+setValues+flush+saveStateで余裕を持たせる
 const OHLCV_POST_REPAIR_COMPACT_MARGIN_MS = 35000;
+// 降順レンジ削除（bulkRangedDeleteOhlcvRows_）のデッドライン安全マージン（ms）。
+// 1レンジあたりの deleteRows+flush+getLastRow が ~200ms 程度なので 10s 確保すれば
+// 中断時に状態を保存して安全に再開できる
+const OHLCV_POST_REPAIR_RANGED_DELETE_MARGIN_MS = 10 * 1000;
 // EARLY_DEDUP の早期ゾーン読み込みチャンク行数（165k 行を 1 ショットで読むと API ハードタイムアウト）
 const OHLCV_POST_REPAIR_EARLY_SCAN_CHUNK_ROWS = 30000;
 // EARLY_DEDUP tailキーセット再構築のチャンク行数。40k行を1回のgetValues()で読むとスロットリング時に
@@ -9970,6 +9974,12 @@ function scheduleOhlcvPostRepairCleanup_(quickRepairSummary) {
       sortAttempted: false,
       sortSkipped: false
     },
+    // 降順レンジ削除（bulkRangedDeleteOhlcvRows_）のセッション状態。
+    // 関数が必要時に lazy に設定するが、起動時に明示的に null 化して旧 compact* 残骸を防ぐ。
+    rangedDeleteActive: false,
+    deleteRangeIndex: null,
+    actuallyDeleted: null,
+    expectedDeletedRows: null,
     startedAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   };
@@ -10090,17 +10100,16 @@ function runOhlcvPostRepairCleanup_() {
           continue;
         }
 
-        // DELETE phase: コンパクト書き戻し方式（deleteRows散在多呼び出しによるタイムアウト対策）
-        if (hasPendingOhlcvDedupDeleteRows_() || state.compactReadRow) {
+        // DELETE phase: 降順レンジ削除（setValues を使わない安全な実装）
+        if (hasPendingOhlcvDedupDeleteRows_() || state.rangedDeleteActive) {
           const deadlineMs = startedAt + OHLCV_POST_REPAIR_LIMIT_MS;
-          writeProcessLog_("OHLCV_POST_REPAIR", "Entering compact delete (DEDUP_DATES batch).", {
+          writeProcessLog_("OHLCV_POST_REPAIR", "Entering ranged delete (DEDUP_DATES batch).", {
             dateIndex: state.dateIndex,
             batchSize: OHLCV_POST_REPAIR_DEDUP_DATE_BATCH,
-            compactReadRow: state.compactReadRow || null,
-            compactWriteRow: state.compactWriteRow || null,
-            compactRangeEnd: state.compactRangeEnd || null
+            deleteRangeIndex: state.deleteRangeIndex || null,
+            actuallyDeleted: state.actuallyDeleted || 0
           });
-          const r = bulkCompactDeleteOhlcvRows_(sh, state, deadlineMs);
+          const r = bulkRangedDeleteOhlcvRows_(sh, state, deadlineMs);
           if (!r.done) {
             state.updatedAt = new Date().toISOString();
             saveOhlcvPostRepairCleanupState_(state);
@@ -10154,15 +10163,14 @@ function runOhlcvPostRepairCleanup_() {
       }
 
       if (state.step === "EARLY_DEDUP") {
-        // DELETE phase: コンパクト書き戻し方式（deleteRows散在多呼び出しによるタイムアウト対策）
-        if (hasPendingOhlcvDedupDeleteRows_() || state.compactReadRow) {
+        // DELETE phase: 降順レンジ削除（setValues を使わない安全な実装）
+        if (hasPendingOhlcvDedupDeleteRows_() || state.rangedDeleteActive) {
           const deadlineMs = startedAt + OHLCV_POST_REPAIR_LIMIT_MS;
-          writeProcessLog_("OHLCV_POST_REPAIR", "Entering compact delete (EARLY_DEDUP).", {
-            compactReadRow: state.compactReadRow || null,
-            compactWriteRow: state.compactWriteRow || null,
-            compactRangeEnd: state.compactRangeEnd || null
+          writeProcessLog_("OHLCV_POST_REPAIR", "Entering ranged delete (EARLY_DEDUP).", {
+            deleteRangeIndex: state.deleteRangeIndex || null,
+            actuallyDeleted: state.actuallyDeleted || 0
           });
-          const r = bulkCompactDeleteOhlcvRows_(sh, state, deadlineMs);
+          const r = bulkRangedDeleteOhlcvRows_(sh, state, deadlineMs);
           if (!r.done) {
             state.updatedAt = new Date().toISOString();
             saveOhlcvPostRepairCleanupState_(state);
@@ -10641,9 +10649,11 @@ function loadAllOhlcvDedupDeleteRowSet_() {
   return { set, minRow: isFinite(minRow) ? minRow : 0, maxRow: isFinite(maxRow) ? maxRow : 0 };
 }
 
-// コンパクト書き戻し方式で削除対象行を除去する。
-// deleteRowsByRowNums_ の代替: sheet.deleteRows() を末尾1回のみ呼ぶため大幅高速化。
-// state に compactReadRow / compactWriteRow / compactRangeEnd を持ち、タイムアウト跨ぎで再開可能。
+// 【DEPRECATED 2026/05/15】bulkRangedDeleteOhlcvRows_ に置き換え済み。本関数は呼び出されない。
+// 旧コンパクト書き戻し方式 (setValues + 末尾deleteRows) で削除対象行を除去する。
+// インシデント記録: 2026/05/15、本関数の末尾 sheet.deleteRows() が事実上 no-op になり、
+// setValues でシフトアップしたデータと未削除の末尾データが二重に残ってシート破損を引き起こした。
+// 後継: bulkRangedDeleteOhlcvRows_（setValues を使わず降順 deleteRows のみ + 直後 getLastRow 検証）。
 function bulkCompactDeleteOhlcvRows_(sheet, state, deadlineMs) {
   // 初回: 削除セット読み込み＆コンパクト範囲初期化
   if (!state.compactReadRow) {
@@ -10708,6 +10718,147 @@ function bulkCompactDeleteOhlcvRows_(sheet, state, deadlineMs) {
   state.compactWriteRow = null;
   state.compactRangeEnd = null;
   writeProcessLog_("OHLCV_POST_REPAIR", "Compact delete completed.", { deletedRows: totalDeleted });
+  return { done: true, deletedRows: totalDeleted };
+}
+
+// 降順ソート済み行番号配列を「連続レンジ」に圧縮する。
+// 入力: [200160, 197017, 197016, 197015]（降順）
+// 出力: [{start:200160,len:1}, {start:197015,len:3}]（各レンジは降順、start は最小行）
+function compressConsecutiveDescending_(sortedDesc) {
+  const ranges = [];
+  if (!sortedDesc || sortedDesc.length === 0) return ranges;
+  let curEnd = sortedDesc[0];     // レンジ末尾（最大値）
+  let curStart = sortedDesc[0];   // レンジ先頭（最小値、=start）
+  for (let i = 1; i < sortedDesc.length; i++) {
+    const r = sortedDesc[i];
+    if (r === curStart - 1) {
+      curStart = r;
+    } else {
+      ranges.push({ start: curStart, len: curEnd - curStart + 1 });
+      curEnd = r;
+      curStart = r;
+    }
+  }
+  ranges.push({ start: curStart, len: curEnd - curStart + 1 });
+  return ranges;
+}
+
+// PSの削除行集合を「降順レンジ削除」で除去する。bulkCompactDeleteOhlcvRows_ の後継。
+//
+// 設計の根拠（2026/05/15 シート破損インシデント）:
+//   旧 compact 方式は setValues + 末尾 deleteRows の2段階。末尾 deleteRows が稀に no-op
+//   になる事象が観測され、setValues でシフトアップしたデータと未削除の末尾データが二重に
+//   残ってシート破損を起こした。本関数は setValues を一切使わず、deleteRows のみで降順に
+//   1レンジずつ削除し、各 deleteRows の直前/直後の getLastRow 差分を検証する。
+//
+// 降順削除の利点:
+//   - 削除しても上流の行番号は不変（deleteSet の row 番号は実行中ずっと有効）
+//   - 連続行は1回の deleteRows でまとめて削除（API 呼び出し数 = レンジ数）
+//   - state.deleteRangeIndex のみで再開可能（compactReadRow/WriteRow が不要）
+//
+// レンジ情報の保存戦略:
+//   レンジ配列は PS の state に保存しない（最悪 15KB+ になり 9KB/property 上限を超える）。
+//   PS の削除行集合（OHLCV_DEDUP_ROWS_*）は処理完了まで不変なので、毎回 set → sort →
+//   compress を再計算しても結果は同一。state には deleteRangeIndex（int）と進捗カウンタの
+//   みを保存し、PS state サイズを最小化する。再計算コストは set 22KB ロード + ソート ~50ms。
+//
+// クラッシュセーフ性（pre-advance 方式）:
+//   各レンジ削除の前に state.deleteRangeIndex をインクリメントして saveState する。
+//   ハードkill が deleteRows と次の saveState の間で発生した場合:
+//     - 通常の post-advance: 同じ index を再実行 → 既にシフトした行を「誤った行」として
+//       削除する致命的バグになる（前回の compact-delete 破損と同型）
+//     - pre-advance: 同じ index は再実行されない → 削除漏れの重複行が残るだけで破損しない
+//   削除漏れは次回の post-repair cleanup で再検出・修復される。
+//
+// 安全弁:
+//   - 削除直後の getLastRow 差分が期待値と一致しない場合は即 throw
+//   - 破損が連鎖する前に処理停止 → スプシをバージョン履歴から復元できる
+function bulkRangedDeleteOhlcvRows_(sheet, state, deadlineMs) {
+  const { set } = loadAllOhlcvDedupDeleteRowSet_();
+  if (set.size === 0) {
+    clearOhlcvDedupDeleteRows_();
+    const totalDeletedEmpty = state.actuallyDeleted || 0;
+    state.rangedDeleteActive = false;
+    state.deleteRangeIndex = null;
+    state.actuallyDeleted = null;
+    state.expectedDeletedRows = null;
+    return { done: true, deletedRows: totalDeletedEmpty };
+  }
+
+  // 旧コンパクト方式の残骸（古い state から再開した場合）をクリア
+  if (state.compactReadRow != null || state.compactWriteRow != null || state.compactRangeEnd != null) {
+    state.compactReadRow = null;
+    state.compactWriteRow = null;
+    state.compactRangeEnd = null;
+  }
+
+  const sortedDesc = [...set].sort((a, b) => b - a);
+  const ranges = compressConsecutiveDescending_(sortedDesc);
+
+  if (!state.rangedDeleteActive) {
+    state.rangedDeleteActive = true;
+    state.deleteRangeIndex = 0;
+    state.expectedDeletedRows = set.size;
+    state.actuallyDeleted = 0;
+    saveOhlcvPostRepairCleanupState_(state);
+    writeProcessLog_("OHLCV_POST_REPAIR", "Ranged delete initialized.", {
+      totalDeleteRows: set.size,
+      rangeCount: ranges.length,
+      minRow: ranges[ranges.length - 1].start,
+      maxRow: ranges[0].start + ranges[0].len - 1
+    });
+  }
+
+  while (state.deleteRangeIndex < ranges.length) {
+    if (deadlineMs && Date.now() > deadlineMs - OHLCV_POST_REPAIR_RANGED_DELETE_MARGIN_MS) break;
+    const range = ranges[state.deleteRangeIndex];
+
+    // 【pre-advance】先に index を進めて saveState する。ハードkill 時に重複削除を防ぐ
+    // （詳細は関数ヘッダコメント参照）
+    state.deleteRangeIndex++;
+    saveOhlcvPostRepairCleanupState_(state);
+
+    const beforeLast = sheet.getLastRow();
+    sheet.deleteRows(range.start, range.len);
+    SpreadsheetApp.flush();
+    const afterLast = sheet.getLastRow();
+    const observedDelta = beforeLast - afterLast;
+    // 安全弁: deleteRows が機能しなかったら破損が広がる前に即停止
+    if (observedDelta !== range.len) {
+      throw new Error(
+        "deleteRows verification failed. before=" + beforeLast +
+        " after=" + afterLast + " expectedDelta=" + range.len +
+        " observedDelta=" + observedDelta +
+        " rangeStart=" + range.start +
+        " rangeIndex=" + (state.deleteRangeIndex - 1) +
+        " totalRanges=" + ranges.length
+      );
+    }
+    state.actuallyDeleted = (state.actuallyDeleted || 0) + range.len;
+    saveOhlcvPostRepairCleanupState_(state);
+  }
+
+  if (state.deleteRangeIndex < ranges.length) {
+    writeProcessLog_("OHLCV_POST_REPAIR", "Ranged delete paused.", {
+      deleteRangeIndex: state.deleteRangeIndex,
+      totalRanges: ranges.length,
+      actuallyDeleted: state.actuallyDeleted || 0,
+      expectedDeletedRows: state.expectedDeletedRows || 0
+    });
+    return { done: false };
+  }
+
+  const totalDeleted = state.actuallyDeleted || 0;
+  const expected = state.expectedDeletedRows || 0;
+  clearOhlcvDedupDeleteRows_();
+  state.rangedDeleteActive = false;
+  state.deleteRangeIndex = null;
+  state.actuallyDeleted = null;
+  state.expectedDeletedRows = null;
+  writeProcessLog_("OHLCV_POST_REPAIR", "Ranged delete completed.", {
+    deletedRows: totalDeleted,
+    expectedDeletedRows: expected
+  });
   return { done: true, deletedRows: totalDeleted };
 }
 
