@@ -64,10 +64,10 @@ const SIGNAL_ARCHIVE_HEADERS = RAW_HEADERS.concat(["archived_at"]);
 const SIGNAL_ARCHIVE_IDX = buildHeaderIndexMap_(SIGNAL_ARCHIVE_HEADERS);
 
 const CHECKPOINTS = [
-  { days: 5,  label: "5営業日後",  emoji: "🔥", evalDateKey: "eval_date_5bd",  evalCloseKey: "eval_close_5bd",  perfKey: "perf_5bd",  winKey: "win_flag_5bd",  reportedKey: "reported_5bd" },
-  { days: 10, label: "10営業日後", emoji: "🚀", evalDateKey: "eval_date_10bd", evalCloseKey: "eval_close_10bd", perfKey: "perf_10bd", winKey: "win_flag_10bd", reportedKey: "reported_10bd" },
-  { days: 20, label: "20営業日後", emoji: "🌕", evalDateKey: "eval_date_20bd", evalCloseKey: "eval_close_20bd", perfKey: "perf_20bd", winKey: "win_flag_20bd", reportedKey: "reported_20bd" },
-  { days: 40, label: "40営業日後", emoji: "👑", evalDateKey: "eval_date_40bd", evalCloseKey: "eval_close_40bd", perfKey: "perf_40bd", winKey: "win_flag_40bd", reportedKey: "reported_40bd" }
+  { days: 5,  label: "5営業日後",  emoji: "??", evalDateKey: "eval_date_5bd",  evalCloseKey: "eval_close_5bd",  perfKey: "perf_5bd",  winKey: "win_flag_5bd",  reportedKey: "reported_5bd" },
+  { days: 10, label: "10営業日後", emoji: "??", evalDateKey: "eval_date_10bd", evalCloseKey: "eval_close_10bd", perfKey: "perf_10bd", winKey: "win_flag_10bd", reportedKey: "reported_10bd" },
+  { days: 20, label: "20営業日後", emoji: "??", evalDateKey: "eval_date_20bd", evalCloseKey: "eval_close_20bd", perfKey: "perf_20bd", winKey: "win_flag_20bd", reportedKey: "reported_20bd" },
+  { days: 40, label: "40営業日後", emoji: "??", evalDateKey: "eval_date_40bd", evalCloseKey: "eval_close_40bd", perfKey: "perf_40bd", winKey: "win_flag_40bd", reportedKey: "reported_40bd" }
 ];
 
 let MARKET_HOLIDAY_CACHE_ = null;
@@ -484,7 +484,7 @@ function isNearlyMonotonicDown_(arr) { if(arr.length<2) return false; for(let i=
 function pickVariant_(seed, options) { if(!options||!options.length) return ""; const idx = Math.abs(hashString_(seed)) % options.length; return options[idx]; }
 function hashString_(s) { let h=0; for(let i=0;i<s.length;i++) h = ((h<<5)-h)+s.charCodeAt(i), h|=0; return h; }
 function buildWeeklyArchiveMessage_(weekStart, weekEnd, statsList, summaryText) {
-  const lines = ["📊 【天底極致】週刊パフォーマンスレポート", `(${formatYmdSlash_(weekStart)} 〜 ${formatYmdSlash_(weekEnd)})`, "", `総括: ${summaryText}`, ""];
+  const lines = ["?? 【天底極致】週刊パフォーマンスレポート", `(${formatYmdSlash_(weekStart)} ? ${formatYmdSlash_(weekEnd)})`, "", `総括: ${summaryText}`, ""];
   statsList.forEach(s => lines.push(`${s.checkpoint.label}: ${formatCompactStatLine_(s)}`));
   return lines.join("\n");
 }
@@ -632,8 +632,8 @@ function sendDeferredDiscordPayload() {
 }
 
 function buildWeeklyHeaderEmbed_(weekStart, weekEnd, statsList, summaryText) {
-  const lines = [`**${formatYmdSlash_(weekStart)} 〜 ${formatYmdSlash_(weekEnd)}**`, "", `5営業日後: ${formatCompactStatLine_(statsList[0])}`, `10営業日後: ${formatCompactStatLine_(statsList[1])}`, `20営業日後: ${formatCompactStatLine_(statsList[2])}`, `40営業日後: ${formatCompactStatLine_(statsList[3])}`, "", `**総括**`, summaryText];
-  return { title: "📊 【天底極致】週刊パフォーマンスレポート", description: lines.join("\n"), color: 10070709, timestamp: new Date().toISOString(), footer: { text: "底シグナル / 5・10・20・40営業日後追跡" } };
+  const lines = [`**${formatYmdSlash_(weekStart)} ? ${formatYmdSlash_(weekEnd)}**`, "", `5営業日後: ${formatCompactStatLine_(statsList[0])}`, `10営業日後: ${formatCompactStatLine_(statsList[1])}`, `20営業日後: ${formatCompactStatLine_(statsList[2])}`, `40営業日後: ${formatCompactStatLine_(statsList[3])}`, "", `**総括**`, summaryText];
+  return { title: "?? 【天底極致】週刊パフォーマンスレポート", description: lines.join("\n"), color: 10070709, timestamp: new Date().toISOString(), footer: { text: "底シグナル / 5・10・20・40営業日後追跡" } };
 }
 function buildCheckpointEmbed_(stats) {
   const topLines = stats.top3.length ? stats.top3.map(item => `${item.rank}. ${item.symbolCode} ${item.symbolName} (${formatSignedPct1_(item.perf)})`).join("\n") : "該当する銘柄はありません。";
@@ -1350,7 +1350,7 @@ function purgeOldOhlcvDataDaily() {
 
     const minDateStr = minDate ? formatYmd_(minDate) : "不明";
     const maxDateStr = maxDate ? formatYmd_(maxDate) : "不明";
-    console.log(`[purgeOldOhlcv] 削除対象: ${minDateStr} 〜 ${maxDateStr} (${deleteCount}行)`);
+    console.log(`[purgeOldOhlcv] 削除対象: ${minDateStr} ? ${maxDateStr} (${deleteCount}行)`);
 
     sheet.deleteRows(firstDataRow, deleteCount);
     totalDeleted += deleteCount;
@@ -5105,11 +5105,11 @@ function sendCompletionNotice_(newCount, totalCount, tag) {
   if (!webhookUrl) return;
 
   const embed = {
-    title: "✅ OHLCVデータ同期完了",
+    title: "? OHLCVデータ同期完了",
     color: 0x2ecc71,  // 緑色
     fields: [
       {
-        name: "🤖 スコアリングBot",
+        name: "?? スコアリングBot",
         value: "最新の分析結果は `/scan` でご確認いただけます。",
         inline: false
       }
@@ -5573,17 +5573,17 @@ const OHLCV_POST_REPAIR_CLEANUP_CHUNK_ROWS = 1200;
 const OHLCV_POST_REPAIR_DUP_DATE_CHUNK_ROWS = 5000;
 const OHLCV_POST_REPAIR_MAX_DUP_DATES = 90;
 const OHLCV_POST_REPAIR_MAX_DELETE_ROWS = 2000;
-const OHLCV_POST_REPAIR_LIMIT_MS = 90 * 1000;
+const OHLCV_POST_REPAIR_LIMIT_MS = 240 * 1000;
 const OHLCV_POST_REPAIR_RESUME_AFTER_MS = 60 * 1000;
 const OHLCV_POST_REPAIR_SORT_MAX_ROWS = OHLCV_SAFE_SORT_MAX_ROWS;
 const OHLCV_POST_REPAIR_MIN_DEDUP_REMAINING_MS = 40000;
 const OHLCV_POST_REPAIR_SAFETY_AFTER_MS = 10 * 60 * 1000;
-// targetDatesは最大82営業日≈120暦日分。365日保持の末尾33%以内に収まる想定。1.5倍バッファ
+// targetDatesは最大82営業日?120暦日分。365日保持の末尾33%以内に収まる想定。1.5倍バッファ
 const OHLCV_POST_REPAIR_DEDUP_READ_ROWS = 110000;
 // PropertiesServiceへの削除対象行番号キャッシュ用
 const OHLCV_DEDUP_ROWS_META_KEY = "OHLCV_DEDUP_ROWS_META";
 const OHLCV_DEDUP_ROWS_KEY_PREFIX = "OHLCV_DEDUP_ROWS_";
-const OHLCV_DEDUP_CHUNK_ITEMS = 1200; // 1チャンク≈8.4KB（9KB上限以内）
+const OHLCV_DEDUP_CHUNK_ITEMS = 1200; // 1チャンク?8.4KB（9KB上限以内）
 const OHLCV_INTRADAY_STALE_SYMBOLS_KEY = "OHLCV_INTRADAY_STALE_SYMBOLS_V1";
 const OHLCV_INTRADAY_STALE_MAX_RECORDS = 200;
 const EVAL_OHLCV_COVERAGE_STATE_KEY = "EVAL_OHLCV_COVERAGE_REPAIR_STATE_V1";
@@ -7695,7 +7695,7 @@ function quickRepairRecentGaps(options) {
 
       const batchGroups = groups.slice(groupIndex, groupIndex + batchSymbols);
       const batchTasks = flattenQuickRepairGroupsToTasks_(batchGroups);
-      writeProcessLog_("ギャップ修復", `不足セッションを補填中です。銘柄グループ ${groupIndex + 1}〜${groupIndex + batchGroups.length} / ${groups.length} を処理します。`, {
+      writeProcessLog_("ギャップ修復", `不足セッションを補填中です。銘柄グループ ${groupIndex + 1}?${groupIndex + batchGroups.length} / ${groups.length} を処理します。`, {
         tasks: batchTasks.length
       });
       const result = processQuickRepairGroups_(ohlcvSh, batchGroups, sessionInfo, minSessions);
@@ -8860,7 +8860,7 @@ function rawAlertReceivedAtToOhlcvTimestamp_(receivedAt) {
   const minute = Number(Utilities.formatDate(d, CONFIG.TIMEZONE, "m"));
 
   // TradingViewの4時間足アラート想定:
-  // 13:00〜13:30頃に来るAM確定アラート → 09:00行
+  // 13:00?13:30頃に来るAM確定アラート → 09:00行
   // 15:30以降に来るPM確定アラート → 13:00行
   //
   // 14:00未満はAM扱い、14:00以降はPM扱いにする。
@@ -9232,7 +9232,7 @@ const OHLCV_POST_CLEANUP_REFRESH_ID_KEY = "OHLCV_POST_CLEANUP_REFRESH_ID";
 const OHLCV_POST_CLEANUP_SCAN_ROWS = 30000;       // 毎回掃除する直近行数
 const OHLCV_POST_CLEANUP_CHUNK_ROWS = 800;        // 1回で処理する行数
 const OHLCV_POST_CLEANUP_DUP_CHUNK_ROWS = 1200;   // 重複チェックの1回あたり行数
-const OHLCV_POST_CLEANUP_LIMIT_MS = 90000;        // 1実行の安全上限
+const OHLCV_POST_CLEANUP_LIMIT_MS = 240000;        // 1実行の安全上限
 const OHLCV_POST_CLEANUP_RESUME_AFTER_MS = 60 * 1000;
 
 function scheduleOhlcvPostMaintenanceCleanup_(newCount, refreshId) {
