@@ -64,10 +64,10 @@ const SIGNAL_ARCHIVE_HEADERS = RAW_HEADERS.concat(["archived_at"]);
 const SIGNAL_ARCHIVE_IDX = buildHeaderIndexMap_(SIGNAL_ARCHIVE_HEADERS);
 
 const CHECKPOINTS = [
-  { days: 5,  label: "5営業日後",  emoji: "??", evalDateKey: "eval_date_5bd",  evalCloseKey: "eval_close_5bd",  perfKey: "perf_5bd",  winKey: "win_flag_5bd",  reportedKey: "reported_5bd" },
-  { days: 10, label: "10営業日後", emoji: "??", evalDateKey: "eval_date_10bd", evalCloseKey: "eval_close_10bd", perfKey: "perf_10bd", winKey: "win_flag_10bd", reportedKey: "reported_10bd" },
-  { days: 20, label: "20営業日後", emoji: "??", evalDateKey: "eval_date_20bd", evalCloseKey: "eval_close_20bd", perfKey: "perf_20bd", winKey: "win_flag_20bd", reportedKey: "reported_20bd" },
-  { days: 40, label: "40営業日後", emoji: "??", evalDateKey: "eval_date_40bd", evalCloseKey: "eval_close_40bd", perfKey: "perf_40bd", winKey: "win_flag_40bd", reportedKey: "reported_40bd" }
+  { days: 5,  label: "5営業日後",  emoji: "🔥", evalDateKey: "eval_date_5bd",  evalCloseKey: "eval_close_5bd",  perfKey: "perf_5bd",  winKey: "win_flag_5bd",  reportedKey: "reported_5bd" },
+  { days: 10, label: "10営業日後", emoji: "🚀", evalDateKey: "eval_date_10bd", evalCloseKey: "eval_close_10bd", perfKey: "perf_10bd", winKey: "win_flag_10bd", reportedKey: "reported_10bd" },
+  { days: 20, label: "20営業日後", emoji: "🌕", evalDateKey: "eval_date_20bd", evalCloseKey: "eval_close_20bd", perfKey: "perf_20bd", winKey: "win_flag_20bd", reportedKey: "reported_20bd" },
+  { days: 40, label: "40営業日後", emoji: "👑", evalDateKey: "eval_date_40bd", evalCloseKey: "eval_close_40bd", perfKey: "perf_40bd", winKey: "win_flag_40bd", reportedKey: "reported_40bd" }
 ];
 
 let MARKET_HOLIDAY_CACHE_ = null;
@@ -484,7 +484,7 @@ function isNearlyMonotonicDown_(arr) { if(arr.length<2) return false; for(let i=
 function pickVariant_(seed, options) { if(!options||!options.length) return ""; const idx = Math.abs(hashString_(seed)) % options.length; return options[idx]; }
 function hashString_(s) { let h=0; for(let i=0;i<s.length;i++) h = ((h<<5)-h)+s.charCodeAt(i), h|=0; return h; }
 function buildWeeklyArchiveMessage_(weekStart, weekEnd, statsList, summaryText) {
-  const lines = ["?? 【天底極致】週刊パフォーマンスレポート", `(${formatYmdSlash_(weekStart)} ? ${formatYmdSlash_(weekEnd)})`, "", `総括: ${summaryText}`, ""];
+  const lines = ["📊 【天底極致】週刊パフォーマンスレポート", `(${formatYmdSlash_(weekStart)} 〜 ${formatYmdSlash_(weekEnd)})`, "", `総括: ${summaryText}`, ""];
   statsList.forEach(s => lines.push(`${s.checkpoint.label}: ${formatCompactStatLine_(s)}`));
   return lines.join("\n");
 }
@@ -632,8 +632,8 @@ function sendDeferredDiscordPayload() {
 }
 
 function buildWeeklyHeaderEmbed_(weekStart, weekEnd, statsList, summaryText) {
-  const lines = [`**${formatYmdSlash_(weekStart)} ? ${formatYmdSlash_(weekEnd)}**`, "", `5営業日後: ${formatCompactStatLine_(statsList[0])}`, `10営業日後: ${formatCompactStatLine_(statsList[1])}`, `20営業日後: ${formatCompactStatLine_(statsList[2])}`, `40営業日後: ${formatCompactStatLine_(statsList[3])}`, "", `**総括**`, summaryText];
-  return { title: "?? 【天底極致】週刊パフォーマンスレポート", description: lines.join("\n"), color: 10070709, timestamp: new Date().toISOString(), footer: { text: "底シグナル / 5・10・20・40営業日後追跡" } };
+  const lines = [`**${formatYmdSlash_(weekStart)} 〜 ${formatYmdSlash_(weekEnd)}**`, "", `5営業日後: ${formatCompactStatLine_(statsList[0])}`, `10営業日後: ${formatCompactStatLine_(statsList[1])}`, `20営業日後: ${formatCompactStatLine_(statsList[2])}`, `40営業日後: ${formatCompactStatLine_(statsList[3])}`, "", `**総括**`, summaryText];
+  return { title: "📊 【天底極致】週刊パフォーマンスレポート", description: lines.join("\n"), color: 10070709, timestamp: new Date().toISOString(), footer: { text: "底シグナル / 5・10・20・40営業日後追跡" } };
 }
 function buildCheckpointEmbed_(stats) {
   const topLines = stats.top3.length ? stats.top3.map(item => `${item.rank}. ${item.symbolCode} ${item.symbolName} (${formatSignedPct1_(item.perf)})`).join("\n") : "該当する銘柄はありません。";
@@ -702,18 +702,19 @@ function runDailyMaintenanceInternal_(isResume, newCount, refreshId) {
     clearDailyMaintenanceState_();
     deleteTriggersByHandler_(CONFIG.DAILY_CONT_TRIGGER_HANDLER);
 
-    // Discord通知はquickRepair完了後に送る。GitHub Actionsはここで起動する。
+    // Discord通知をここで即時送信。GitHub Actionsはpost-repair cleanup完了後に起動する。
     const displayCount = meta.newCount !== "" ? String(meta.newCount) : "0";
     const tag = (meta.refreshId && typeof meta.refreshId === "string") ? (meta.refreshId.includes("AM") ? "AM" : "PM") : "AUTO";
-    savePendingOhlcvCompletionNotice_(displayCount, "0", tag);
+    sendCompletionNotice_(displayCount, "0", tag);
     deleteTriggersByHandler_("quickRepairTrigger");
     ScriptApp.newTrigger("quickRepairTrigger")
       .timeBased()
       .after(60 * 1000)
       .create();
 
-    writeProcessLog_("日次メンテナンス", "評価更新が完了したため、GAP修復を1分後に起動します。GitHub optimize はGAP修復完了後に起動します。", {
+    writeProcessLog_("日次メンテナンス", "評価更新完了・Discord通知送信済み。GAP修復を1分後に起動します。GitHub optimize はGAP修復完了後に起動します。", {
       handlerName: "quickRepairTrigger",
+      discordNotice: "sent",
       githubOptimize: "after_quick_repair"
     });
 
@@ -5275,11 +5276,11 @@ function sendCompletionNotice_(newCount, totalCount, tag) {
   if (!webhookUrl) return;
 
   const embed = {
-    title: "? OHLCVデータ同期完了",
+    title: "✅ OHLCVデータ同期完了",
     color: 0x2ecc71,  // 緑色
     fields: [
       {
-        name: "?? スコアリングBot",
+        name: "🤖 スコアリングBot",
         value: "最新の分析結果は `/scan` でご確認いただけます。",
         inline: false
       }
@@ -5753,7 +5754,9 @@ const OHLCV_POST_REPAIR_DEDUP_READ_ROWS = 110000;
 // PropertiesServiceへの削除対象行番号キャッシュ用
 const OHLCV_DEDUP_ROWS_META_KEY = "OHLCV_DEDUP_ROWS_META";
 const OHLCV_DEDUP_ROWS_KEY_PREFIX = "OHLCV_DEDUP_ROWS_";
-const OHLCV_DEDUP_CHUNK_ITEMS = 1200; // 1チャンク?8.4KB（9KB上限以内）
+const OHLCV_DEDUP_CHUNK_ITEMS = 1200; // 1チャンク~8.4KB（9KB上限以内）
+// コンパクト書き戻し削除: 1チャンクあたりの読み書き行数（~30s/chunk）
+const OHLCV_POST_REPAIR_COMPACT_CHUNK_ROWS = 5000;
 const OHLCV_INTRADAY_STALE_SYMBOLS_KEY = "OHLCV_INTRADAY_STALE_SYMBOLS_V1";
 const OHLCV_INTRADAY_STALE_MAX_RECORDS = 200;
 const EVAL_OHLCV_COVERAGE_STATE_KEY = "EVAL_OHLCV_COVERAGE_REPAIR_STATE_V1";
@@ -10060,23 +10063,18 @@ function runOhlcvPostRepairCleanup_() {
           continue;
         }
 
-        // DELETE phase: キャッシュ済みの削除対象行があれば再スキャンなしで削除のみ実行
-        if (hasPendingOhlcvDedupDeleteRows_()) {
-          const del = loadAndDequeueOhlcvDedupDeleteRows_(OHLCV_POST_REPAIR_MAX_DELETE_ROWS);
-          if (del && del.rowsToDelete.length > 0) {
-            deleteRowsByRowNums_(sh, del.rowsToDelete);
-            SpreadsheetApp.flush();
-            state.totals.duplicateDeletedRows += del.rowsToDelete.length;
-            writeProcessLog_("OHLCV_POST_REPAIR", "Dedup delete batch processed.", {
-              deletedRows: del.rowsToDelete.length,
-              remainingRows: del.remainingTotal
-            });
+        // DELETE phase: コンパクト書き戻し方式（deleteRows散在多呼び出しによるタイムアウト対策）
+        if (hasPendingOhlcvDedupDeleteRows_() || state.compactReadRow) {
+          const deadlineMs = startedAt + OHLCV_POST_REPAIR_LIMIT_MS;
+          const r = bulkCompactDeleteOhlcvRows_(sh, state, deadlineMs);
+          if (!r.done) {
+            state.updatedAt = new Date().toISOString();
+            saveOhlcvPostRepairCleanupState_(state);
+            break;
           }
-          if (!del || del.remainingTotal <= 0) {
-            clearOhlcvDedupDeleteRows_();
-            state.dateIndex = state.targetDates.length;
-            state.totals.duplicateDatesProcessed = state.targetDates.length;
-          }
+          state.totals.duplicateDeletedRows += r.deletedRows || 0;
+          state.dateIndex = state.targetDates.length;
+          state.totals.duplicateDatesProcessed = state.targetDates.length;
           state.updatedAt = new Date().toISOString();
           saveOhlcvPostRepairCleanupState_(state);
           continue;
@@ -10104,22 +10102,17 @@ function runOhlcvPostRepairCleanup_() {
       }
 
       if (state.step === "EARLY_DEDUP") {
-        // DELETE phase: キャッシュ済みの削除対象行があれば再スキャンなしで削除のみ実行
-        if (hasPendingOhlcvDedupDeleteRows_()) {
-          const del = loadAndDequeueOhlcvDedupDeleteRows_(OHLCV_POST_REPAIR_MAX_DELETE_ROWS);
-          if (del && del.rowsToDelete.length > 0) {
-            deleteRowsByRowNums_(sh, del.rowsToDelete);
-            SpreadsheetApp.flush();
-            state.totals.duplicateDeletedRows += del.rowsToDelete.length;
-            writeProcessLog_("OHLCV_POST_REPAIR", "Early-dedup delete batch processed.", {
-              deletedRows: del.rowsToDelete.length,
-              remainingRows: del.remainingTotal
-            });
+        // DELETE phase: コンパクト書き戻し方式（deleteRows散在多呼び出しによるタイムアウト対策）
+        if (hasPendingOhlcvDedupDeleteRows_() || state.compactReadRow) {
+          const deadlineMs = startedAt + OHLCV_POST_REPAIR_LIMIT_MS;
+          const r = bulkCompactDeleteOhlcvRows_(sh, state, deadlineMs);
+          if (!r.done) {
+            state.updatedAt = new Date().toISOString();
+            saveOhlcvPostRepairCleanupState_(state);
+            break;
           }
-          if (!del || del.remainingTotal <= 0) {
-            clearOhlcvDedupDeleteRows_();
-            state.earlyDedupComplete = true;
-          }
+          state.totals.duplicateDeletedRows += r.deletedRows || 0;
+          state.earlyDedupComplete = true;
           state.updatedAt = new Date().toISOString();
           saveOhlcvPostRepairCleanupState_(state);
           continue;
@@ -10511,6 +10504,92 @@ function clearOhlcvDedupDeleteRows_() {
   props.deleteProperty(OHLCV_DEDUP_ROWS_META_KEY);
 }
 
+// PSに保存済みの削除対象行番号を全チャンクから Set として読み込む（デキューしない）
+function loadAllOhlcvDedupDeleteRowSet_() {
+  const props = PropertiesService.getScriptProperties();
+  const metaStr = props.getProperty(OHLCV_DEDUP_ROWS_META_KEY);
+  if (!metaStr) return { set: new Set(), minRow: 0, maxRow: 0 };
+  let meta;
+  try { meta = JSON.parse(metaStr); } catch (e) { return { set: new Set(), minRow: 0, maxRow: 0 }; }
+  const set = new Set();
+  let minRow = Infinity, maxRow = -Infinity;
+  const startChunk = meta.startChunk || 0;
+  const numChunks = meta.chunks || 0;
+  for (let i = startChunk; i < startChunk + numChunks; i++) {
+    const raw = props.getProperty(OHLCV_DEDUP_ROWS_KEY_PREFIX + i) || "";
+    raw.split(",").forEach(s => {
+      const v = Number(s);
+      if (v > 0) { set.add(v); if (v < minRow) minRow = v; if (v > maxRow) maxRow = v; }
+    });
+  }
+  return { set, minRow: isFinite(minRow) ? minRow : 0, maxRow: isFinite(maxRow) ? maxRow : 0 };
+}
+
+// コンパクト書き戻し方式で削除対象行を除去する。
+// deleteRowsByRowNums_ の代替: sheet.deleteRows() を末尾1回のみ呼ぶため大幅高速化。
+// state に compactReadRow / compactWriteRow / compactRangeEnd を持ち、タイムアウト跨ぎで再開可能。
+function bulkCompactDeleteOhlcvRows_(sheet, state, deadlineMs) {
+  // 初回: 削除セット読み込み＆コンパクト範囲初期化
+  if (!state.compactReadRow) {
+    const { set, minRow } = loadAllOhlcvDedupDeleteRowSet_();
+    if (set.size === 0) { clearOhlcvDedupDeleteRows_(); return { done: true, deletedRows: 0 }; }
+    state.compactReadRow = minRow;
+    state.compactWriteRow = minRow;
+    state.compactRangeEnd = sheet.getLastRow();
+    saveOhlcvPostRepairCleanupState_(state);
+    writeProcessLog_("OHLCV_POST_REPAIR", "Compact delete initialized.", {
+      minRow: minRow, rangeEnd: state.compactRangeEnd, deleteSetSize: set.size
+    });
+  }
+
+  const { set: deleteSet } = loadAllOhlcvDedupDeleteRowSet_();
+  const CHUNK = OHLCV_POST_REPAIR_COMPACT_CHUNK_ROWS;
+  let totalDeleted = 0;
+
+  while (state.compactReadRow <= state.compactRangeEnd) {
+    // 25秒余裕を持って中断
+    if (deadlineMs && Date.now() > deadlineMs - 25000) break;
+
+    const count = Math.min(CHUNK, state.compactRangeEnd - state.compactReadRow + 1);
+    const values = sheet.getRange(state.compactReadRow, 1, count, 8).getValues();
+    const keepRows = [];
+    for (let i = 0; i < count; i++) {
+      if (!deleteSet.has(state.compactReadRow + i)) keepRows.push(values[i]);
+      else totalDeleted++;
+    }
+    if (keepRows.length > 0) {
+      sheet.getRange(state.compactWriteRow, 1, keepRows.length, 8).setValues(keepRows);
+    }
+    state.compactWriteRow += keepRows.length;
+    state.compactReadRow += count;
+    saveOhlcvPostRepairCleanupState_(state);
+    SpreadsheetApp.flush();
+  }
+
+  // コンパクト未完了 → 次回へ
+  if (state.compactReadRow <= state.compactRangeEnd) {
+    writeProcessLog_("OHLCV_POST_REPAIR", "Compact delete paused.", {
+      compactReadRow: state.compactReadRow, compactWriteRow: state.compactWriteRow, compactRangeEnd: state.compactRangeEnd
+    });
+    return { done: false };
+  }
+
+  // 完了: 末尾を1回の deleteRows で削除
+  const tailStart = state.compactWriteRow;
+  const tailEnd = state.compactRangeEnd;
+  if (tailStart <= tailEnd) {
+    sheet.deleteRows(tailStart, tailEnd - tailStart + 1);
+    SpreadsheetApp.flush();
+    totalDeleted += tailEnd - tailStart + 1;
+  }
+  clearOhlcvDedupDeleteRows_();
+  state.compactReadRow = null;
+  state.compactWriteRow = null;
+  state.compactRangeEnd = null;
+  writeProcessLog_("OHLCV_POST_REPAIR", "Compact delete completed.", { deletedRows: totalDeleted });
+  return { done: true, deletedRows: totalDeleted };
+}
+
 // スキャンのみ実行（削除なし）。削除対象行番号の全リストを返す
 function dedupeOhlcvAllTargetDates_(sheet, targetDates, deadlineMs) {
   const empty = { timedOut: false, allDeleteRows: [], duplicateRows: 0, scannedRows: 0, totalRows: 0 };
@@ -10692,9 +10771,8 @@ function completeOhlcvPostRepairCleanup_(state) {
   clearManualOhlcvBusinessDate_();
 
   summary.githubOptimize = triggerGitHubActionsOptimize_();
-  summary.completionNotice = sendPendingOhlcvCompletionNoticeAfterQuickRepair_(summary);
 
-  writeProcessLog_("OHLCV_POST_REPAIR", "Post-repair cleanup completed. GitHub and Discord follow-up were released after cleanup.", summary);
+  writeProcessLog_("OHLCV_POST_REPAIR", "Post-repair cleanup completed. GitHub Actions triggered. Discord notice was already sent at daily maintenance completion.", summary);
   return summary;
 }
 
