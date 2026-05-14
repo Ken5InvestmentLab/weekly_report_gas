@@ -2755,6 +2755,14 @@ function isProtectedMiddayOhlcvMarker_(marker) {
   return String(marker || "").trim().match(/^MIDDAY_LOCKED_/) !== null;
 }
 
+function makePmLockedMarker_(dateKey) {
+  return "PM_LOCKED_" + String(dateKey || "");
+}
+
+function isPmLockedMarker_(marker) {
+  return String(marker || "").trim().match(/^PM_LOCKED_/) !== null;
+}
+
 function previewRepairOhlcvAm20260511Only() {
   return repairOhlcvAmForDateOnly_("2026-05-11", true);
 }
@@ -3458,7 +3466,6 @@ function finalizeMiddayOhlcvBeforeMainRun_() {
     const ss = openAppSpreadsheet_();
     const sh = ss.getSheetByName(CONFIG.OHLCV_SHEET);
     if (sh) {
-      purgeInvalidOhlcvTimestampRows_(sh, "main.before_clear_midday_state", OHLCV_APPEND_INTEGRITY_SCAN_ROWS);
       SpreadsheetApp.flush();
     }
   } catch (e) {
@@ -4024,11 +4031,22 @@ function prepareMainRunRowsFastPmVolume_(symbol, rows, dailyMap, todayKey, rawAl
   const fastUseProtectedAmVol = Number.isFinite(fastRawAmVol) && fastRawAmVol >= 0;
   const fastAmVol = fastUseProtectedAmVol ? Math.round(fastRawAmVol) : (fastAmRow ? toSafeVolumeNumber_(fastAmRow[7]) : 0);
   const fastHasAmVolume = !!fastAmRow || fastUseProtectedAmVol;
+  const fastPmTimestamp = new Date(`${todayKey}T13:00:00+09:00`);
+  const fastRawPmVol = rawAlertVolumeMap ? Number(rawAlertVolumeMap[makeRawAlertVolumeKey_(fastPmTimestamp, fastSym)]) : NaN;
+  const fastUseProtectedPmVol = Number.isFinite(fastRawPmVol) && fastRawPmVol >= 0;
   const fastHasValidDailyDiff = !fastHasAmVolume || fastDailyVol >= fastAmVol;
   const fastPmVolAfter = fastHasValidDailyDiff ? Math.max(0, Math.round(fastDailyVol - fastAmVol)) : null;
 
   if (fastPmRow) {
-    if ((fastAmRow && fastHasValidDailyDiff) ||
+    if (fastUseProtectedPmVol) {
+      const fastPmBefore = toSafeVolumeNumber_(fastPmRow[7]);
+      fastPmRow[7] = Math.round(fastRawPmVol);
+      fastPmRow[1] = makePmLockedMarker_(todayKey);
+      debugLogToSheet_("ohlcv.mainToday.pmVolumePmLocked", {
+        symbol: fastSym, todayKey: todayKey,
+        pmBefore: fastPmBefore, pmAfter: fastPmRow[7], source: "alerts_raw_pm_locked"
+      });
+    } else if ((fastAmRow && fastHasValidDailyDiff) ||
         (!fastAmRow && (isDailyCompatibleWithSessionRow_(fastDaily, fastPmRow) || isSinglePriceDailyOhlcv_(fastDaily)))) {
       const fastPmBefore = toSafeVolumeNumber_(fastPmRow[7]);
       fastPmRow[7] = fastHasAmVolume ? fastPmVolAfter : fastDailyVol;
@@ -4046,7 +4064,20 @@ function prepareMainRunRowsFastPmVolume_(symbol, rows, dailyMap, todayKey, rawAl
     return fastOtherRows.concat(sortTodaySessionRows_(fastTodayRows));
   }
 
-  if (fastHasValidDailyDiff && fastPmVolAfter > 0 && (fastHasAmVolume || isSinglePriceDailyOhlcv_(fastDaily))) {
+  if (fastUseProtectedPmVol) {
+    fastPmRow = [
+      new Date(`${todayKey}T13:00:00+09:00`),
+      makePmLockedMarker_(todayKey),
+      fastSym,
+      fastDailyClose, fastDailyClose, fastDailyClose, fastDailyClose,
+      Math.round(fastRawPmVol)
+    ];
+    fastTodayRows.push(fastPmRow);
+    debugLogToSheet_("ohlcv.mainToday.pmSynthesizedPmLocked", {
+      symbol: fastSym, todayKey: todayKey,
+      pmVol: Math.round(fastRawPmVol), close: fastDailyClose, source: "alerts_raw_pm_locked"
+    });
+  } else if (fastHasValidDailyDiff && fastPmVolAfter > 0 && (fastHasAmVolume || isSinglePriceDailyOhlcv_(fastDaily))) {
     const fastMarker = fastAmRow ? String(fastAmRow[1] || "new_session") : "new_session";
     fastPmRow = [
       new Date(`${todayKey}T13:00:00+09:00`),
@@ -7032,24 +7063,15 @@ function dedupeAndSortOhlcv_(sheet) {
   const lastRow = sheet.getLastRow();
   if (lastRow <= 1) return { deletedRows: 0 };
 
-  const invalidCleanup = purgeInvalidOhlcvTimestampRows_(
-    sheet,
-    "dedupeAndSort.before_recent_delete",
-    OHLCV_APPEND_INTEGRITY_SCAN_ROWS
-  );
-  SpreadsheetApp.flush();
+  const invalidCleanup = { deletedRows: 0, convertedRows: 0 };
 
   const duplicateCleanup = deleteDuplicateOhlcvRowsRecentFast_(
     sheet,
     OHLCV_FINAL_DEDUPE_SCAN_ROWS
   );
-
-  const afterCleanup = purgeInvalidOhlcvTimestampRows_(
-    sheet,
-    "dedupeAndSort.after_recent_delete",
-    OHLCV_APPEND_INTEGRITY_SCAN_ROWS
-  );
   SpreadsheetApp.flush();
+
+  const afterCleanup = { deletedRows: 0, convertedRows: 0 };
 
   const sortResult = sortOhlcvSheetByTimestampSafe_(sheet);
 
@@ -7105,9 +7127,10 @@ function getOhlcvRowPriority_(row) {
   const marker = String(row[1] || "").trim();
 
   if (isProtectedMiddayOhlcvMarker_(marker)) return 0;
+  if (isPmLockedMarker_(marker)) return 0;
 
   // 本番取得・通常取得を最優先
-  if (marker && !marker.match(/^MIDDAY_/) && marker !== "GAP_FAILED") return 1;
+  if (marker && !marker.match(/^MIDDAY_/) && !isPmLockedMarker_(marker) && marker !== "GAP_FAILED") return 1;
 
   // GAP_REPAIRもMIDDAYより優先
   if (marker === "GAP_REPAIR") return 2;
@@ -7130,7 +7153,6 @@ function prepareOhlcvSheetForQuickRepairPause_(sheet, context, rowsAddedThisRun)
     context: context || "",
     rowsAddedThisRun: rowsAddedThisRun
   });
-  purgeInvalidOhlcvTimestampRows_(sheet, "quickRepair.pause." + String(context || ""), OHLCV_APPEND_INTEGRITY_SCAN_ROWS);
   SpreadsheetApp.flush();
 }
 
@@ -9176,15 +9198,10 @@ function finishOhlcvPhase4Light_(ohlcvSheet, todayKey, startTime) {
     return result;
   }
 
-  // 重すぎる全体チェックはしない。直近だけ最低限クリーニングする。
-  const invalidCleanup = purgeInvalidOhlcvTimestampRows_(
-    ohlcvSheet,
-    "phase4.light.before_recent_dedupe",
-    OHLCV_PHASE4_INVALID_SCAN_ROWS_LIGHT
-  );
+  const invalidCleanup = { deletedRows: 0, convertedRows: 0 };
 
-  result.invalidDeletedRows = invalidCleanup.deletedRows || 0;
-  result.invalidConvertedRows = invalidCleanup.convertedRows || 0;
+  result.invalidDeletedRows = 0;
+  result.invalidConvertedRows = 0;
 
   SpreadsheetApp.flush();
 
@@ -9226,15 +9243,10 @@ function finishOhlcvPhase4UltraLight_(ohlcvSheet, todayKey, startTime) {
 
   if (beforeLastRow <= 1) return result;
 
-  const invalidCleanup = purgeInvalidOhlcvTimestampRows_(
-    ohlcvSheet,
-    "phase4.ultra_light.timestamp_guard",
-    OHLCV_PHASE4_INVALID_SCAN_ROWS_LIGHT
-  );
   SpreadsheetApp.flush();
 
-  result.invalidDeletedRows = invalidCleanup.deletedRows || 0;
-  result.invalidConvertedRows = invalidCleanup.convertedRows || 0;
+  result.invalidDeletedRows = 0;
+  result.invalidConvertedRows = 0;
   result.afterLastRow = ohlcvSheet.getLastRow();
 
   debugLogToSheet_("ohlcv.phase4.ultra_light.complete", {
@@ -9301,6 +9313,7 @@ function deleteDuplicateOhlcvRowsRecentFast_(sheet, maxRows) {
 
   items.forEach(function(item) {
     if (isProtectedMiddayOhlcvMarker_(item.row[1])) return;
+    if (isPmLockedMarker_(item.row[1])) return;
     const best = bestByKey[item.key];
     if (!best) return;
 
@@ -10371,6 +10384,7 @@ function dedupeOhlcvDateBucket_(sheet, dateKey, maxDeleteRows) {
   const samples = [];
   items.forEach(item => {
     if (isProtectedMiddayOhlcvMarker_(item.row[1])) return;
+    if (isPmLockedMarker_(item.row[1])) return;
     const best = bestByKey[item.key];
     if (!best || item.sheetRow === best.sheetRow) return;
     deleteRows.push(item.sheetRow);
@@ -10521,6 +10535,7 @@ function dedupeOhlcvAllTargetDates_(sheet, targetDates, deadlineMs) {
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
     if (isProtectedMiddayOhlcvMarker_(item.row[1])) continue;
+    if (isPmLockedMarker_(item.row[1])) continue;
     const best = bestByKey[item.key];
     if (!best || item.sheetRow === best.sheetRow) continue;
     allDeleteRows.push(item.sheetRow);
@@ -10599,6 +10614,7 @@ function dedupeOhlcvEarlyRows_(sheet, targetDates, deadlineMs) {
     if (!bestByKey[key]) continue;
     const marker = String(earlyData[j][1] || "").trim();
     if (isProtectedMiddayOhlcvMarker_(marker)) continue;
+    if (isPmLockedMarker_(marker)) continue;
     allDeleteRows.push(2 + j);
     if (samples.length < 10) samples.push({ row: 2 + j, key });
   }
