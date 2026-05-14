@@ -5577,6 +5577,7 @@ const OHLCV_POST_REPAIR_LIMIT_MS = 90 * 1000;
 const OHLCV_POST_REPAIR_RESUME_AFTER_MS = 60 * 1000;
 const OHLCV_POST_REPAIR_SORT_MAX_ROWS = OHLCV_SAFE_SORT_MAX_ROWS;
 const OHLCV_POST_REPAIR_MIN_DEDUP_REMAINING_MS = 40000;
+const OHLCV_POST_REPAIR_SAFETY_AFTER_MS = 10 * 60 * 1000;
 const OHLCV_INTRADAY_STALE_SYMBOLS_KEY = "OHLCV_INTRADAY_STALE_SYMBOLS_V1";
 const OHLCV_INTRADAY_STALE_MAX_RECORDS = 200;
 const EVAL_OHLCV_COVERAGE_STATE_KEY = "EVAL_OHLCV_COVERAGE_REPAIR_STATE_V1";
@@ -9701,6 +9702,14 @@ function runOhlcvPostRepairCleanup_() {
   let lock = null;
   const startedAt = Date.now();
   let rawAlertVolumeMap = null;
+
+  // ★ ハードタイムアウト対策: 先にリトライトリガーをセット（600秒後）
+  // 正常完了時は completeOhlcvPostRepairCleanup_ 内で削除。GASに強制終了されても自動再開できる。
+  scheduleSingleOhlcvPostRepairCleanupTrigger_(OHLCV_POST_REPAIR_SAFETY_AFTER_MS);
+  writeProcessLog_("OHLCV_POST_REPAIR", `ポストリペアクリーンアップの再開トリガーを ${Math.round(OHLCV_POST_REPAIR_SAFETY_AFTER_MS / 1000)} 秒後に設定しました。`, {
+    handlerName: OHLCV_POST_REPAIR_CLEANUP_HANDLER,
+    delayMs: OHLCV_POST_REPAIR_SAFETY_AFTER_MS
+  });
 
   try {
     lock = LockService.getScriptLock();
