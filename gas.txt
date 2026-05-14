@@ -4704,10 +4704,6 @@ function buildOhlcvRequestPairForEndMillis_(tvSymbol, lastTs, runEndMillis, optS
   // lastTsがこれ以内なら、Yahooのrange=5dで十分。
   const RECENT_RANGE_DAYS = 5;
 
-  // 差分取得時の重ね取り日数。
-  // lastTsちょうどからではなく、少し前から取り直して欠損を吸収する。
-  const OVERLAP_DAYS = 3;
-
   if (optStartSec && optEndSec) {
     // 明示的に期間指定された場合は、その指定を最優先する。
     timeParam = `period1=${optStartSec}&period2=${optEndSec}`;
@@ -4750,9 +4746,8 @@ function buildOhlcvRequestPairForEndMillis_(tvSymbol, lastTs, runEndMillis, optS
 
     } else if (diffDays <= OHLCV_DEFAULT_LOOKBACK_DAYS) {
       // 最終取得が古いが、120日以内の場合。
-      // range=5dでは空白期間が生まれるため、lastTsの少し前から現在まで取得する。
-      const overlapSec = OVERLAP_DAYS * 24 * 60 * 60;
-      let p1 = lastTsSec - overlapSec;
+      // 最終タイムスタンプから現在まで取得する。空白が生まれた場合は後段のgap repairでカバーする。
+      let p1 = lastTsSec;
       const p1Limit = nowSec - lookbackSec;
       if (p1 < p1Limit) p1 = p1Limit;
 
@@ -4764,7 +4759,6 @@ function buildOhlcvRequestPairForEndMillis_(tvSymbol, lastTs, runEndMillis, optS
         debugLogToSheet_("fetchOHLCVRecent.gapFill", {
           symbol: tvSymbol,
           diffDays: diffDays.toFixed(1),
-          overlapDays: OVERLAP_DAYS,
           p1: p1,
           p2: p2
         });
