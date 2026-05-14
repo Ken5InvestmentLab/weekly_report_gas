@@ -10609,10 +10609,13 @@ function bulkCompactDeleteOhlcvRows_(sheet, state, deadlineMs) {
     if (keepRows.length > 0) {
       sheet.getRange(state.compactWriteRow, 1, keepRows.length, 8).setValues(keepRows);
     }
+    // 【安全順序】flush を先に行い、シートへの書き込みをコミットしてから状態を保存する。
+    // 逆順（saveState → flush）では、GASハードkill時に状態だけ進んでシート書き込みが
+    // 未コミットのまま再開されると、削除対象行がコンパクト済み領域に漏れる恐れがある。
     state.compactWriteRow += keepRows.length;
     state.compactReadRow += count;
-    saveOhlcvPostRepairCleanupState_(state);
     SpreadsheetApp.flush();
+    saveOhlcvPostRepairCleanupState_(state);
   }
 
   // コンパクト未完了 → 次回へ
@@ -10624,10 +10627,13 @@ function bulkCompactDeleteOhlcvRows_(sheet, state, deadlineMs) {
   }
 
   // 完了: 末尾を1回の deleteRows で削除
+  // 【安全】state.compactRangeEnd はコンパクト開始時のスナップショット値なので、
+  // GASハードkill後の再開でシートが既に縮小されている場合に deleteRows が範囲外で
+  // 例外を投げてエラーループになる。sheet.getLastRow() で実際の末尾を参照する。
   const tailStart = state.compactWriteRow;
-  const tailEnd = state.compactRangeEnd;
-  if (tailStart <= tailEnd) {
-    sheet.deleteRows(tailStart, tailEnd - tailStart + 1);
+  const currentLastRow = sheet.getLastRow();
+  if (tailStart <= currentLastRow) {
+    sheet.deleteRows(tailStart, currentLastRow - tailStart + 1);
     SpreadsheetApp.flush();
   }
   clearOhlcvDedupDeleteRows_();
