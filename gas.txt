@@ -10580,7 +10580,6 @@ function bulkCompactDeleteOhlcvRows_(sheet, state, deadlineMs) {
   if (tailStart <= tailEnd) {
     sheet.deleteRows(tailStart, tailEnd - tailStart + 1);
     SpreadsheetApp.flush();
-    totalDeleted += tailEnd - tailStart + 1;
   }
   clearOhlcvDedupDeleteRows_();
   state.compactReadRow = null;
