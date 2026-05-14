@@ -5747,8 +5747,9 @@ const OHLCV_POST_REPAIR_MAX_DELETE_ROWS = 2000;
 const OHLCV_POST_REPAIR_LIMIT_MS = 180 * 1000;
 // EARLY_DEDUP専用の長いタイムリミット。tail再構築（40k行・2〜4分）を毎回メモリ内で行うため通常の1.7倍を確保
 const OHLCV_POST_REPAIR_EARLY_DEDUP_LIMIT_MS = 300 * 1000;
-// EARLY_DEDUP: tail構築後に early scan を行うための最低残り時間（tail read後にscanの余裕を確保）
-const OHLCV_POST_REPAIR_EARLY_SCAN_MIN_REMAINING_MS = 90 * 1000;
+// EARLY_DEDUP: tail構築後に early scan を開始するための最低残り時間。Phase2はタイムアウトしても
+// earlyDedupEarlyCursor で再開できるため1チャンク分の余裕は不要。10sあれば必ず開始できる
+const OHLCV_POST_REPAIR_EARLY_SCAN_MIN_REMAINING_MS = 10 * 1000;
 const OHLCV_POST_REPAIR_RESUME_AFTER_MS = 60 * 1000;
 const OHLCV_POST_REPAIR_SORT_MAX_ROWS = OHLCV_SAFE_SORT_MAX_ROWS;
 const OHLCV_POST_REPAIR_MIN_DEDUP_REMAINING_MS = 40000;
