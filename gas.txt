@@ -9554,7 +9554,9 @@ function runOhlcvPostMaintenanceCleanup_() {
       throw new Error("Missing sheet: " + CONFIG.OHLCV_SHEET);
     }
 
-    let step = props.getProperty(OHLCV_POST_CLEANUP_STEP_KEY) || "TS";
+    // TS ステップは廃止。既存の TS 状態をそのまま引き継がず MAIN_SCAN に読み替える
+    const rawStep = props.getProperty(OHLCV_POST_CLEANUP_STEP_KEY) || "MAIN_SCAN";
+    let step = rawStep === "TS" ? "MAIN_SCAN" : rawStep;
     let cursor = safeParseInt_(props.getProperty(OHLCV_POST_CLEANUP_CURSOR_KEY), sh.getLastRow());
     const startRow = safeParseInt_(props.getProperty(OHLCV_POST_CLEANUP_START_ROW_KEY), Math.max(2, sh.getLastRow() - OHLCV_POST_CLEANUP_SCAN_ROWS + 1));
     const todayKey = props.getProperty(OHLCV_POST_CLEANUP_TODAY_KEY) || getOhlcvBusinessDateKey_();
@@ -9566,6 +9568,11 @@ function runOhlcvPostMaintenanceCleanup_() {
 
     while (Date.now() - startedAt < OHLCV_POST_CLEANUP_LIMIT_MS) {
       step = props.getProperty(OHLCV_POST_CLEANUP_STEP_KEY) || step;
+      // TS ステップは廃止: MAIN_SCAN に読み替え
+      if (step === "TS") {
+        step = "MAIN_SCAN";
+        props.setProperty(OHLCV_POST_CLEANUP_STEP_KEY, "MAIN_SCAN");
+      }
       cursor = safeParseInt_(props.getProperty(OHLCV_POST_CLEANUP_CURSOR_KEY), cursor);
 
       if (cursor < startRow) {
@@ -9920,7 +9927,7 @@ function scheduleOhlcvPostRepairCleanup_(quickRepairSummary) {
   const businessDate = getOhlcvBusinessDateKey_();
   const state = {
     version: OHLCV_POST_REPAIR_CLEANUP_VERSION,
-    step: "TS",
+    step: "LOCK_AM",  // TS ステップはスキップ（appendOhlcvRowsToSheetDetailed_ で書き込み時に正規化済みのため不要）
     businessDate: businessDate,
     scanStartRow: startRow,
     lastRow: lastRow,
@@ -10007,11 +10014,18 @@ function runOhlcvPostRepairCleanup_() {
       }
 
       if (state.step === "TS") {
-        const r = processOhlcvPostRepairTimestampChunk_(sh, state.scanStartRow, state.cursor);
-        state.cursor = r.nextCursor;
-        state.totals.convertedRows += r.convertedRows || 0;
+        // TS ステップはスキップ:
+        // - appendOhlcvRowsToSheetDetailed_ が書き込み時に正規化済み
+        // - normalizeOhlcvTimestamp_ が HH:mm / HH:mm:ss / Date / シリアル値をすべて Date に変換
+        // - sheet.sort(1, true) は Date オブジェクトを正しく昇順ソートする
+        // - 全行スキャン（238,000行超）で 40分以上消費するため除去
+        state = advanceOhlcvPostRepairCleanupStep_(state, sh);
         state.updatedAt = new Date().toISOString();
         saveOhlcvPostRepairCleanupState_(state);
+        writeProcessLog_("OHLCV_POST_REPAIR", "TS ステップをスキップして次ステップへ進みます。", { nextStep: state.step });
+        if (state.step === "DONE") {
+          return completeOhlcvPostRepairCleanup_(state);
+        }
         continue;
       }
 
