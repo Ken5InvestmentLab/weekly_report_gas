@@ -10679,7 +10679,7 @@ function dedupeOhlcvEarlyRows_(sheet, targetDates, deadlineMs) {
 
   // tailを再読み込みしてbestByKeyを再構築（DEDUP_DATES削除後の状態を反映）
   const tailData = sheet.getRange(readFromRow, 1, readRows, 4).getValues();
-  if (deadlineMs && Date.now() > deadlineMs - 90000) return { timedOut: true };
+  if (deadlineMs && deadlineMs - Date.now() < 20000) return { timedOut: true };
 
   const bestByKey = {};
   for (let i = 0; i < tailData.length; i++) {
@@ -10699,14 +10699,14 @@ function dedupeOhlcvEarlyRows_(sheet, targetDates, deadlineMs) {
     }
   }
 
-  if (deadlineMs && Date.now() > deadlineMs - 60000) return { timedOut: true };
+  if (deadlineMs && deadlineMs - Date.now() < 15000) return { timedOut: true };
 
   // earlyゾーン（rows 2〜readFromRow-1）をスキャン
   const earlyRows = readFromRow - 2;
   console.log("[OHLCV_POST_REPAIR] Scanning early rows for cross-boundary duplicates.", { earlyRows, readFromRow });
   const earlyData = sheet.getRange(2, 1, earlyRows, 3).getValues();
 
-  if (deadlineMs && Date.now() > deadlineMs - 30000) return { timedOut: true };
+  if (deadlineMs && deadlineMs - Date.now() < 5000) return { timedOut: true };
 
   const allDeleteRows = [];
   const samples = [];
