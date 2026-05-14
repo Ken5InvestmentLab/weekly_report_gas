@@ -10266,15 +10266,21 @@ function processOhlcvPostRepairTimestampChunk_(sheet, scanStartRow, cursor) {
 }
 
 function processOhlcvPostRepairProtectMiddayAmChunk_(sheet, scanStartRow, cursor, businessDate, rawAlertVolumeMap) {
-  const endRow = Math.min(cursor, sheet.getLastRow());
-  if (endRow < scanStartRow) return { nextCursor: scanStartRow - 1, protectedRows: 0 };
+  // 一括読み込み方式:
+  // 当日 MIDDAY_ 行はシート末尾付近にしか存在しない（当日データ = ソート済みシートの最末尾）。
+  // 旧来の 1,200 行チャンク × 全行スキャンから、末尾 OHLCV_POST_REPAIR_DEDUP_READ_ROWS 行の
+  // 単発読み込みに変更することで、238,000 行を 53 秒かけてスキャンする処理を数秒に圧縮する。
+  const lastRow = sheet.getLastRow();
+  const safeScanStart = Math.max(2, Number(scanStartRow || 2));
+  if (lastRow < safeScanStart) return { nextCursor: safeScanStart - 1, protectedRows: 0 };
 
   const dateKey = normalizeBusinessDateKey_(businessDate);
   const middayMarker = makeMiddayRefreshId_(dateKey);
   const protectedMarker = makeProtectedMiddayRefreshId_(dateKey);
-  const startRow = Math.max(scanStartRow, endRow - OHLCV_POST_REPAIR_CLEANUP_CHUNK_ROWS + 1);
-  const numRows = endRow - startRow + 1;
-  const values = sheet.getRange(startRow, 1, numRows, 8).getValues();
+
+  const readStart = Math.max(safeScanStart, lastRow - OHLCV_POST_REPAIR_DEDUP_READ_ROWS + 1);
+  const numRows = lastRow - readStart + 1;
+  const values = sheet.getRange(readStart, 1, numRows, 8).getValues();
   const markerValues = values.map(row => [row[1]]);
   let protectedRows = 0;
   const samples = [];
@@ -10291,34 +10297,41 @@ function processOhlcvPostRepairProtectMiddayAmChunk_(sheet, scanStartRow, cursor
     if (Math.round(toSafeVolumeNumber_(row[7])) !== Math.round(Number(rawVolume))) return;
     markerValues[index][0] = protectedMarker;
     protectedRows++;
-    if (samples.length < 5) samples.push({ row: startRow + index, symbol: symbol, volume: row[7] });
+    if (samples.length < 5) samples.push({ row: readStart + index, symbol: symbol, volume: row[7] });
   });
 
   if (protectedRows > 0) {
-    sheet.getRange(startRow, 2, numRows, 1).setValues(markerValues);
+    sheet.getRange(readStart, 2, numRows, 1).setValues(markerValues);
     SpreadsheetApp.flush();
     writeProcessLog_("OHLCV_POST_REPAIR", "Protected raw-volume AM rows from later dedupe/delete.", {
       businessDate: dateKey,
-      startRow: startRow,
-      endRow: endRow,
+      readStart: readStart,
+      lastRow: lastRow,
       protectedRows: protectedRows,
       samples: samples
     });
   }
 
-  return { nextCursor: startRow - 1, protectedRows: protectedRows };
+  // nextCursor = safeScanStart - 1 を返すことで、呼び出し元の状態機械が即座に次のステップへ進む
+  return { nextCursor: safeScanStart - 1, protectedRows: protectedRows };
 }
 
 function processOhlcvPostRepairCollectDatesChunk_(sheet, state) {
+  // 一括読み込み方式:
+  // GAP_REPAIR / MIDDAY_ マーカーは quickRepair の修復範囲（直近 daysBack 日）にしか存在しない。
+  // quickRepair は末尾 QUICK_REPAIR_SCAN_MAX_ROWS(=90,000) 行から対象を探して末尾に追記するため、
+  // DEDUP と同じスキャン範囲（末尾 OHLCV_POST_REPAIR_DEDUP_READ_ROWS 行）を単発一括読み込みすれば十分。
+  // 旧来の 1,200 行チャンク × 全行スキャン（238,000 行・130 分超）から単発 API 1 回（数秒）に圧縮する。
   const scanStartRow = Number(state.scanStartRow || 2);
-  const endRow = Math.min(Number(state.cursor || sheet.getLastRow()), sheet.getLastRow());
-  if (endRow < scanStartRow) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < scanStartRow) {
     return { nextCursor: scanStartRow - 1, targetDates: normalizePostRepairTargetDates_(state.targetDates, state.businessDate) };
   }
 
-  const startRow = Math.max(scanStartRow, endRow - OHLCV_POST_REPAIR_CLEANUP_CHUNK_ROWS + 1);
-  const numRows = endRow - startRow + 1;
-  const values = sheet.getRange(startRow, 1, numRows, 3).getValues();
+  const readStart = Math.max(scanStartRow, lastRow - OHLCV_POST_REPAIR_DEDUP_READ_ROWS + 1);
+  const numRows = lastRow - readStart + 1;
+  const values = sheet.getRange(readStart, 1, numRows, 3).getValues();
+
   const dateSet = {};
   (state.targetDates || []).forEach(dateKey => { dateSet[dateKey] = true; });
 
@@ -10330,8 +10343,9 @@ function processOhlcvPostRepairCollectDatesChunk_(sheet, state) {
     dateSet[formatYmd_(ts)] = true;
   });
 
+  // nextCursor = scanStartRow - 1 を返すことで、呼び出し元の状態機械が即座に次のステップへ進む
   return {
-    nextCursor: startRow - 1,
+    nextCursor: scanStartRow - 1,
     targetDates: normalizePostRepairTargetDates_(Object.keys(dateSet), state.businessDate)
   };
 }
