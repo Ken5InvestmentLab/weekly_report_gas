@@ -5766,8 +5766,7 @@ const OHLCV_DEDUP_CHUNK_ITEMS = 1200; // 1チャンク~8.4KB（9KB上限以内�
 const OHLCV_POST_REPAIR_COMPACT_CHUNK_ROWS = 2000;
 // コンパクト削除のデッドライン安全マージン（ms）。getValues+setValues+flush+saveStateで余裕を持たせる
 const OHLCV_POST_REPAIR_COMPACT_MARGIN_MS = 35000;
-// EARLY_DEDUP の早期ゾーン読み込みチャンク行数（165k 行を 1 ショットで読むと API ハードタイムアウト）
-const OHLCV_POST_REPAIR_EARLY_SCAN_CHUNK_ROWS = 30000;
+
 const OHLCV_INTRADAY_STALE_SYMBOLS_KEY = "OHLCV_INTRADAY_STALE_SYMBOLS_V1";
 const OHLCV_INTRADAY_STALE_MAX_RECORDS = 200;
 const EVAL_OHLCV_COVERAGE_STATE_KEY = "EVAL_OHLCV_COVERAGE_REPAIR_STATE_V1";
@@ -10660,15 +10659,13 @@ function dedupeOhlcvAllTargetDates_(sheet, targetDates, deadlineMs) {
   }
 
   // 末尾OHLCV_POST_REPAIR_DEDUP_READ_ROWS行だけ読む。全行=1.78Mセルで6分超タイムアウト
-  // getValues()は1回にまとめて A〜H（8列）を一括取得し API ラウンドトリップを削減
+
   const numDataRows = lastRow - 1;
   const readRows = Math.min(numDataRows, OHLCV_POST_REPAIR_DEDUP_READ_ROWS);
   const readFromRow = lastRow - readRows + 1;
 
   const t0 = Date.now();
-  const rows = sheet.getRange(readFromRow, 1, readRows, 8).getValues();
-  if (deadlineMs && deadlineMs - Date.now() < OHLCV_POST_REPAIR_DEDUP_TAIL_MARGIN_MS) {
-    writeProcessLog_("OHLCV_POST_REPAIR", "Multi-date dedup scan timed out after getValues().", {
+
       readRows: readRows, elapsedMs: Date.now() - t0
     });
     return { timedOut: true, allDeleteRows: [], duplicateRows: 0, scannedRows: 0, totalRows: numDataRows };
@@ -10689,22 +10686,6 @@ function dedupeOhlcvAllTargetDates_(sheet, targetDates, deadlineMs) {
     }
     scanned = i + 1;
 
-    // 高速プリフィルタ: テキスト形式 "yyyy/MM/dd HH:mm" の先頭10文字で dateSet に照合し、
-    // マッチしない行は normalizeOhlcvTimestamp_（regex+Date parse）を呼ばずにスキップ
-    const rawTs = rows[i][0];
-    let quickDate = null;
-    if (rawTs instanceof Date) {
-      const jstMs = rawTs.getTime() + 9 * 3600 * 1000;
-      const d = new Date(jstMs);
-      quickDate = d.getUTCFullYear() + "-" + String(d.getUTCMonth() + 1).padStart(2, "0") + "-" + String(d.getUTCDate()).padStart(2, "0");
-    } else if (typeof rawTs === "string") {
-      const prefix = rawTs.substring(0, 10).replace(/\//g, "-");
-      if (prefix.length === 10 && prefix.charCodeAt(4) === 45) quickDate = prefix;
-    }
-    if (!quickDate || !dateSet[quickDate]) continue;
-
-    // プリフィルタ通過行のみ正規解析
-    const ts = normalizeOhlcvTimestamp_(rawTs);
     if (!ts) continue;
     const dateStr = formatYmd_(ts);
     if (!dateSet[dateStr]) continue;
@@ -10727,6 +10708,14 @@ function dedupeOhlcvAllTargetDates_(sheet, targetDates, deadlineMs) {
   const allDeleteRows = [];
   const samples = [];
   for (let i = 0; i < items.length; i++) {
+    if ((i % OHLCV_POST_REPAIR_DEDUP_TIMECHECK_EVERY) === 0 && i > 0) {
+      if (deadlineMs && deadlineMs - Date.now() < OHLCV_POST_REPAIR_DEDUP_TAIL_MARGIN_MS) {
+        writeProcessLog_("OHLCV_POST_REPAIR", "Multi-date dedup scan timed out during delete-candidate pass.", {
+          processedItems: i, totalItems: items.length, elapsedMs: Date.now() - t0
+        });
+        return { timedOut: true, allDeleteRows: [], duplicateRows: 0, scannedRows: scanned, totalRows: numDataRows };
+      }
+    }
     const item = items[i];
     if (isProtectedMiddayOhlcvMarker_(item.row[1])) continue;
     if (isPmLockedMarker_(item.row[1])) continue;
