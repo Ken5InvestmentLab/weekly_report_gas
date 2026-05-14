@@ -5766,6 +5766,7 @@ const OHLCV_DEDUP_CHUNK_ITEMS = 1200; // 1チャンク~8.4KB（9KB上限以内�
 const OHLCV_POST_REPAIR_COMPACT_CHUNK_ROWS = 2000;
 // コンパクト削除のデッドライン安全マージン（ms）。getValues+setValues+flush+saveStateで余裕を持たせる
 const OHLCV_POST_REPAIR_COMPACT_MARGIN_MS = 35000;
+
 const OHLCV_INTRADAY_STALE_SYMBOLS_KEY = "OHLCV_INTRADAY_STALE_SYMBOLS_V1";
 const OHLCV_INTRADAY_STALE_MAX_RECORDS = 200;
 const EVAL_OHLCV_COVERAGE_STATE_KEY = "EVAL_OHLCV_COVERAGE_REPAIR_STATE_V1";
@@ -10172,6 +10173,11 @@ function runOhlcvPostRepairCleanup_() {
         if (OHLCV_POST_REPAIR_LIMIT_MS - (Date.now() - startedAt) < OHLCV_POST_REPAIR_MIN_DEDUP_REMAINING_MS) break;
 
         const earlyDeadlineMs = startedAt + OHLCV_POST_REPAIR_LIMIT_MS;
+        writeProcessLog_("OHLCV_POST_REPAIR", "Early-dedup scan starting.", {
+          targetDates: state.targetDates.length,
+          lastRow: sh.getLastRow(),
+          remainingMs: earlyDeadlineMs - Date.now()
+        });
         const er = dedupeOhlcvEarlyRows_(sh, state.targetDates, earlyDeadlineMs);
         if (er.timedOut) {
           state.updatedAt = new Date().toISOString();
@@ -10602,10 +10608,13 @@ function bulkCompactDeleteOhlcvRows_(sheet, state, deadlineMs) {
     if (keepRows.length > 0) {
       sheet.getRange(state.compactWriteRow, 1, keepRows.length, 8).setValues(keepRows);
     }
+    // 【安全順序】flush を先に行い、シートへの書き込みをコミットしてから状態を保存する。
+    // 逆順（saveState → flush）では、GASハードkill時に状態だけ進んでシート書き込みが
+    // 未コミットのまま再開されると、削除対象行がコンパクト済み領域に漏れる恐れがある。
     state.compactWriteRow += keepRows.length;
     state.compactReadRow += count;
-    saveOhlcvPostRepairCleanupState_(state);
     SpreadsheetApp.flush();
+    saveOhlcvPostRepairCleanupState_(state);
   }
 
   // コンパクト未完了 → 次回へ
@@ -10617,10 +10626,13 @@ function bulkCompactDeleteOhlcvRows_(sheet, state, deadlineMs) {
   }
 
   // 完了: 末尾を1回の deleteRows で削除
+  // 【安全】state.compactRangeEnd はコンパクト開始時のスナップショット値なので、
+  // GASハードkill後の再開でシートが既に縮小されている場合に deleteRows が範囲外で
+  // 例外を投げてエラーループになる。sheet.getLastRow() で実際の末尾を参照する。
   const tailStart = state.compactWriteRow;
-  const tailEnd = state.compactRangeEnd;
-  if (tailStart <= tailEnd) {
-    sheet.deleteRows(tailStart, tailEnd - tailStart + 1);
+  const currentLastRow = sheet.getLastRow();
+  if (tailStart <= currentLastRow) {
+    sheet.deleteRows(tailStart, currentLastRow - tailStart + 1);
     SpreadsheetApp.flush();
   }
   clearOhlcvDedupDeleteRows_();
@@ -10647,22 +10659,13 @@ function dedupeOhlcvAllTargetDates_(sheet, targetDates, deadlineMs) {
   }
 
   // 末尾OHLCV_POST_REPAIR_DEDUP_READ_ROWS行だけ読む。全行=1.78Mセルで6分超タイムアウト
-  // 必要列(A,B,C=1-3、H=8)だけ2回に分けて読む
+
   const numDataRows = lastRow - 1;
   const readRows = Math.min(numDataRows, OHLCV_POST_REPAIR_DEDUP_READ_ROWS);
   const readFromRow = lastRow - readRows + 1;
 
   const t0 = Date.now();
-  const colsABC = sheet.getRange(readFromRow, 1, readRows, 3).getValues();
-  if (deadlineMs && deadlineMs - Date.now() < OHLCV_POST_REPAIR_DEDUP_TAIL_MARGIN_MS) {
-    writeProcessLog_("OHLCV_POST_REPAIR", "Multi-date dedup scan timed out after first getValues().", {
-      readRows: readRows, elapsedMs: Date.now() - t0
-    });
-    return { timedOut: true, allDeleteRows: [], duplicateRows: 0, scannedRows: 0, totalRows: numDataRows };
-  }
-  const colH = sheet.getRange(readFromRow, 8, readRows, 1).getValues();
-  if (deadlineMs && deadlineMs - Date.now() < OHLCV_POST_REPAIR_DEDUP_TAIL_MARGIN_MS) {
-    writeProcessLog_("OHLCV_POST_REPAIR", "Multi-date dedup scan timed out after second getValues().", {
+
       readRows: readRows, elapsedMs: Date.now() - t0
     });
     return { timedOut: true, allDeleteRows: [], duplicateRows: 0, scannedRows: 0, totalRows: numDataRows };
@@ -10682,16 +10685,16 @@ function dedupeOhlcvAllTargetDates_(sheet, targetDates, deadlineMs) {
       }
     }
     scanned = i + 1;
-    const ts = normalizeOhlcvTimestamp_(colsABC[i][0]);
+
     if (!ts) continue;
     const dateStr = formatYmd_(ts);
     if (!dateSet[dateStr]) continue;
-    const symbol = String(colsABC[i][2] || "").trim();
+    const symbol = String(rows[i][2] || "").trim();
     if (!symbol) continue;
     const sheetRow = readFromRow + i;
     const key = formatOhlcvTimestampTextForSheet_(ts) + "|" + symbol;
     // compareOhlcvDuplicatePriority_ は row[1](alert_id) と row[7](volume) だけ使う
-    const valueRow = [colsABC[i][0], colsABC[i][1], colsABC[i][2], null, null, null, null, colH[i][0]];
+    const valueRow = [rows[i][0], rows[i][1], rows[i][2], null, null, null, null, rows[i][7]];
     const item = { key: key, row: valueRow, sheetRow: sheetRow };
     items.push(item);
     const current = bestByKey[key];
@@ -10727,6 +10730,7 @@ function dedupeOhlcvAllTargetDates_(sheet, targetDates, deadlineMs) {
     totalRows: numDataRows,
     scannedRows: readRows,
     readFromRow: readFromRow,
+    matchedRows: items.length,
     duplicateRows: allDeleteRows.length,
     elapsedMs: Date.now() - t0,
     samples: samples
@@ -10759,7 +10763,18 @@ function dedupeOhlcvEarlyRows_(sheet, targetDates, deadlineMs) {
   const bestByKey = {};
   for (let i = 0; i < tailData.length; i++) {
     const sheetRow = readFromRow + i;
-    const ts = normalizeOhlcvTimestamp_(tailData[i][0]);
+    // 高速プリフィルタ: dateSet 非マッチ行は normalizeOhlcvTimestamp_ をスキップ
+    const rawTs0 = tailData[i][0];
+    let qd0 = null;
+    if (rawTs0 instanceof Date) {
+      const d0 = new Date(rawTs0.getTime() + 9 * 3600 * 1000);
+      qd0 = d0.getUTCFullYear() + "-" + String(d0.getUTCMonth() + 1).padStart(2, "0") + "-" + String(d0.getUTCDate()).padStart(2, "0");
+    } else if (typeof rawTs0 === "string") {
+      const p0 = rawTs0.substring(0, 10).replace(/\//g, "-");
+      if (p0.length === 10 && p0.charCodeAt(4) === 45) qd0 = p0;
+    }
+    if (!qd0 || !dateSet[qd0]) continue;
+    const ts = normalizeOhlcvTimestamp_(rawTs0);
     if (!ts) continue;
     if (!dateSet[formatYmd_(ts)]) continue;
     const symbol = String(tailData[i][2] || "").trim();
@@ -10776,40 +10791,73 @@ function dedupeOhlcvEarlyRows_(sheet, targetDates, deadlineMs) {
 
   if (deadlineMs && deadlineMs - Date.now() < 15000) return { timedOut: true };
 
-  // earlyゾーン（rows 2〜readFromRow-1）をスキャン
-  const earlyRows = readFromRow - 2;
-  console.log("[OHLCV_POST_REPAIR] Scanning early rows for cross-boundary duplicates.", { earlyRows, readFromRow });
-  const earlyData = sheet.getRange(2, 1, earlyRows, 3).getValues();
-
-  if (deadlineMs && deadlineMs - Date.now() < 5000) return { timedOut: true };
+  // earlyゾーン（rows 2〜readFromRow-1）をチャンクスキャン
+  // 1回のgetValues()で165k×3列=495kセルを読むとAPIハードタイムアウトするため
+  // OHLCV_POST_REPAIR_EARLY_SCAN_CHUNK_ROWS (30k) 行ずつ読み込む
+  const earlyEnd = readFromRow - 1;
+  const earlyRowsTotal = earlyEnd - 1; // rows 2..earlyEnd
+  const CHUNK = OHLCV_POST_REPAIR_EARLY_SCAN_CHUNK_ROWS;
+  const t0 = Date.now();
+  console.log("[OHLCV_POST_REPAIR] Scanning early rows in chunks for cross-boundary duplicates.", { earlyRowsTotal, readFromRow, chunkSize: CHUNK });
 
   const allDeleteRows = [];
   const samples = [];
-  for (let j = 0; j < earlyRows; j++) {
-    const ts = normalizeOhlcvTimestamp_(earlyData[j][0]);
-    if (!ts) continue;
-    if (!dateSet[formatYmd_(ts)]) continue;
-    const symbol = String(earlyData[j][2] || "").trim();
-    if (!symbol) continue;
-    const key = formatOhlcvTimestampTextForSheet_(ts) + "|" + symbol;
-    if (!bestByKey[key]) continue;
-    const marker = String(earlyData[j][1] || "").trim();
-    if (isProtectedMiddayOhlcvMarker_(marker)) continue;
-    if (isPmLockedMarker_(marker)) continue;
-    allDeleteRows.push(2 + j);
-    if (samples.length < 10) samples.push({ row: 2 + j, key });
+  let cursor = 2;
+  let scannedTotal = 0;
+
+  while (cursor <= earlyEnd) {
+    if (deadlineMs && deadlineMs - Date.now() < 20000) {
+      writeProcessLog_("OHLCV_POST_REPAIR", "Early-dedup scan timed out between chunks.", {
+        scannedTotal: scannedTotal,
+        earlyRowsTotal: earlyRowsTotal,
+        cursor: cursor,
+        partialDuplicateRows: allDeleteRows.length,
+        elapsedMs: Date.now() - t0
+      });
+      return { timedOut: true, allDeleteRows: [], duplicateRows: 0 };
+    }
+    const count = Math.min(CHUNK, earlyEnd - cursor + 1);
+    const chunkData = sheet.getRange(cursor, 1, count, 3).getValues();
+    for (let j = 0; j < count; j++) {
+      // 高速プリフィルタ
+      const rawTsE = chunkData[j][0];
+      let qdE = null;
+      if (rawTsE instanceof Date) {
+        const dE = new Date(rawTsE.getTime() + 9 * 3600 * 1000);
+        qdE = dE.getUTCFullYear() + "-" + String(dE.getUTCMonth() + 1).padStart(2, "0") + "-" + String(dE.getUTCDate()).padStart(2, "0");
+      } else if (typeof rawTsE === "string") {
+        const pE = rawTsE.substring(0, 10).replace(/\//g, "-");
+        if (pE.length === 10 && pE.charCodeAt(4) === 45) qdE = pE;
+      }
+      if (!qdE || !dateSet[qdE]) continue;
+      const ts = normalizeOhlcvTimestamp_(rawTsE);
+      if (!ts) continue;
+      if (!dateSet[formatYmd_(ts)]) continue;
+      const symbol = String(chunkData[j][2] || "").trim();
+      if (!symbol) continue;
+      const key = formatOhlcvTimestampTextForSheet_(ts) + "|" + symbol;
+      if (!bestByKey[key]) continue;
+      const marker = String(chunkData[j][1] || "").trim();
+      if (isProtectedMiddayOhlcvMarker_(marker)) continue;
+      if (isPmLockedMarker_(marker)) continue;
+      allDeleteRows.push(cursor + j);
+      if (samples.length < 10) samples.push({ row: cursor + j, key });
+    }
+    scannedTotal += count;
+    cursor += count;
   }
 
   writeProcessLog_("OHLCV_POST_REPAIR", "Early-dedup scan completed.", {
     targetDates: (targetDates || []).length,
     totalRows: numDataRows,
-    earlyRows: earlyRows,
+    earlyRows: earlyRowsTotal,
     readFromRow: readFromRow,
     duplicateRows: allDeleteRows.length,
+    elapsedMs: Date.now() - t0,
     samples: samples
   });
 
-  return { timedOut: false, totalRows: numDataRows, earlyRows: earlyRows, duplicateRows: allDeleteRows.length, allDeleteRows: allDeleteRows };
+  return { timedOut: false, totalRows: numDataRows, earlyRows: earlyRowsTotal, duplicateRows: allDeleteRows.length, allDeleteRows: allDeleteRows };
 }
 
 function tryOhlcvPostRepairSortOnce_(sheet) {
