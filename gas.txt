@@ -1773,6 +1773,13 @@ const MIDDAY_REFRESH_ID_KEY = "OHLCV_MIDDAY_REFRESH_ID";
 const MIDDAY_RESUME_HANDLER = "resumeOHLCVFetchMidday";
 const MIDDAY_POSTPROCESS_HANDLER = "postprocessMiddayOhlcv";
 const MIDDAY_POSTPROCESS_PENDING_KEY = "OHLCV_MIDDAY_POSTPROCESS_PENDING";
+const MIDDAY_POSTPROCESS_STATE_KEY = "OHLCV_MIDDAY_POSTPROCESS_STATE_V1";
+const MIDDAY_POSTPROCESS_STATE_VERSION = 1;
+const MIDDAY_POSTPROCESS_SCAN_ROWS = OHLCV_APPEND_INTEGRITY_SCAN_ROWS;
+const MIDDAY_POSTPROCESS_CHUNK_ROWS = 5000;
+const MIDDAY_POSTPROCESS_TIME_LIMIT_MS = 4 * 60 * 1000;
+const MIDDAY_POSTPROCESS_MIN_REMAINING_MS = 45 * 1000;
+const MIDDAY_POSTPROCESS_RESUME_AFTER_MS = 60 * 1000;
 const MIDDAY_DEDUPE_GUARD_MS = 120 * 1000;
 const MIDDAY_FULL_BACKFILL_SYMBOLS_KEY = "OHLCV_MIDDAY_FULL_BACKFILL_SYMBOLS";
 const MIDDAY_HISTORY_COVERAGE_SCAN_MAX_ROWS = 250000;
@@ -2089,7 +2096,7 @@ function fetchOHLCVForNewAlertsMidday() {
 
       // 後処理だけ未完なら、後処理トリガーを再予約する。
       if (errData.hasPostprocessPending) {
-        scheduleMiddayOhlcvPostprocess_();
+        scheduleMiddayOhlcvPostprocess_({ keepState: true });
       }
     }
 
@@ -2517,25 +2524,137 @@ function appendAndNormalizeMiddayOhlcvRows_(sheet, rows, context) {
   return appended;
 }
 
-function scheduleMiddayOhlcvPostprocess_() {
+function scheduleMiddayOhlcvPostprocess_(options) {
+  const opts = options || {};
   const props = PropertiesService.getScriptProperties();
   props.setProperty(MIDDAY_POSTPROCESS_PENDING_KEY, new Date().toISOString());
+  if (opts.keepState !== true) props.deleteProperty(MIDDAY_POSTPROCESS_STATE_KEY);
 
   deleteTriggersByHandler_(MIDDAY_POSTPROCESS_HANDLER);
 
   ScriptApp.newTrigger(MIDDAY_POSTPROCESS_HANDLER)
     .timeBased()
-    .after(60 * 1000)
+    .after(MIDDAY_POSTPROCESS_RESUME_AFTER_MS)
     .create();
 
   writeProcessLog_("OHLCV-AM", "13:30先行取得の後処理を別トリガーに分離して予約しました。", {
     handlerName: MIDDAY_POSTPROCESS_HANDLER,
-    delayMs: 60 * 1000
+    delayMs: MIDDAY_POSTPROCESS_RESUME_AFTER_MS
   });
+}
+
+function buildMiddayOhlcvPostprocessState_(sheet) {
+  const lastRow = sheet.getLastRow();
+  const scanRows = lastRow > 1
+    ? Math.min(MIDDAY_POSTPROCESS_SCAN_ROWS, lastRow - 1)
+    : 0;
+
+  return {
+    version: MIDDAY_POSTPROCESS_STATE_VERSION,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    originalLastRow: lastRow,
+    nextEndRow: lastRow,
+    remainingRows: scanRows,
+    scanRows: scanRows,
+    chunks: 0,
+    totals: {
+      scannedRows: 0,
+      convertedRows: 0,
+      deletedRows: 0,
+      repairSymbols: 0
+    }
+  };
+}
+
+function loadMiddayOhlcvPostprocessState_(sheet) {
+  const props = PropertiesService.getScriptProperties();
+  try {
+    const raw = props.getProperty(MIDDAY_POSTPROCESS_STATE_KEY);
+    if (!raw) return buildMiddayOhlcvPostprocessState_(sheet);
+
+    const state = JSON.parse(raw);
+    if (!state || Number(state.version) !== MIDDAY_POSTPROCESS_STATE_VERSION) {
+      return buildMiddayOhlcvPostprocessState_(sheet);
+    }
+
+    if (!state.totals) state.totals = {};
+    state.nextEndRow = Math.max(1, Number(state.nextEndRow) || 1);
+    state.remainingRows = Math.max(0, Number(state.remainingRows) || 0);
+    state.scanRows = Math.max(0, Number(state.scanRows) || state.remainingRows);
+    state.chunks = Math.max(0, Number(state.chunks) || 0);
+    state.totals.scannedRows = Math.max(0, Number(state.totals.scannedRows) || 0);
+    state.totals.convertedRows = Math.max(0, Number(state.totals.convertedRows) || 0);
+    state.totals.deletedRows = Math.max(0, Number(state.totals.deletedRows) || 0);
+    state.totals.repairSymbols = Math.max(0, Number(state.totals.repairSymbols) || 0);
+
+    const currentLastRow = sheet.getLastRow();
+    if (state.nextEndRow > currentLastRow) state.nextEndRow = currentLastRow;
+
+    return state;
+  } catch (e) {
+    return buildMiddayOhlcvPostprocessState_(sheet);
+  }
+}
+
+function saveMiddayOhlcvPostprocessState_(state) {
+  state.updatedAt = new Date().toISOString();
+  PropertiesService.getScriptProperties().setProperty(MIDDAY_POSTPROCESS_STATE_KEY, JSON.stringify(state));
+}
+
+function clearMiddayOhlcvPostprocessState_() {
+  const props = PropertiesService.getScriptProperties();
+  props.deleteProperty(MIDDAY_POSTPROCESS_PENDING_KEY);
+  props.deleteProperty(MIDDAY_POSTPROCESS_STATE_KEY);
+  deleteTriggersByHandler_(MIDDAY_POSTPROCESS_HANDLER);
+}
+
+function runMiddayOhlcvPostprocessChunks_(sheet, state, startedAt) {
+  const deadline = startedAt + MIDDAY_POSTPROCESS_TIME_LIMIT_MS;
+  const chunkSummaries = [];
+
+  while (state.remainingRows > 0 && (deadline - Date.now()) > MIDDAY_POSTPROCESS_MIN_REMAINING_MS) {
+    const availableRows = Math.max(0, state.nextEndRow - 1);
+    const chunkRows = Math.min(MIDDAY_POSTPROCESS_CHUNK_ROWS, state.remainingRows, availableRows);
+    if (chunkRows <= 0) {
+      state.remainingRows = 0;
+      break;
+    }
+
+    const endRow = state.nextEndRow;
+    const startRow = endRow - chunkRows + 1;
+    const result = purgeInvalidOhlcvTimestampRowsInRange_(sheet, startRow, chunkRows, "midday.postprocess");
+
+    state.nextEndRow = startRow - 1;
+    state.remainingRows = Math.max(0, state.remainingRows - chunkRows);
+    state.chunks += 1;
+    state.totals.scannedRows += result.scannedRows || chunkRows;
+    state.totals.convertedRows += result.convertedRows || 0;
+    state.totals.deletedRows += result.deletedRows || 0;
+    state.totals.repairSymbols += result.repairSymbols || 0;
+
+    if (chunkSummaries.length < 5) {
+      chunkSummaries.push({
+        startRow: startRow,
+        endRow: endRow,
+        scannedRows: result.scannedRows || chunkRows,
+        convertedRows: result.convertedRows || 0,
+        deletedRows: result.deletedRows || 0
+      });
+    }
+  }
+
+  return {
+    complete: state.remainingRows <= 0,
+    state: state,
+    chunkSummaries: chunkSummaries,
+    elapsedMs: Date.now() - startedAt
+  };
 }
 
 function postprocessMiddayOhlcv() {
   let lock = null;
+  const startedAt = Date.now();
   try {
     lock = LockService.getScriptLock();
 
@@ -2543,7 +2662,7 @@ function postprocessMiddayOhlcv() {
       writeProcessLog_("OHLCV-AM", "後処理中に別処理が実行中のため、1分後に再試行します。", {
         waitMs: OHLCV_LOCK_WAIT_MS
       });
-      scheduleMiddayOhlcvPostprocess_();
+      scheduleMiddayOhlcvPostprocess_({ keepState: true });
       return { ok: false, skipped: true, reason: "lock_busy" };
     }
 
@@ -2555,14 +2674,34 @@ function postprocessMiddayOhlcv() {
 
     writeProcessLog_("OHLCV-AM", "13:30先行取得の後処理を開始します。", {});
 
-    purgeInvalidOhlcvTimestampRows_(sh, "midday.postprocess", OHLCV_APPEND_INTEGRITY_SCAN_ROWS);
-    SpreadsheetApp.flush();
+    const state = loadMiddayOhlcvPostprocessState_(sh);
+    const result = runMiddayOhlcvPostprocessChunks_(sh, state, startedAt);
 
-    PropertiesService.getScriptProperties().deleteProperty(MIDDAY_POSTPROCESS_PENDING_KEY);
+    if (!result.complete) {
+      saveMiddayOhlcvPostprocessState_(result.state);
+      scheduleMiddayOhlcvPostprocess_({ keepState: true });
+      writeProcessLog_("OHLCV-AM", "Midday postprocess paused and scheduled the next chunk.", {
+        remainingRows: result.state.remainingRows,
+        nextEndRow: result.state.nextEndRow,
+        chunks: result.state.chunks,
+        totals: result.state.totals,
+        elapsedMs: result.elapsedMs,
+        chunkSummaries: result.chunkSummaries
+      });
+      return { ok: true, incomplete: true, reason: "time_guard", remainingRows: result.state.remainingRows };
+    }
+
+    clearMiddayOhlcvPostprocessState_();
+    writeProcessLog_("OHLCV-AM", "Midday postprocess completed.", {
+      scanRows: result.state.scanRows,
+      chunks: result.state.chunks,
+      totals: result.state.totals,
+      elapsedMs: result.elapsedMs
+    });
 
     writeProcessLog_("OHLCV-AM", "13:30先行取得の後処理が完了しました。", {});
 
-    return { ok: true, complete: true };
+    return { ok: true, complete: true, scanRows: result.state.scanRows, totals: result.state.totals };
 
   } catch (e) {
     const message = e && e.message ? String(e.message) : String(e);
@@ -2571,7 +2710,7 @@ function postprocessMiddayOhlcv() {
       message: message
     });
 
-    scheduleMiddayOhlcvPostprocess_();
+    scheduleMiddayOhlcvPostprocess_({ keepState: true });
 
     return { ok: false, reason: "postprocess_error", message: message };
 
@@ -6594,6 +6733,115 @@ function getQuickRepairRecentScanMaxRows_(symbolCount, daysBack) {
   const days = Math.max(1, Number(daysBack) || 14) + 7;
   const estimated = Math.ceil(count * days * QUICK_REPAIR_SCAN_ROWS_PER_SYMBOL_DAY);
   return Math.min(QUICK_REPAIR_SCAN_MAX_ROWS, Math.max(QUICK_REPAIR_SCAN_MIN_ROWS, estimated));
+}
+
+function purgeInvalidOhlcvTimestampRowsInRange_(sheet, startRow, numRows, context) {
+  const lastRow = sheet.getLastRow();
+  const safeStartRow = Math.max(2, Number(startRow) || 2);
+  const readRows = Math.min(Math.max(0, Number(numRows) || 0), Math.max(0, lastRow - safeStartRow + 1));
+  if (readRows <= 0) return { deletedRows: 0, repairSymbols: 0, convertedRows: 0, scannedRows: 0 };
+
+  const values = sheet.getRange(safeStartRow, 1, readRows, 3).getValues();
+  const deleteRows = [];
+  const repairSymbolSet = {};
+  const samples = [];
+
+  const timestampTextValues = [];
+  let convertedRows = 0;
+  const convertedSamples = [];
+
+  values.forEach((row, index) => {
+    const originalTs = row[0];
+    const ts = normalizeOhlcvTimestamp_(originalTs);
+
+    if (ts && isOhlcvSessionTimestamp_(ts)) {
+      const text = formatOhlcvTimestampTextForSheet_(ts);
+      timestampTextValues.push([text]);
+
+      if (String(originalTs || "") !== text) {
+        convertedRows++;
+        if (convertedSamples.length < 10) {
+          convertedSamples.push({
+            row: safeStartRow + index,
+            before: originalTs == null ? "" : String(originalTs),
+            after: text,
+            symbol: String(row[2] || "").trim()
+          });
+        }
+      }
+      return;
+    }
+
+    timestampTextValues.push([originalTs]);
+
+    const invalidReason = !isValidOhlcvTimestamp_(ts)
+      ? "invalid_timestamp"
+      : "non_session_timestamp";
+
+    const sheetRow = safeStartRow + index;
+    const symbol = String(row[2] || "").trim();
+
+    deleteRows.push(sheetRow);
+    if (symbol) repairSymbolSet[symbol] = true;
+
+    if (samples.length < 10) {
+      samples.push({
+        row: sheetRow,
+        timestamp: originalTs == null ? "" : String(originalTs),
+        normalizedTimestamp: ts ? Utilities.formatDate(ts, CONFIG.TIMEZONE, "yyyy/MM/dd HH:mm") : "",
+        reason: invalidReason,
+        symbol: symbol
+      });
+    }
+  });
+
+  if (convertedRows > 0) {
+    sheet.getRange(safeStartRow, 1, readRows, 1)
+      .setNumberFormat("@")
+      .setValues(timestampTextValues);
+
+    SpreadsheetApp.flush();
+
+    writeProcessLog_("OHLCV", "OHLCV timestamp text normalization completed for a bounded range.", {
+      context: context || "",
+      startRow: safeStartRow,
+      scannedRows: readRows,
+      convertedRows: convertedRows,
+      samples: convertedSamples
+    });
+  }
+
+  if (deleteRows.length === 0) {
+    return {
+      deletedRows: 0,
+      repairSymbols: 0,
+      convertedRows: convertedRows,
+      scannedRows: readRows
+    };
+  }
+
+  deleteRowsByRowNums_(sheet, deleteRows);
+  SpreadsheetApp.flush();
+
+  const repairSymbols = Object.keys(repairSymbolSet).sort();
+  if (repairSymbols.length > 0) setOhlcvRepairSymbols_(repairSymbols);
+
+  writeProcessLog_("OHLCV", "Invalid OHLCV timestamp rows deleted for a bounded range.", {
+    context: context || "",
+    startRow: safeStartRow,
+    scannedRows: readRows,
+    convertedRows: convertedRows,
+    deletedRows: deleteRows.length,
+    repairSymbols: repairSymbols.length,
+    samples: samples
+  });
+
+  return {
+    deletedRows: deleteRows.length,
+    repairSymbols: repairSymbols.length,
+    convertedRows: convertedRows,
+    scannedRows: readRows
+  };
 }
 
 function purgeInvalidOhlcvTimestampRows_(sheet, context, maxRows) {

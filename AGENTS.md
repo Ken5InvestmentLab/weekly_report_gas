@@ -216,6 +216,7 @@ OVERLAP_DAYS = 3
 | `runDailyMaintenanceTrigger` | OHLCV PHASE4完了後 | `runDailyMaintenance` を起動 |
 | `quickRepairTrigger` | `runDailyMaintenance` 完了後 / cleanup完了後 | `quickRepairRecentGaps` を起動 |
 | `resumeOHLCVFetchMidday` | 13:30先行OHLCV取得の再開時 | `fetchOHLCVForNewAlertsMidday` を再起動 |
+| `postprocessMiddayOhlcv` | 13:30先行OHLCV取得完了後 | 追記後のtimestamp正規化・不正timestamp削除を小分けで再開 |
 | `resumeMiddayOhlcvRollback` | 13:30先行OHLCV戻し処理の再開時 | 触った銘柄の120日OHLCV削除を再開 |
 | `resumeOHLCVFetch` | 16:00 OHLCV本番取得の再開時 | `fetchOHLCVForNewAlerts` を再起動 |
 | `resumeDailyMaintenance` | 日次メンテナンス再開時 | `runDailyMaintenanceInternal_` を再開 |
@@ -311,6 +312,8 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 | `OHLCV_MIDDAY_LAST_TS_MAP` | 13:30先行取得用の銘柄別最終timestamp |
 | `OHLCV_MIDDAY_REFRESH_ID` | 13:30先行取得ID |
 | `OHLCV_MIDDAY_FULL_BACKFILL_SYMBOLS` | 13:30で120日取得する真の新規銘柄 |
+| `OHLCV_MIDDAY_POSTPROCESS_PENDING` | 13:30後処理トリガーが残っているかの印 |
+| `OHLCV_MIDDAY_POSTPROCESS_STATE_V1` | 13:30後処理の末尾timestamp掃除を小分け再開する状態 |
 | `OHLCV_MIDDAY_ROLLBACK_STATE_V1` | 13:30先行取得戻し処理の再開状態 |
 | `OHLCV_MIDDAY_ROLLBACK_SYMBOLS_V1` | 13:30先行取得戻し処理で120日削除する銘柄 |
 | `DAILY_MAINT_CURSOR` | 日次メンテナンス再開カーソル |
@@ -381,6 +384,7 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 - 追記後はtimestamp readback検証と軽量な不正timestamp掃除を行うが、GAP修復前の重複整理はしない。
 - 13:30で `alerts_raw` から出来高を転記したAM行は `MIDDAY_LOCKED_yyyy-mm-dd` として保存し、後続処理では保護する。
 - 13:30再開時は毎回末尾12,000行の不正timestamp掃除を走らせない。初回入口の軽量掃除と `appendRowsToSheet_` 直後の読み返し削除で吸収する。
+- 13:30完了後の広めのtimestamp後処理は `postprocessMiddayOhlcv` に分離し、`OHLCV_MIDDAY_POSTPROCESS_STATE_V1` で末尾から小分け再開する。一括30,000行スキャンへ戻さない。
 - 日次メンテナンス、GitHub Actions、GAP修復には進まない。
 - 完了通知のみ送る。
 
