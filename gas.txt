@@ -5744,19 +5744,28 @@ const OHLCV_POST_REPAIR_CLEANUP_CHUNK_ROWS = 1200;
 const OHLCV_POST_REPAIR_DUP_DATE_CHUNK_ROWS = 5000;
 const OHLCV_POST_REPAIR_MAX_DUP_DATES = 90;
 const OHLCV_POST_REPAIR_MAX_DELETE_ROWS = 2000;
-const OHLCV_POST_REPAIR_LIMIT_MS = 90 * 1000;
+const OHLCV_POST_REPAIR_LIMIT_MS = 180 * 1000;
 const OHLCV_POST_REPAIR_RESUME_AFTER_MS = 60 * 1000;
 const OHLCV_POST_REPAIR_SORT_MAX_ROWS = OHLCV_SAFE_SORT_MAX_ROWS;
 const OHLCV_POST_REPAIR_MIN_DEDUP_REMAINING_MS = 40000;
 const OHLCV_POST_REPAIR_SAFETY_AFTER_MS = 10 * 60 * 1000;
 // tailスキャン行数。シートが365日未満の間はtailだけでは不足するため、early行スキャンを併用する
-const OHLCV_POST_REPAIR_DEDUP_READ_ROWS = 110000;
+// 110000 から 40000 へ縮小: 1ショット内に確実に収めるため
+const OHLCV_POST_REPAIR_DEDUP_READ_ROWS = 40000;
+// 1回のSCAN呼び出しで処理する targetDates 件数（メモリ・所要時間を予測可能にするための上限）
+const OHLCV_POST_REPAIR_DEDUP_DATE_BATCH = 20;
+// SCANループ内のデッドラインチェック間隔（行）
+const OHLCV_POST_REPAIR_DEDUP_TIMECHECK_EVERY = 5000;
+// SCAN中断のための残り時間下限（ms）
+const OHLCV_POST_REPAIR_DEDUP_TAIL_MARGIN_MS = 10000;
 // PropertiesServiceへの削除対象行番号キャッシュ用
 const OHLCV_DEDUP_ROWS_META_KEY = "OHLCV_DEDUP_ROWS_META";
 const OHLCV_DEDUP_ROWS_KEY_PREFIX = "OHLCV_DEDUP_ROWS_";
 const OHLCV_DEDUP_CHUNK_ITEMS = 1200; // 1チャンク~8.4KB（9KB上限以内）
-// コンパクト書き戻し削除: 1チャンクあたりの読み書き行数（~30s/chunk）
-const OHLCV_POST_REPAIR_COMPACT_CHUNK_ROWS = 5000;
+// コンパクト書き戻し削除: 1チャンクあたりの読み書き行数（5000→2000に縮小、所要時間を予測可能にする）
+const OHLCV_POST_REPAIR_COMPACT_CHUNK_ROWS = 2000;
+// コンパクト削除のデッドライン安全マージン（ms）。getValues+setValues+flush+saveStateで余裕を持たせる
+const OHLCV_POST_REPAIR_COMPACT_MARGIN_MS = 35000;
 const OHLCV_INTRADAY_STALE_SYMBOLS_KEY = "OHLCV_INTRADAY_STALE_SYMBOLS_V1";
 const OHLCV_INTRADAY_STALE_MAX_RECORDS = 200;
 const EVAL_OHLCV_COVERAGE_STATE_KEY = "EVAL_OHLCV_COVERAGE_REPAIR_STATE_V1";
@@ -10055,6 +10064,9 @@ function runOhlcvPostRepairCleanup_() {
       }
 
       if (state.step === "DEDUP_DATES") {
+        // 旧 state との互換性: dateIndex が未設定/NaN の場合は 0 にフォールバック
+        if (!Number.isFinite(Number(state.dateIndex))) state.dateIndex = 0;
+        else state.dateIndex = Number(state.dateIndex);
         if (state.dateIndex >= state.targetDates.length) {
           state.step = "EARLY_DEDUP";
           state.earlyDedupComplete = false;
@@ -10066,6 +10078,13 @@ function runOhlcvPostRepairCleanup_() {
         // DELETE phase: コンパクト書き戻し方式（deleteRows散在多呼び出しによるタイムアウト対策）
         if (hasPendingOhlcvDedupDeleteRows_() || state.compactReadRow) {
           const deadlineMs = startedAt + OHLCV_POST_REPAIR_LIMIT_MS;
+          writeProcessLog_("OHLCV_POST_REPAIR", "Entering compact delete (DEDUP_DATES batch).", {
+            dateIndex: state.dateIndex,
+            batchSize: OHLCV_POST_REPAIR_DEDUP_DATE_BATCH,
+            compactReadRow: state.compactReadRow || null,
+            compactWriteRow: state.compactWriteRow || null,
+            compactRangeEnd: state.compactRangeEnd || null
+          });
           const r = bulkCompactDeleteOhlcvRows_(sh, state, deadlineMs);
           if (!r.done) {
             state.updatedAt = new Date().toISOString();
@@ -10073,8 +10092,10 @@ function runOhlcvPostRepairCleanup_() {
             break;
           }
           state.totals.duplicateDeletedRows += r.deletedRows || 0;
-          state.dateIndex = state.targetDates.length;
-          state.totals.duplicateDatesProcessed = state.targetDates.length;
+          // 1バッチ分の delete 完了 → dateIndex を進める
+          const advanced = Math.min(state.targetDates.length, state.dateIndex + OHLCV_POST_REPAIR_DEDUP_DATE_BATCH);
+          state.totals.duplicateDatesProcessed = (state.totals.duplicateDatesProcessed || 0) + (advanced - state.dateIndex);
+          state.dateIndex = advanced;
           state.updatedAt = new Date().toISOString();
           saveOhlcvPostRepairCleanupState_(state);
           continue;
@@ -10083,8 +10104,21 @@ function runOhlcvPostRepairCleanup_() {
         // SCAN phase: 1回だけシートを読んで全削除対象行をPropertiesServiceにキャッシュ
         if (OHLCV_POST_REPAIR_LIMIT_MS - (Date.now() - startedAt) < OHLCV_POST_REPAIR_MIN_DEDUP_REMAINING_MS) break;
 
+        // 1ショットあたりの作業量を予測可能にするため targetDates をバッチ分割
+        const batchEnd = Math.min(state.targetDates.length, state.dateIndex + OHLCV_POST_REPAIR_DEDUP_DATE_BATCH);
+        const batchDates = state.targetDates.slice(state.dateIndex, batchEnd);
         const dedupDeadlineMs = startedAt + OHLCV_POST_REPAIR_LIMIT_MS;
-        const r = dedupeOhlcvAllTargetDates_(sh, state.targetDates, dedupDeadlineMs);
+        writeProcessLog_("OHLCV_POST_REPAIR", "Multi-date dedup scan starting.", {
+          totalDates: state.targetDates.length,
+          dateIndex: state.dateIndex,
+          batchEnd: batchEnd,
+          batchSize: batchDates.length,
+          lastRow: sh.getLastRow(),
+          readRowsLimit: OHLCV_POST_REPAIR_DEDUP_READ_ROWS,
+          remainingMs: dedupDeadlineMs - Date.now(),
+          sampleDates: batchDates.slice(0, 5)
+        });
+        const r = dedupeOhlcvAllTargetDates_(sh, batchDates, dedupDeadlineMs);
         if (r.timedOut) {
           state.updatedAt = new Date().toISOString();
           saveOhlcvPostRepairCleanupState_(state);
@@ -10092,9 +10126,12 @@ function runOhlcvPostRepairCleanup_() {
         }
         if ((r.duplicateRows || 0) > 0) {
           saveOhlcvDedupDeleteRows_(r.allDeleteRows);
+          // 削除は次の iteration の DELETE phase で実施。ここでは dateIndex を進めない
         } else {
-          state.dateIndex = state.targetDates.length;
-          state.totals.duplicateDatesProcessed = state.targetDates.length;
+          // このバッチに重複なし → そのまま次のバッチへ
+          const advanced2 = batchEnd;
+          state.totals.duplicateDatesProcessed = (state.totals.duplicateDatesProcessed || 0) + (advanced2 - state.dateIndex);
+          state.dateIndex = advanced2;
         }
         state.updatedAt = new Date().toISOString();
         saveOhlcvPostRepairCleanupState_(state);
@@ -10105,6 +10142,11 @@ function runOhlcvPostRepairCleanup_() {
         // DELETE phase: コンパクト書き戻し方式（deleteRows散在多呼び出しによるタイムアウト対策）
         if (hasPendingOhlcvDedupDeleteRows_() || state.compactReadRow) {
           const deadlineMs = startedAt + OHLCV_POST_REPAIR_LIMIT_MS;
+          writeProcessLog_("OHLCV_POST_REPAIR", "Entering compact delete (EARLY_DEDUP).", {
+            compactReadRow: state.compactReadRow || null,
+            compactWriteRow: state.compactWriteRow || null,
+            compactRangeEnd: state.compactRangeEnd || null
+          });
           const r = bulkCompactDeleteOhlcvRows_(sh, state, deadlineMs);
           if (!r.done) {
             state.updatedAt = new Date().toISOString();
@@ -10547,8 +10589,8 @@ function bulkCompactDeleteOhlcvRows_(sheet, state, deadlineMs) {
   let totalDeleted = 0;
 
   while (state.compactReadRow <= state.compactRangeEnd) {
-    // 25秒余裕を持って中断
-    if (deadlineMs && Date.now() > deadlineMs - 25000) break;
+    // OHLCV_POST_REPAIR_COMPACT_MARGIN_MS 余裕を持って中断
+    if (deadlineMs && Date.now() > deadlineMs - OHLCV_POST_REPAIR_COMPACT_MARGIN_MS) break;
 
     const count = Math.min(CHUNK, state.compactRangeEnd - state.compactReadRow + 1);
     const values = sheet.getRange(state.compactReadRow, 1, count, 8).getValues();
@@ -10605,17 +10647,41 @@ function dedupeOhlcvAllTargetDates_(sheet, targetDates, deadlineMs) {
   }
 
   // 末尾OHLCV_POST_REPAIR_DEDUP_READ_ROWS行だけ読む。全行=1.78Mセルで6分超タイムアウト
-  // 必要列(A,B,C=1-3、H=8)だけ2回に分けて読む → 440Kセル（全8列880Kの半分）
+  // 必要列(A,B,C=1-3、H=8)だけ2回に分けて読む
   const numDataRows = lastRow - 1;
   const readRows = Math.min(numDataRows, OHLCV_POST_REPAIR_DEDUP_READ_ROWS);
   const readFromRow = lastRow - readRows + 1;
+
+  const t0 = Date.now();
   const colsABC = sheet.getRange(readFromRow, 1, readRows, 3).getValues();
+  if (deadlineMs && deadlineMs - Date.now() < OHLCV_POST_REPAIR_DEDUP_TAIL_MARGIN_MS) {
+    writeProcessLog_("OHLCV_POST_REPAIR", "Multi-date dedup scan timed out after first getValues().", {
+      readRows: readRows, elapsedMs: Date.now() - t0
+    });
+    return { timedOut: true, allDeleteRows: [], duplicateRows: 0, scannedRows: 0, totalRows: numDataRows };
+  }
   const colH = sheet.getRange(readFromRow, 8, readRows, 1).getValues();
+  if (deadlineMs && deadlineMs - Date.now() < OHLCV_POST_REPAIR_DEDUP_TAIL_MARGIN_MS) {
+    writeProcessLog_("OHLCV_POST_REPAIR", "Multi-date dedup scan timed out after second getValues().", {
+      readRows: readRows, elapsedMs: Date.now() - t0
+    });
+    return { timedOut: true, allDeleteRows: [], duplicateRows: 0, scannedRows: 0, totalRows: numDataRows };
+  }
 
   const bestByKey = {};
   const items = [];
+  let scanned = 0;
 
   for (let i = 0; i < readRows; i++) {
+    if ((i % OHLCV_POST_REPAIR_DEDUP_TIMECHECK_EVERY) === 0 && i > 0) {
+      if (deadlineMs && deadlineMs - Date.now() < OHLCV_POST_REPAIR_DEDUP_TAIL_MARGIN_MS) {
+        writeProcessLog_("OHLCV_POST_REPAIR", "Multi-date dedup scan timed out mid-loop.", {
+          processedRows: i, totalReadRows: readRows, elapsedMs: Date.now() - t0
+        });
+        return { timedOut: true, allDeleteRows: [], duplicateRows: 0, scannedRows: i, totalRows: numDataRows };
+      }
+    }
+    scanned = i + 1;
     const ts = normalizeOhlcvTimestamp_(colsABC[i][0]);
     if (!ts) continue;
     const dateStr = formatYmd_(ts);
@@ -10639,6 +10705,14 @@ function dedupeOhlcvAllTargetDates_(sheet, targetDates, deadlineMs) {
   const allDeleteRows = [];
   const samples = [];
   for (let i = 0; i < items.length; i++) {
+    if ((i % OHLCV_POST_REPAIR_DEDUP_TIMECHECK_EVERY) === 0 && i > 0) {
+      if (deadlineMs && deadlineMs - Date.now() < OHLCV_POST_REPAIR_DEDUP_TAIL_MARGIN_MS) {
+        writeProcessLog_("OHLCV_POST_REPAIR", "Multi-date dedup scan timed out during delete-candidate pass.", {
+          processedItems: i, totalItems: items.length, elapsedMs: Date.now() - t0
+        });
+        return { timedOut: true, allDeleteRows: [], duplicateRows: 0, scannedRows: scanned, totalRows: numDataRows };
+      }
+    }
     const item = items[i];
     if (isProtectedMiddayOhlcvMarker_(item.row[1])) continue;
     if (isPmLockedMarker_(item.row[1])) continue;
@@ -10654,6 +10728,7 @@ function dedupeOhlcvAllTargetDates_(sheet, targetDates, deadlineMs) {
     scannedRows: readRows,
     readFromRow: readFromRow,
     duplicateRows: allDeleteRows.length,
+    elapsedMs: Date.now() - t0,
     samples: samples
   });
 
