@@ -1351,7 +1351,7 @@ function purgeOldOhlcvDataDaily() {
 
     const minDateStr = minDate ? formatYmd_(minDate) : "不明";
     const maxDateStr = maxDate ? formatYmd_(maxDate) : "不明";
-    console.log(`[purgeOldOhlcv] 削除対象: ${minDateStr} ? ${maxDateStr} (${deleteCount}行)`);
+    console.log(`[purgeOldOhlcv] 削除対象: ${minDateStr} 〜 ${maxDateStr} (${deleteCount}行)`);
 
     sheet.deleteRows(firstDataRow, deleteCount);
     totalDeleted += deleteCount;
@@ -3506,7 +3506,7 @@ if (phase === "PHASE1") {
   const rawAlertVolumeMapData = buildRawAlertVolumeMapForBusinessDate_(rawSheet, todayKey);
   const rawAlertVolumeMap = rawAlertVolumeMapData.volumeMap;
 
-  writeProcessLog_("OHLCV", "alerts_raw ???AM????16:00???PM???????????????", rawAlertVolumeMapData.stats);
+  writeProcessLog_("OHLCV", "alerts_raw のvolumeを16:00本番取得の出来高上書き用に読み込みました。", rawAlertVolumeMapData.stats);
 
   // 以降、今までのPHASE1処理
     let symbols = JSON.parse(props.getProperty(SYMBOL_LIST_KEY) || "[]");
@@ -9155,7 +9155,7 @@ function rawAlertReceivedAtToOhlcvTimestamp_(receivedAt) {
   const minute = Number(Utilities.formatDate(d, CONFIG.TIMEZONE, "m"));
 
   // TradingViewの4時間足アラート想定:
-  // 13:00?13:30頃に来るAM確定アラート → 09:00行
+  // 13:00〜13:30頃に来るAM確定アラート → 09:00行
   // 15:30以降に来るPM確定アラート → 13:00行
   //
   // 14:00未満はAM扱い、14:00以降はPM扱いにする。
