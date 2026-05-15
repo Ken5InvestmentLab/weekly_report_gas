@@ -2192,7 +2192,8 @@ if (symbols.length === 0) {
   fullBackfillSet = new Set(fullBackfillSymbols);
   todaySymbols.forEach(sym => {
     const s = String(sym || "").trim();
-    if (s) fullBackfillSet.add(s);
+    if (!s) return;
+    if (!lastTsMap[s]) fullBackfillSet.add(s);
   });
   fullBackfillSymbols = Array.from(fullBackfillSet).sort();
 
@@ -3570,7 +3571,8 @@ const trueNewFullBackfillSymbols = symbols.filter(sym => {
 fullBackfillSet = new Set(trueNewFullBackfillSymbols);
 todaySet.forEach(sym => {
   const s = String(sym || "").trim();
-  if (s) fullBackfillSet.add(s);
+  if (!s) return;
+  if (!lastTsMap[s]) fullBackfillSet.add(s);
 });
 fullBackfillSymbols = Array.from(fullBackfillSet).sort();
 
@@ -7313,8 +7315,10 @@ function processQuickRepairGroups_(sheet, groups, sessionInfo, minSessions) {
   // AM(09:00)/PM(13:00) を 50/50 出来高分割で合成する。1418 のような薄商い銘柄で
   // Yahoo の 1h データが完全に欠落している日を救うための保険。
   // staleSymbolMap (1h のタイムスタンプ枠だけ来て OHLC が null) もここで救うため、
-  // stale 判定でスキップせず必ず 1d を試す。1d でも 0 件なら fail counter で 3 回後に GAP_FAILED。
+  // stale 判定でスキップせず必ず 1d を試す。1d でも 0 件 (=1h と 1d の両方が空) なら
+  // しきい値判定をスキップして即 GAP_FAILED を書き込み、それ以降の修復対象から外す。
   const dailyFallbackTargets = [];
+  const dailyFallbackFailedSet = new Set();
   metaList.forEach(meta => {
     const fallbackDates = meta.dates.filter(dateStr => {
       const key = meta.symbol + "|" + dateStr;
@@ -7371,6 +7375,7 @@ function processQuickRepairGroups_(sheet, groups, sessionInfo, minSessions) {
           const daily = dailyMap[ymd];
           if (!daily || (daily.open == null && daily.close == null)) {
             dailyMissCount++;
+            dailyFallbackFailedSet.add(target.symbol + "|" + dateStr);
             if (dailyMissSamples.length < 10) {
               dailyMissSamples.push({
                 symbol: target.symbol,
@@ -7506,14 +7511,20 @@ function processQuickRepairGroups_(sheet, groups, sessionInfo, minSessions) {
       }
       const prevCount = Number(failMap[key]) || 0;
       const nextCount = prevCount + 1;
-      if (nextCount >= QUICK_REPAIR_FAIL_THRESHOLD) {
+      const dualFailed = dailyFallbackFailedSet.has(key);
+      if (dualFailed || nextCount >= QUICK_REPAIR_FAIL_THRESHOLD) {
         try {
           const failedRowsForKey = makeGapFailedRows_(meta.symbol, dateStr, sessionInfo.periodMap, savedPeriodMap);
           failedRowsForKey.forEach(r => gapFailedRows.push(r));
           if (failedRowsForKey.length > 0) {
             summary.markedFailed++;
             if (gapFailedSamples.length < 10) {
-              gapFailedSamples.push({ symbol: meta.symbol, date: dateStr, attempts: nextCount });
+              gapFailedSamples.push({
+                symbol: meta.symbol,
+                date: dateStr,
+                attempts: nextCount,
+                reason: dualFailed ? "1h_and_1d_empty" : "threshold_reached"
+              });
             }
           }
           delete failMap[key];
@@ -7545,7 +7556,7 @@ function processQuickRepairGroups_(sheet, groups, sessionInfo, minSessions) {
         preWriteSamples: gapFailedAppend.preWriteSamples || []
       };
     }
-    writeProcessLog_("ギャップ修復", `0行が ${QUICK_REPAIR_FAIL_THRESHOLD} 回続いた銘柄+日付に GAP_FAILED マーカーを記録しました。次回以降は missing から除外されます。`, {
+    writeProcessLog_("ギャップ修復", `1h と 1d の両方が空、または 0行が ${QUICK_REPAIR_FAIL_THRESHOLD} 回続いた銘柄+日付に GAP_FAILED マーカーを記録しました。次回以降は missing から除外されます。`, {
       markedFailed: summary.markedFailed,
       rowsWritten: gapFailedAppend.rows || 0,
       samples: gapFailedSamples
