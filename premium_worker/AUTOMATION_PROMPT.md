@@ -163,7 +163,7 @@ If the disclosure file cannot be opened or the content cannot be verified, use
 `混在/要確認` or `様子見`, and explain the uncertainty in `注意点`.
 5. Create `premium_worker/out/premium_reports.json` with one report per alert.
    Each report must include fields named exactly:
-   `事業概要`, `足元材料`, `ファンダ要点`, `注意点`, `開示リンク`, `Sources`.
+   `材料インパクト`, `事業概要`, `足元材料`, `ファンダ要点`, `注意点`, `開示リンク`, `Sources`.
    Write the report body in Japanese. The narrative fields `事業概要`,
    `足元材料`, `ファンダ要点`, and `注意点` must not be written in English.
    Keep each narrative field analytical rather than memo-like: usually 2 short
@@ -204,7 +204,7 @@ If the disclosure file cannot be opened or the content cannot be verified, use
    analytical sentence instead, such as earnings progress plus dividend policy
    or M&A completion plus product launch relevance. Keep the exact document
    titles in `開示リンク`, not at the start of `足元材料`.
-   You may add an optional `材料インパクト` field with one of:
+   Every report MUST include a `材料インパクト` field starting with exactly one of:
 `ポジティブ材料`, `ネガティブ材料`, `様子見`, or `混在/要確認`.
 
 `材料インパクト` must be based on the content of the selected disclosure(s),
@@ -229,6 +229,20 @@ Keep this as a source-grounded material impact label, not a trading action.
    `開示リンク`, but do not omit a verified direct disclosure merely because one
    stronger disclosure is already linked.
 
+   Every `開示リンク` label MUST be formatted as:
+
+   `YYYY-MM-DD 開示タイトル(hh:mm)`
+
+   Example:
+
+   `[2026-05-14 剰余金の配当に関するお知らせ(15:30)](https://f.irbank.net/pdf/20260514/140120260514534210.pdf)`
+
+   If two URLs point to the same disclosure content, include only one line even
+   when the URLs differ. Treat matching TDnet/IRBANK document IDs, matching PDF
+   files, or exactly matching disclosure titles at the same date/time as the same
+   content. Prefer direct `f.irbank.net` PDF/PR URLs over IRBANK HTML pages or
+   secondary mirrored URLs.
+
    Do NOT put IRBANK HTML disclosure pages such as
    `https://irbank.net/<code>/<document_id>` in `開示リンク`.
    IRBANK HTML pages are allowed only as an input page to discover the real PDF URL.
@@ -252,8 +266,10 @@ Keep this as a source-grounded material impact label, not a trading action.
    file cannot be verified, write `開示リンク未確認` instead of using the IRBANK HTML page.
 
    Link labels must use the actual document or disclosure title as closely as possible,
-   such as `2026年３月期 第３四半期決算短信〔日本基準〕（連結）` or
-   `配当予想の修正（増配・特別配当）に関するお知らせ`; do not use generic labels like `開示1`.
+   with the required date/time prefix/suffix, such as
+   `2026-05-14 2026年３月期 第３四半期決算短信〔日本基準〕（連結）(15:30)` or
+   `2026-05-14 配当予想の修正（増配・特別配当）に関するお知らせ(15:30)`;
+   do not use generic labels like `開示1`.
 8. Put 2-4 reference page URLs in `Sources`: company IR pages, disclosure-list
    pages, news pages, business/profile pages, or reputable financial-news pages
    used for grounding. Do not put direct PDFs, TDnet files, IRBANK individual

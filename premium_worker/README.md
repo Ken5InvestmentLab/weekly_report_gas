@@ -345,7 +345,7 @@ Codex should create `premium_worker/out/premium_reports.json` like this:
         },
         {
           "name": "開示リンク",
-          "value": "[2026年３月期 決算短信〔日本基準〕（連結）](https://f.irbank.net/pdf/20260508/xxxxxxxxxxxx.pdf)\n[資本コストや株価を意識した経営の実現に向けた対応について](https://f.irbank.net/pdf/20260508/yyyyyyyyyyyy.pdf)"
+          "value": "[2026-05-08 2026年３月期 決算短信〔日本基準〕（連結）(15:30)](https://f.irbank.net/pdf/20260508/xxxxxxxxxxxx.pdf)\n[2026-05-08 資本コストや株価を意識した経営の実現に向けた対応について(15:30)](https://f.irbank.net/pdf/20260508/yyyyyyyyyyyy.pdf)"
         },
         {
           "name": "Sources",
@@ -364,6 +364,7 @@ Codex should create `premium_worker/out/premium_reports.json` like this:
 Each report must include these fields:
 
 ```text
+材料インパクト
 事業概要
 足元材料
 ファンダ要点
@@ -372,13 +373,7 @@ Each report must include these fields:
 Sources
 ```
 
-Optional field:
-
-```text
-材料インパクト
-```
-
-`材料インパクト` may be one of:
+`材料インパクト` must start with one of:
 
 ```text
 ポジティブ材料
@@ -387,8 +382,8 @@ Optional field:
 混在/要確認
 ```
 
-The worker uses `材料インパクト` to sort embeds and choose the embed color, but
-it must not be phrased as a buy/sell recommendation.
+The worker uses `材料インパクト` to sort embeds and choose the embed color. It is
+mandatory and must not be phrased as a buy/sell recommendation.
 
 ---
 
@@ -566,6 +561,24 @@ For example, include all of these when they are used:
 
 Keep weak background pages out of `開示リンク`.
 
+Every `開示リンク` label must be formatted as:
+
+```text
+YYYY-MM-DD 開示タイトル(hh:mm)
+```
+
+Example:
+
+```text
+[2026-05-14 剰余金の配当に関するお知らせ(15:30)](https://f.irbank.net/pdf/20260514/140120260514534210.pdf)
+```
+
+If two URLs point to the same disclosure content, keep only one line even when
+the URLs are different. Treat matching TDnet/IRBANK document IDs, matching PDF
+files, or exactly matching disclosure titles at the same date/time as the same
+content. Prefer direct `f.irbank.net` PDF/PR URLs over IRBANK HTML pages or
+secondary mirrored URLs.
+
 If no direct disclosure URL is verified, use:
 
 ```text
@@ -636,8 +649,8 @@ possible.
 Good examples:
 
 ```text
-[2026年３月期 第３四半期決算短信〔日本基準〕（連結）](https://f.irbank.net/pdf/...)
-[配当予想の修正（増配・特別配当）に関するお知らせ](https://f.irbank.net/pdf/...)
+[2026-05-14 2026年３月期 第３四半期決算短信〔日本基準〕（連結）(15:30)](https://f.irbank.net/pdf/...)
+[2026-05-14 配当予想の修正（増配・特別配当）に関するお知らせ(15:30)](https://f.irbank.net/pdf/...)
 [銘柄名（1234）のIR情報・決算資料 | IRBANK](https://irbank.net/1234/ir)
 [銘柄名 IRニュース](https://www.example.co.jp/ir/news/)
 ```

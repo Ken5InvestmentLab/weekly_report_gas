@@ -20,8 +20,10 @@ const RAW_HEADERS = [
   "status", "note", "logged_at"
 ];
 
-const REQUIRED_FIELDS = ["事業概要", "足元材料", "ファンダ要点", "注意点", "開示リンク", "Sources"];
-const OPTIONAL_FIELDS = ["材料インパクト"];
+const IMPACT_FIELD = "材料インパクト";
+const VALID_MATERIAL_IMPACTS = ["ポジティブ材料", "ネガティブ材料", "様子見", "混在/要確認"];
+const REQUIRED_FIELDS = [IMPACT_FIELD, "事業概要", "足元材料", "ファンダ要点", "注意点", "開示リンク", "Sources"];
+const OPTIONAL_FIELDS = [];
 const DEFAULT_ALLOWED_HOURS = "13,15";
 const DEFAULT_ALLOWED_MINUTES_BY_HOUR = "13:00-13:10,15:30-15:40";
 const DEFAULT_SIGNAL_TYPES = "BOTTOM";
@@ -418,6 +420,9 @@ function buildEmbed(report) {
     const name = String(field.name || "").trim();
     if (name) fieldMap.set(name, String(field.value || "").trim());
   }
+  if (!fieldMap.has(IMPACT_FIELD) && String(report.materialImpact || "").trim()) {
+    fieldMap.set(IMPACT_FIELD, String(report.materialImpact || "").trim());
+  }
 
   for (const name of REQUIRED_FIELDS) {
     if (!fieldMap.has(name)) fieldMap.set(name, name === "開示リンク" ? "開示リンク未確認" : "");
@@ -429,8 +434,11 @@ function buildEmbed(report) {
   if (!hasUrl(fieldMap.get("Sources"))) {
     throw new Error(`report ${alertId} must include at least one URL in Sources`);
   }
+  const dedupedDisclosureLinks = dedupeDisclosureLinkLines(fieldMap.get("開示リンク"));
+  fieldMap.set("開示リンク", dedupedDisclosureLinks || "開示リンク未確認");
   assertNoMojibakeText(alertId, report, fieldMap);
   assertDisclosureLinksAreDirectDisclosures(alertId, fieldMap);
+  assertNoDuplicateDisclosureLinks(alertId, fieldMap);
   assertSourceLinksAreReferencePages(alertId, fieldMap);
   assertDescriptiveLinkLabels(alertId, fieldMap);
   assertJapaneseNarrativeFields(alertId, fieldMap);
@@ -441,6 +449,7 @@ function buildEmbed(report) {
   assertNoNarrowDisclosureCaveat(alertId, fieldMap);
   assertNoStaleSingleMaterialSummary(alertId, fieldMap);
   assertNoStaleDisclosureProxyLabels(alertId, fieldMap);
+  assertMaterialImpact(alertId, fieldMap);
   const title = buildEmbedTitle(report);
 
   const fieldNames = [
@@ -472,6 +481,133 @@ function formatEmbedFieldValue(name, value) {
     if (!trimmed || /^・/.test(trimmed)) return trimmed;
     return `・${trimmed}`;
   }).join("\n");
+}
+
+function assertMaterialImpact(alertId, fieldMap) {
+  const normalized = normalizeMaterialImpact(fieldMap.get(IMPACT_FIELD));
+  if (!normalized) {
+    throw new Error(
+      `report ${alertId} field ${IMPACT_FIELD} must start with one of: ${VALID_MATERIAL_IMPACTS.join(", ")}`
+    );
+  }
+  fieldMap.set(IMPACT_FIELD, normalized);
+}
+
+function normalizeMaterialImpact(value) {
+  const text = normalizeSpaces(String(value || ""));
+  if (!text) return "";
+
+  const patterns = [
+    [/^ポジティブ(?:材料)?(?=$|[\s:：。、「」])/i, "ポジティブ材料"],
+    [/^ネガティブ(?:材料)?(?=$|[\s:：。、「」])/i, "ネガティブ材料"],
+    [/^様子見(?=$|[\s:：。、「」])/i, "様子見"],
+    [/^(?:混在\/要確認|混在|要確認)(?=$|[\s:：。、「」])/i, "混在/要確認"]
+  ];
+
+  for (const [pattern, label] of patterns) {
+    const match = text.match(pattern);
+    if (!match) continue;
+    const rest = text.slice(match[0].length).trimStart();
+    return `${label}${rest ? rest : ""}`;
+  }
+  return "";
+}
+
+function dedupeDisclosureLinkLines(value) {
+  const text = String(value || "").trim();
+  if (!text || text === "開示リンク未確認" || !hasUrl(text)) return text;
+
+  const orderedKeys = [];
+  const byKey = new Map();
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    const link = extractFirstMarkdownLink(line);
+    if (!link) {
+      const key = `line:${normalizeDisclosureDuplicateText(line)}`;
+      if (!byKey.has(key)) {
+        orderedKeys.push(key);
+        byKey.set(key, { line, score: 0 });
+      }
+      continue;
+    }
+
+    const key = disclosureDuplicateKey(link.label, link.url);
+    const score = disclosureLinkPreferenceScore(link.url);
+    const current = byKey.get(key);
+    if (!current) {
+      orderedKeys.push(key);
+      byKey.set(key, { line, score });
+    } else if (score > current.score) {
+      byKey.set(key, { line, score });
+    }
+  }
+
+  return orderedKeys.map(key => byKey.get(key)?.line).filter(Boolean).join("\n");
+}
+
+function assertNoDuplicateDisclosureLinks(alertId, fieldMap) {
+  const value = String(fieldMap.get("開示リンク") || "").trim();
+  if (!value || value === "開示リンク未確認") return;
+
+  const seen = new Set();
+  for (const { label, url } of extractMarkdownLinks(value)) {
+    const key = disclosureDuplicateKey(label, url);
+    if (seen.has(key)) {
+      throw new Error(`report ${alertId} disclosure link duplicates the same disclosure content: ${label}`);
+    }
+    seen.add(key);
+  }
+}
+
+function disclosureDuplicateKey(label, url) {
+  return extractDisclosureDocumentKey(url) || `label:${normalizeDisclosureDuplicateText(label)}`;
+}
+
+function extractFirstMarkdownLink(value) {
+  const match = String(value || "").match(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)(?:\s+"[^"]*")?\)/);
+  return match ? { label: match[1].trim(), url: match[2].trim() } : null;
+}
+
+function extractDisclosureDocumentKey(url) {
+  const text = String(url || "");
+  const irbankId = text.match(/(?:^|\/)(140120\d{12})(?:\.pdf|[/?#]|$)/i);
+  if (irbankId) return `tdnet:${irbankId[1].slice(6)}`;
+
+  const yahooPdf = text.match(/(?:^|\/)(20\d{6})(\d{6})\.pdf(?:[?#].*)?$/i);
+  if (yahooPdf) return `tdnet:${yahooPdf[1].slice(2)}${yahooPdf[2]}`;
+
+  const tdnetFile = text.match(/[?&](?:file|id|documentId)=([^&#]+)/i);
+  if (tdnetFile) return `tdnet-param:${decodeURIComponent(tdnetFile[1]).toLowerCase()}`;
+
+  return "";
+}
+
+function disclosureLinkPreferenceScore(url) {
+  try {
+    const parsed = new URL(String(url || ""));
+    const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+    if (host === "f.irbank.net") return 50;
+    if (/tdnet|jpx|release\.tdnet/i.test(host + parsed.pathname)) return 40;
+    if (host.includes("finance-frontend") || host.includes("yahoo")) return 30;
+    if (isDirectDisclosureFileUrl(url)) return 20;
+    if (isDisclosureDetailPageUrl(url)) return 10;
+  } catch {
+    return 0;
+  }
+  return 0;
+}
+
+function normalizeDisclosureDuplicateText(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .replace(/[‐-―−ー]/g, "-")
+    .replace(/[「」『』【】［］\[\]（）()]/g, "")
+    .replace(/\d{1,2}:\d{2}/g, "")
+    .replace(/\bTDnet\s*PDF\b/gi, "")
+    .replace(/\s+/g, "")
+    .toLowerCase();
 }
 
 function buildEmbedTitle(report) {
@@ -762,7 +898,23 @@ function assertDisclosureLinksAreDirectDisclosures(alertId, fieldMap) {
     if (!isDirectDisclosureLinkUrl(url)) {
       throw new Error(`report ${alertId} disclosure link must be a direct disclosure URL: ${label}`);
     }
+    if (!isTimestampedDisclosureLabel(label)) {
+      throw new Error(`report ${alertId} disclosure link label must be "YYYY-MM-DD 開示タイトル(hh:mm)": ${label}`);
+    }
   }
+}
+
+function isTimestampedDisclosureLabel(label) {
+  return /^20\d{2}-\d{2}-\d{2}\s+\S.+\((?:[01]?\d|2[0-3]):[0-5]\d\)$/.test(normalizeDisclosureLabelForDisplay(label));
+}
+
+function normalizeDisclosureLabelForDisplay(label) {
+  return String(label || "")
+    .normalize("NFKC")
+    .replace(/（/g, "(")
+    .replace(/）/g, ")")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function assertSourceLinksAreReferencePages(alertId, fieldMap) {
@@ -2038,7 +2190,7 @@ function selfTest() {
       { name: "足元材料", value: "直近決算では売上と利益の推移が確認材料。受注環境、原材料価格、固定費吸収の状況に加え、会社予想との進捗差も見る必要がある。単発材料ではなく継続性も確認したい。" },
       { name: "ファンダ要点", value: "増収要因が数量増なのか価格転嫁なのかで評価が変わる。利益率、在庫、キャッシュフローの改善が続くかを確認したい。会社予想との進捗差も重要になる。" },
       { name: "注意点", value: "短期の株価材料と中期の業績改善は分けて確認する。需要変動、為替、原材料価格、顧客集中に注意し、単発利益の有無も見たい。" },
-      { name: "開示リンク", value: "[開示1](https://example.com/disclosure.pdf)" },
+      { name: "開示リンク", value: "[2026-04-30 業績予想修正に関するお知らせ(15:00)](https://example.com/disclosure.pdf)" },
       { name: "Sources", value: "[出典1](https://example.com/ir)" }
     ]
   }), /non-descriptive link label/);
@@ -2052,7 +2204,7 @@ function selfTest() {
       { name: "足元材料", value: "公式IR/IRBANKを45日分確認したが、直近の個別開示は見当たらず、確認できる開示は限定的。2026年4月30日に業績予想修正を開示し、売上と利益の進捗が確認材料になっている。" },
       { name: "ファンダ要点", value: "業績予想修正は本業の採算改善と一過性要因を分けて確認する必要がある。利益率、受注残、キャッシュフローの改善が続くか、次回決算で会社計画との進捗差も見たい。" },
       { name: "注意点", value: "短期の株価材料と中期の業績改善は分けて確認する。需要変動、為替、原材料価格、顧客集中に注意し、単発利益の有無も見たい。" },
-      { name: "開示リンク", value: "[業績予想修正に関するお知らせ](https://example.com/disclosure.pdf)" },
+      { name: "開示リンク", value: "[2026-04-30 業績予想修正に関するお知らせ(15:00)](https://example.com/disclosure.pdf)" },
       { name: "Sources", value: "[株主・投資家情報｜テスト株式会社](https://example.com/ir)" }
     ]
   }), /research-log caveat/);
@@ -2066,7 +2218,7 @@ function selfTest() {
       { name: "足元材料", value: "2026-04-01に「子会社化完了に関するお知らせ」、「新製品提供開始に関するお知らせ」も確認。医療ITの製品ライン拡充とM&Aが同日に進み、導入施設数と保守収入の拡大が確認点になる。" },
       { name: "ファンダ要点", value: "医療ITでは導入施設数、保守・クラウド利用料、解約率、開発人員の稼働率が重要。買収子会社の売上・利益貢献と新製品の導入ペースを見たい。既存レセプト点検ソフトとのクロスセル余地も確認点になる。" },
       { name: "注意点", value: "M&Aは統合費用、既存製品との重複、医療機関への導入期間がリスクになる。販売開始後の契約件数と単価を確認したい。" },
-      { name: "開示リンク", value: "[子会社化完了に関するお知らせ](https://example.com/disclosure.pdf)" },
+      { name: "開示リンク", value: "[2026-04-01 子会社化完了に関するお知らせ(15:00)](https://example.com/disclosure.pdf)" },
       { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
     ]
   }), /disclosure title lists/);
@@ -2080,7 +2232,7 @@ function selfTest() {
       { name: "足元材料", value: "2026年4月30日に業績予想修正を開示し、売上と利益の進捗が確認材料になっている。利益率、受注残、キャッシュフローの改善が次回決算でも続くかを確認したい。" },
       { name: "ファンダ要点", value: "利益率、受注残、キャッシュフローの改善が次回決算でも続くかを確認したい。会社予想との進捗差、在庫、資金繰りも重要になり、一過性利益と本業採算を分けて見る必要がある。" },
       { name: "注意点", value: "短期の株価材料と中期の業績改善は分けて確認する。需要変動、為替、原材料価格、顧客集中に注意し、単発利益の有無も見たい。" },
-      { name: "開示リンク", value: "[業績予想修正に関するお知らせ](https://example.com/disclosure.pdf)" },
+      { name: "開示リンク", value: "[2026-04-30 業績予想修正に関するお知らせ(15:00)](https://example.com/disclosure.pdf)" },
       { name: "Sources", value: "[株主・投資家情報｜テスト株式会社](https://example.com/ir)" }
     ]
   }), /repeats the same long sentence/);
@@ -2094,7 +2246,7 @@ function selfTest() {
       { name: "足元材料", value: "2026年4月10日の適時開示で新しい契約を確認しました。IRBANKの開示一覧でも45日前後の新しい材料として追えるため、事業進捗、業績変化、資本政策のいずれに影響するかが確認点です。" },
       { name: "ファンダ要点", value: "ファンダ面では、この開示が継続収益の拡大、一過性損益、資金調達、提携・M&Aのどれに分類されるかが重要です。後続として、次回決算で売上、営業利益、現金収支への反映を確認したい局面です。" },
       { name: "注意点", value: "開示単体では金額、契約期間、希薄化、一過性の区別が十分に読み切れない場合があります。売買判断ではなく、追加IRと決算資料で実際の収益貢献を確認する前提です。" },
-      { name: "開示リンク", value: "[新規契約締結に関するお知らせ](https://example.com/disclosure.pdf)" },
+      { name: "開示リンク", value: "[2026-04-10 新規契約締結に関するお知らせ(15:00)](https://example.com/disclosure.pdf)" },
       { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
     ]
   }), /too generic/);
@@ -2108,7 +2260,7 @@ function selfTest() {
       { name: "足元材料", value: "2026年4月10日に大手小売チェーンへの新規導入を開示し、導入店舗数の拡大がARR増加につながるかが確認材料になっている。既存顧客への追加機能販売もあわせて見る局面。" },
       { name: "ファンダ要点", value: "ファンダ面では、この開示が継続収益の拡大、一過性損益、資金調達、提携・M&Aのどれに分類されるかが重要です。後続として、次回決算で売上、営業利益、現金収支への反映を確認したい局面です。" },
       { name: "注意点", value: "導入店舗数が増えても初期費用中心だとARRへの寄与は限定的になる。小売チェーン内の展開率、月額単価、解約率の開示が次の確認点。" },
-      { name: "開示リンク", value: "[大手小売チェーンへの新規導入に関するお知らせ](https://example.com/disclosure.pdf)" },
+      { name: "開示リンク", value: "[2026-04-10 大手小売チェーンへの新規導入に関するお知らせ(15:00)](https://example.com/disclosure.pdf)" },
       { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
     ]
   }), /ファンダ要点 is too generic/);
@@ -2122,7 +2274,7 @@ function selfTest() {
       { name: "足元材料", value: "2026年4月17日に業務提携を開示し、EC支援サービスの連携先拡大が利用店舗数と追加機能利用につながるかが確認材料になる。株主優待だけでなく本業KPIへの接続を見たい。" },
       { name: "ファンダ要点", value: "EC支援SaaSでは利用店舗数、解約率、ARPU、連携サービス経由の取扱量が収益の見方になる。提携が新規顧客獲得か既存顧客単価の上昇かを分けて確認したい。" },
       { name: "注意点", value: "提携は基本合意段階だと収益化時期と契約条件が読みづらい。導入社数、手数料率、開発負担、既存顧客への追加販売率が次の確認点になる。" },
-      { name: "開示リンク", value: "[Cafe24 Corp.との業務提携に関する基本合意書の締結に関するお知らせ](https://example.com/disclosure.pdf)" },
+      { name: "開示リンク", value: "[2026-04-17 Cafe24 Corp.との業務提携に関する基本合意書の締結に関するお知らせ(15:00)](https://example.com/disclosure.pdf)" },
       { name: "Sources", value: "[NE IRニュース一覧](https://example.com/ir/news)" }
     ]
   }), /事業概要 is too generic/);
@@ -2136,7 +2288,7 @@ function selfTest() {
       { name: "足元材料", value: "直近決算では売上と利益の推移が確認材料。受注環境、原材料価格、固定費吸収の状況に加え、会社予想との進捗差も見る必要がある。単発材料ではなく継続性も確認したい。" },
       { name: "ファンダ要点", value: "増収要因が数量増なのか価格転嫁なのかで評価が変わる。利益率、在庫、キャッシュフローの改善が続くかを確認したい。会社予想との進捗差も重要になる。" },
       { name: "注意点", value: "短期の株価材料と中期の業績改善は分けて確認する。需要変動、為替、原材料価格、顧客集中に注意し、単発利益の有無も見たい。" },
-      { name: "開示リンク", value: "[業績予想修正に関するお知らせ](https://example.com/disclosure)" },
+      { name: "開示リンク", value: "[2026-04-30 業績予想修正に関するお知らせ(15:00)](https://example.com/disclosure)" },
       { name: "Sources", value: "[株主・投資家情報｜テスト株式会社](https://example.com/ir)" }
     ]
   }), /direct disclosure URL/);
@@ -2150,7 +2302,7 @@ function selfTest() {
       { name: "足元材料", value: "直近決算では売上と利益の推移が確認材料。受注環境、原材料価格、固定費吸収の状況に加え、会社予想との進捗差も見る必要がある。単発材料ではなく継続性も確認したい。" },
       { name: "ファンダ要点", value: "増収要因が数量増なのか価格転嫁なのかで評価が変わる。利益率、在庫、キャッシュフローの改善が続くかを確認したい。会社予想との進捗差も重要になる。" },
       { name: "注意点", value: "短期の株価材料と中期の業績改善は分けて確認する。需要変動、為替、原材料価格、顧客集中に注意し、単発利益の有無も見たい。" },
-      { name: "開示リンク", value: "[業績予想修正に関するお知らせ](https://example.com/disclosure.pdf)" },
+      { name: "開示リンク", value: "[2026-04-30 業績予想修正に関するお知らせ(15:00)](https://example.com/disclosure.pdf)" },
       { name: "Sources", value: "[業績予想修正に関するお知らせ](https://example.com/disclosure.pdf)" }
     ]
   }), /source link must be a reference\/listing page URL/);
@@ -2178,7 +2330,7 @@ function selfTest() {
       { name: "足元材料", value: "2025年度決算説明資料を確認し、株主・投資家情報や事業内容ページもSourcesで参照。株主還元方針変更、優待廃止、再建計画など、収益改善と株主政策が同時に確認材料になっている。" },
       { name: "ファンダ要点", value: "黒字化計画は重要な材料だが、小売事業では在庫回転、粗利率、広告費、物流費の改善が伴う必要がある。既存顧客基盤を活かした再成長がどこまで進むかを確認したい。" },
       { name: "注意点", value: "カタログやEC需要の鈍化、在庫評価、物流費、広告費、構造改革費用に注意。還元方針変更は短期需給に影響しやすく、本業改善と分けて見る必要がある。" },
-      { name: "開示リンク", value: "[2025年度 決算説明資料](https://example.com/2025_presentation.pdf)" },
+      { name: "開示リンク", value: "[2025-05-15 2025年度 決算説明資料(15:00)](https://example.com/2025_presentation.pdf)" },
       { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
     ]
   }), /may be stale/);
@@ -2192,7 +2344,7 @@ function selfTest() {
       { name: "足元材料", value: "2026年5月1日に第1四半期決算関連資料が開示され、売上成長と利益進捗、サービス導入数の推移が確認材料になっている。古い有価証券報告書だけでは足元材料として不十分。" },
       { name: "ファンダ要点", value: "継続課金型の事業は安定性がある一方、導入施設数、利用率、単価、配送・洗濯・人件費が利益率を左右する。四半期進捗と通期計画との差を確認したい。" },
       { name: "注意点", value: "制度変更、施設稼働、物流費、人件費、競合サービスの影響に注意。売上成長が続いてもコスト増で利益率が鈍る可能性がある。" },
-      { name: "開示リンク", value: "[有価証券報告書 第29期](https://example.com/securities.pdf)" },
+      { name: "開示リンク", value: "[2025-06-27 有価証券報告書 第29期(15:00)](https://example.com/securities.pdf)" },
       { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
     ]
   }), /stale\/proxy document/);
@@ -2207,11 +2359,41 @@ function selfTest() {
       { name: "足元材料", value: "確認できる新しい個別材料は乏しく、古い公式資料で事業構成、収益源、リスク要因だけを補助確認する局面。新規材料としては扱わず、次回決算や会社開示で足元の進捗を確認したい。" },
       { name: "ファンダ要点", value: "新しい個別材料が乏しいため、足元の評価は保留気味。既存事業の継続性、利益率、資金繰り、固定費の吸収状況、受注や契約数の変化、次回決算での進捗確認が重要になる。" },
       { name: "注意点", value: "公式IR/IRBANKを45日分確認したが、直近の個別開示は見当たらず、確認できる開示は限定的。古い資料だけで短期材料を強く評価せず、次の会社開示や決算で裏付けを取りたい。" },
-      { name: "開示リンク", value: "[有価証券報告書 第29期](https://example.com/securities.pdf)" },
+      { name: "開示リンク", value: "[2025-06-27 有価証券報告書 第29期(15:00)](https://example.com/securities.pdf)" },
       { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)\n[テスト株式会社 会社概要](https://example.com/company)" }
     ]
   });
   assert.equal(sparseDisclosureEmbed.fields.some(field => field.name === "開示リンク"), true);
+  assert.throws(() => buildEmbed({
+    alertId: "a10c",
+    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    symbolCode: "1234",
+    symbolName: "テスト",
+    fields: [
+      { name: "事業概要", value: "精密部品を扱う製造業で、国内外の顧客向けに加工品と関連サービスを提供する会社。受注環境と工場稼働率が収益に効きやすい。" },
+      { name: "足元材料", value: "2026年5月14日に業績予想修正を開示し、売上と利益の進捗が確認材料になっている。利益率、受注残、キャッシュフローの改善が次回決算でも続くかを確認したい。" },
+      { name: "ファンダ要点", value: "販売数量、価格転嫁、固定費吸収、在庫水準が利益率の確認点になる。会社予想との進捗差や資金繰りも重要で、一過性利益と本業採算を分けて見る必要がある。" },
+      { name: "注意点", value: "短期の株価材料と中期の業績改善は分けて確認する。需要変動、為替、原材料価格、顧客集中に注意し、単発利益の有無も見たい。" },
+      { name: "開示リンク", value: "[2026-05-14 業績予想修正に関するお知らせ(15:30)](https://example.com/20260514534210.pdf)" },
+      { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
+    ]
+  }), /材料インパクト/);
+  const dedupeEmbed = buildEmbed({
+    alertId: "a10d",
+    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    symbolCode: "1234",
+    symbolName: "テスト",
+    fields: [
+      { name: "材料インパクト", value: "混在/要確認" },
+      { name: "事業概要", value: "精密部品を扱う製造業で、国内外の顧客向けに加工品と関連サービスを提供する会社。受注環境と工場稼働率が収益に効きやすい。" },
+      { name: "足元材料", value: "2026年5月14日に業績予想修正を開示し、売上と利益の進捗が確認材料になっている。利益率、受注残、キャッシュフローの改善が次回決算でも続くかを確認したい。" },
+      { name: "ファンダ要点", value: "販売数量、価格転嫁、固定費吸収、在庫水準が利益率の確認点になる。会社予想との進捗差や資金繰りも重要で、一過性利益と本業採算を分けて見る必要がある。" },
+      { name: "注意点", value: "短期の株価材料と中期の業績改善は分けて確認する。需要変動、為替、原材料価格、顧客集中に注意し、単発利益の有無も見たい。" },
+      { name: "開示リンク", value: "[2026-05-14 業績予想修正に関するお知らせ(15:30)](https://example.com/20260514534210.pdf)\n[2026-05-14 業績予想修正に関するお知らせ(15:30)](https://f.irbank.net/pdf/20260514/140120260514534210.pdf)" },
+      { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
+    ]
+  });
+  assert.equal(dedupeEmbed.fields.find(field => field.name === "開示リンク").value, "・[2026-05-14 業績予想修正に関するお知らせ(15:30)](https://f.irbank.net/pdf/20260514/140120260514534210.pdf)");
   const logEvent = buildPostLogEvent({
     alertId: "a11",
     symbolCode: "1234",
@@ -2249,15 +2431,16 @@ function selfTest() {
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
+      { name: "材料インパクト", value: "混在/要確認" },
       { name: "事業概要", value: "精密部品を扱う製造業で、国内外の顧客向けに加工品と関連サービスを提供する会社。受注環境と工場稼働率が収益に効きやすい。" },
       { name: "足元材料", value: "直近決算では売上と利益の推移が確認材料。受注環境、原材料価格、固定費吸収の状況に加え、会社予想との進捗差も見る必要がある。単発材料ではなく継続性も確認したい。" },
       { name: "ファンダ要点", value: "増収要因が数量増なのか価格転嫁なのかで評価が変わる。利益率、在庫、キャッシュフローの改善が続くかを確認したい。会社予想との進捗差も重要になる。" },
       { name: "注意点", value: "短期の株価材料と中期の業績改善は分けて確認する。需要変動、為替、原材料価格、顧客集中に注意し、単発利益の有無も見たい。" },
-      { name: "開示リンク", value: "[自己株式取得結果に関するお知らせ](https://irbank.net/1234/140120260212558146)" },
+      { name: "開示リンク", value: "[2026-02-12 自己株式取得結果に関するお知らせ(15:00)](https://irbank.net/1234/140120260212558146)" },
       { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
     ]
   });
-  assert.equal(detailEmbed.fields.find(f => f.name === "開示リンク").value, "・[自己株式取得結果に関するお知らせ](https://irbank.net/1234/140120260212558146)");
+  assert.equal(detailEmbed.fields.find(f => f.name === "開示リンク").value, "・[2026-02-12 自己株式取得結果に関するお知らせ(15:00)](https://irbank.net/1234/140120260212558146)");
   assert.equal(detailEmbed.fields.find(f => f.name === "Sources").value, "・[テスト株式会社 IRニュース一覧](https://example.com/ir/news)");
   const previousHours = process.env.PREMIUM_ALLOWED_JST_HOURS;
   const previousMinutes = process.env.PREMIUM_ALLOWED_JST_MINUTES;
