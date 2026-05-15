@@ -6706,10 +6706,7 @@ function createQuickRepairState_(version, businessDate, daysBack, minSessions) {
     staleDates: 0,
     parseErrors: 0,
     markedFailed: 0,
-<<<<<<< HEAD
 
-=======
->>>>>>> 723feb8 (Fix quickRepair infinite-loop and rescue thin-volume sessions)
     batches: 0,
     lastScanSymbols: 0,
     lastScanTasks: 0,
@@ -7248,10 +7245,7 @@ function processQuickRepairGroups_(sheet, groups, sessionInfo, minSessions) {
     deferredDates: 0,
     noDataDates: 0,
     markedFailed: 0,
-<<<<<<< HEAD
 
-=======
->>>>>>> 723feb8 (Fix quickRepair infinite-loop and rescue thin-volume sessions)
     missingSamples: [],
     rows: 0,
     parseErrors: 0,
@@ -8250,10 +8244,7 @@ function quickRepairRecentGaps(options) {
       state.totalRows += result.rows || 0;
       state.parseErrors += result.parseErrors || 0;
       state.markedFailed = (state.markedFailed || 0) + (result.markedFailed || 0);
-<<<<<<< HEAD
 
-=======
->>>>>>> 723feb8 (Fix quickRepair infinite-loop and rescue thin-volume sessions)
       state.batches++;
       if ((result.deferredDates || 0) === 0) {
         state.lastProcessedSymbol = batchGroups.length ? batchGroups[batchGroups.length - 1].symbol : (state.lastProcessedSymbol || "");
@@ -8270,10 +8261,7 @@ function quickRepairRecentGaps(options) {
         staleSymbols: result.staleSymbols || 0,
         staleDates: result.staleDates || 0,
         markedFailed: result.markedFailed || 0,
-<<<<<<< HEAD
 
-=======
->>>>>>> 723feb8 (Fix quickRepair infinite-loop and rescue thin-volume sessions)
         parseErrors: result.parseErrors || 0
       });
       if ((result.deferredDates || 0) > 0) {
