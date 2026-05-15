@@ -8283,7 +8283,6 @@ function quickRepairRecentGaps(options) {
     }
 
     writeProcessLog_("GAP_REPAIR", "Gap append phase finished. Scheduling post-repair cleanup instead of inline full dedupe/sort.", { rowsAddedThisRun: state.totalRows });
-
 const completeSummary = {
   ok: true,
   complete: true,
@@ -8303,7 +8302,6 @@ const completeSummary = {
 };
 
 return finalizeQuickRepairWithPostCleanup_(props, state, completeSummary);
-    
 
   } catch (e) {
     if (isTransientError_(e)) {
