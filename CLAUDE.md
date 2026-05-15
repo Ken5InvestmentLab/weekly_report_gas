@@ -36,7 +36,7 @@ GAS 本体のコードはすべて **`gas.txt`** 一ファイルに集約され�
 |---|---|---|
 | `sendDeferredDiscordPayload` | Discord 429 レート制限時 | 延期した Discord ペイロードを再送 |
 | `runDailyMaintenanceTrigger` | OHLCV PHASE4完了後 | `runDailyMaintenance` を起動 |
-| `quickRepairTrigger` | `runDailyMaintenance` 完了後 / cleanup完了後 | `quickRepairRecentGaps` を起動 |
+| `quickRepairTrigger` | `runDailyMaintenance` 完了後 / post-maintenancecleanup完了後 | `quickRepairRecentGaps` を起動 |
 | `resumeOHLCVFetchMidday` | 13:30先行OHLCV取得の再開時 | `fetchOHLCVForNewAlertsMidday` を再起動 |
 | `resumeOHLCVFetch` | OHLCV フェーズ再開時 | `fetchOHLCVForNewAlerts` を再起動 |
 | `resumeDailyMaintenance` | `runDailyMaintenance` 再開時 | `runDailyMaintenanceInternal_` を再起動 |
@@ -48,6 +48,8 @@ GAS 本体のコードはすべて **`gas.txt`** 一ファイルに集約され�
 | `resumeCleanupLegacyGapFailedAndEmptyTimestamps` | 旧OHLCV残骸整理未完了時 | 空timestamp・非09:00/13:00・長期GAP_FAILED整理を再開 |
 | `resumeEvaluationOhlcvCoverageRepair` | 評価対象銘柄OHLCV補填未完了時 | 120日OHLCV補填を再開 |
 | `resumeHistoricalOhlcvVolumeRepair` | 過去OHLCV出来高補正未完了時 | 出来高補正を再開 |
+| `runOhlcvPostMaintenanceCleanupTrigger` | `startOhlcvPostMaintenanceCleanupNow()` 手動実行時 | 日次メンテ後OHLCV掃除チェーン（timestamp正規化・superseded midday削除・重複整理）を再開 |
+| `resumeOhlcvRecoveryTimestampNormalization` | `startOhlcvRecovery20260513()` 等の日付別OHLCV回復処理の再開時 | timestamp正規化の再開 |
 
 **重要**: ワンショットトリガーは各ハンドラー関数の冒頭で `deleteTriggersByHandler_("自分の関数名")` を呼び、自分自身を削除してから処理を実行する。
 
@@ -84,7 +86,7 @@ status, note, logged_at
 
 - timestamp は `09:00 JST`（AM代表）または `13:00 JST`（PM代表）のみ。`09:00` のゼロ埋め必須（`9:00` は不正）
 - A列 timestamp は Date オブジェクトとして書き込み、セル書式 `"yyyy/mm/dd hh:mm"` を設定する（テキスト形式 `"@"` は使わない）
-- B列 `alert_id` に入るマーカー：通常取得は空文字/refresh ID、`MIDDAY_yyyy-mm-dd`（13:30先行取得）、`MIDDAY_LOCKED_yyyy-mm-dd`（保護行）、`GAP_REPAIR`（ギャップ修復）
+- B列 `alert_id` に入るマーカー：通常取得は空文字/refresh ID、`MIDDAY_yyyy-mm-dd`（13:30先行取得）、`MIDDAY_LOCKED_yyyy-mm-dd`（保護行）、`GAP_REPAIR`（ギャップ修復）、`GAP_FAILED`（取得失敗マーカー）
 - `MIDDAY_LOCKED_yyyy-mm-dd` は13:30で `alerts_raw` の出来高を転記したAM保護行。16:00本番・GAP修復・重複整理でも削除・上書き禁止
 - 重複排除は `timestamp + symbol` で行う
 - 最終状態は必ず A列 timestamp 昇順
@@ -108,21 +110,36 @@ status, note, logged_at
 |------|------|
 | `OHLCV_CURRENT_PHASE` | OHLCV 取得フェーズ管理（1〜4） |
 | `OHLCV_PROGRESS_INDEX` / `OHLCV_SYMBOL_LIST` | 16:00 本番取得の再開カーソルと対象銘柄 |
+| `OHLCV_NEW_ALERT_COUNT` | 16:00 本番取得時の当日シグナル銘柄数 |
+| `CURRENT_REFRESH_ID` | 現在のOHLCV取得ID |
+| `LAST_TS_MAP` | 銘柄別最終timestamp |
 | `OHLCV_MIDDAY_PROGRESS_INDEX` / `OHLCV_MIDDAY_SYMBOL_LIST` | 13:30 先行取得の再開カーソルと対象銘柄 |
+| `OHLCV_MIDDAY_NEW_ALERT_COUNT` | 13:30 先行取得時の当日シグナル銘柄数 |
+| `OHLCV_MIDDAY_LAST_TS_MAP` | 13:30 先行取得用の銘柄別最終timestamp |
+| `OHLCV_MIDDAY_REFRESH_ID` | 13:30 先行取得ID |
+| `OHLCV_MIDDAY_FULL_BACKFILL_SYMBOLS` | 13:30 で120日取得する真の新規銘柄 |
+| `OHLCV_MIDDAY_POSTPROCESS_PENDING` | 13:30 後処理トリガーが残っているかの印 |
 | `OHLCV_MIDDAY_POSTPROCESS_STATE_V1` | 13:30 後処理（不正timestamp掃除）の再開状態 |
 | `OHLCV_MIDDAY_ROLLBACK_STATE_V1` | 13:30 戻し処理の再開状態 |
+| `OHLCV_MIDDAY_ROLLBACK_SYMBOLS_V1` | 13:30 戻し処理で120日削除する銘柄 |
 | `DAILY_MAINT_CURSOR` | `runDailyMaintenance` の再開カーソル |
+| `DAILY_MAINT_NEW_COUNT` | 日次メンテナンス用の新規件数メタ |
+| `DAILY_MAINT_REFRESH_ID` | 日次メンテナンス用の取得IDメタ |
+| `OHLCV_COMPLETION_NOTICE_PENDING_V1` | `runDailyMaintenance` 完了後に保存する Discord 完了通知ペイロード。`resumeOhlcvPostRepairCleanup` 完了後に送信される |
 | `QUICK_REPAIR_STATE` | `quickRepairRecentGaps` の再開状態（v7） |
 | `QUICK_REPAIR_TAIL_CLEANUP_STATE` | GAP修復入口の末尾不正timestamp掃除状態 |
 | `OHLCV_POST_REPAIR_CLEANUP_STATE_V1` | GAP修復後 cleanup の再開状態 |
 | `OHLCV_INTRADAY_STALE_SYMBOLS_V1` | Yahoo 1h が古い/null の銘柄の一時保留リスト |
 | `CLEANUP_LEGACY_STATE_V1` | 旧OHLCV残骸整理の再開状態 |
+| `CLEANUP_LEGACY_AUTO_QUICK_REPAIR_V1` | cleanup完了後に `quickRepairTrigger` を予約するためのフラグ |
 | `SPLIT_QUEUE` / `SPLIT_INDEX` | 株式分割調整キューの進捗 |
+| `OHLCV_SPLIT_CACHE` | 株式分割情報キャッシュ |
 | `VARIANT_HISTORY_V1` | 週次レポート文言の重複防止履歴（JSON） |
 | `OHLCV_REPAIR_SYMBOLS` | 次回OHLCV取得で120日再取得する修復対象銘柄 |
-| `QUICK_REPAIR_FAIL_COUNTS_V1` | quickRepair で 0 行返却が続く銘柄+日付の失敗回数。3 回連続失敗で `GAP_FAILED` 行を書き込みループを断つ |
-
-
+| `OHLCV_MANUAL_BUSINESS_DATE` / `OHLCV_MANUAL_BUSINESS_EXPIRES_AT` | 手動基準日と期限 |
+| `QUICK_REPAIR_FAIL_COUNTS_V1` | quickRepair で 0 行返却が続く銘柄+日付の失敗回数。1h と 1d の両方が空の場合は即時 `GAP_FAILED`、0 行返却が3回連続の場合も `GAP_FAILED` を書き込みループを断つ |
+| `EVAL_OHLCV_COVERAGE_REPAIR_STATE_V1` | 評価対象銘柄120日OHLCV補填の再開状態 |
+| `HISTORICAL_VOLUME_REPAIR_STATE_V1` | 過去OHLCV出来高補正の再開状態 |
 
 ## アーキテクチャ上の重要事項
 
@@ -134,12 +151,15 @@ status, note, logged_at
 16:00  fetchOHLCVForNewAlerts → (PHASE1→2→3→4)
          → PHASE4完了: runDailyMaintenanceTrigger（1分後）
            → runDailyMaintenance: 評価日到達銘柄の価格更新
-             → 完了後: quickRepairTrigger（1分後）
+             → 完了後: Discord完了通知をOHLCV_COMPLETION_NOTICE_PENDING_V1に保存
+               + quickRepairTrigger（1分後）
                → quickRepairRecentGaps: セッション欠落修復
                  → 完了後: resumeOhlcvPostRepairCleanup
                    → timestamp正規化・AM保護・重複整理・ソート
                      → 完了後: OHLCV完了Discord通知 + GitHub Actions
 ```
+
+**重要**: Discord完了通知は `runDailyMaintenance` 完了直後には送らない。`OHLCV_COMPLETION_NOTICE_PENDING_V1` に保存し、`resumeOhlcvPostRepairCleanup` の最終ステップで送信する。
 
 ### タイムアウト対策パターン（2種類）
 
@@ -167,6 +187,21 @@ PHASE4: 重複排除・ソート・完了通知 → runDailyMaintenanceTrigger �
 
 フェーズはスクリプトプロパティ `OHLCV_CURRENT_PHASE` で管理。13:30/16:00本体では `range=5d` を使わず必ず `period1/period2` を使う。
 
+### OHLCV 取得窓の決定ロジック
+
+`buildOhlcvRequestPairForEndMillis_()` で決定する。基準値: `OHLCV_DEFAULT_LOOKBACK_DAYS=120`、`RECENT_RANGE_DAYS=5`、`OVERLAP_DAYS=3`。
+
+| 状態 | 取得方法 |
+|---|---|
+| OHLCV未取得銘柄 | 直近120日分 |
+| `OHLCV_REPAIR_SYMBOLS` 対象 | 直近120日分を強制再取得 |
+| `lastTs` が直近5日以内 | `lastTs - 3日` から取得終了時刻まで `period1/period2` |
+| `lastTs` が6日〜120日以内 | `lastTs - 3日` から現在まで `period1/period2` |
+| `lastTs` が120日より古い | 直近120日分 |
+| `lastTs` が取得終了時刻以上 | 異常値対策として直近範囲を `period1/period2` |
+
+3日の重ね取りは Yahoo側の欠損・祝日・前回途中終了・AM/PM合成境界ズレを吸収するため。取得後は `timestamp + symbol` で重複排除する。
+
 ### Yahoo Finance 1h足の集約ルール
 
 - AMバケット: `09:00` / `10:00` / `11:00` / `12:00` 足をマージ → シートは `09:00 JST`
@@ -189,6 +224,8 @@ PHASE4: 重複排除・ソート・完了通知 → runDailyMaintenanceTrigger �
 ### GAP 修復の仕組み
 
 `quickRepairRecentGaps` は `ohlcv_4h` 全行スキャンを避け、直近 `daysBack` 日分を銘柄バッチ単位で Yahoo Finance から再取得する。取得は `UrlFetchApp.fetchAll`、進捗は `QUICK_REPAIR_STATE` v7 で再開。修復行は B列に `GAP_REPAIR` を入れて追記。完了後は `dedupeAndSortOhlcv_()` を直接呼ばず `resumeOhlcvPostRepairCleanup` に委譲する。
+
+**GAP_FAILED 生成条件**: 1h と 1d の両方が空（デュアルミス）の場合は即座に `GAP_FAILED` 行を書く。それ以外の 0 行返却が `QUICK_REPAIR_FAIL_THRESHOLD=3` 回連続した場合も `GAP_FAILED` を書いてループを断つ。
 
 `quickScanMissingSessions` と `auditGapRepairCoverage` は A列 timestamp 昇順を前提に末尾から直近日数分だけ読む。全行読み込みに戻すと行数が多い環境でタイムアウトするため禁止。
 
@@ -253,10 +290,27 @@ diagOhlcvTimestamps()                 // 無効タイムスタンプ行の診断
 diagOneSessionDays()                  // 1セッションしかない日を診断
 repairEmptyTimestampRows(true)        // DryRun でタイムスタンプ修復を確認
 repairEmptyTimestampRows(false)       // 空/無効timestamp削除 本番
+repairBlankTimestampOhlcvRowsNow()    // 空timestampを即時修復（緊急用）
 cleanupLegacyGapFailedAndEmptyTimestamps(true)   // 旧OHLCV残骸整理 DryRun
 cleanupLegacyGapFailedAndEmptyTimestamps(false)  // 旧OHLCV残骸整理 本番
 emergencyStopQuickRepairAndCleanOhlcv()          // GAP修復停止→OHLCV整理→quickRepairTrigger予約
 purgeBogusGapRepairRows()             // 不正な GAP_REPAIR 行を削除
+
+// 日次メンテ後OHLCV掃除チェーン（手動起動パス）
+startOhlcvPostMaintenanceCleanupNow() // OHLCV掃除チェーンを手動開始（timestamp正規化→superseded midday削除→重複整理→quickRepairTrigger予約）
+resetOhlcvPostMaintenanceCleanupNow() // OHLCV掃除チェーンの状態とトリガーをリセット
+
+// 緊急停止・強制終了
+stopOhlcvResumeLoopNow()              // resumeOHLCVFetch/resumeOHLCVFetchMidday を削除して再開ループ停止
+forceFinishOhlcvPhase4LightNow()      // PHASE4 軽量版で強制完了、日次メンテナンスをチェーン
+forceFinishOhlcvPhase4UltraLightNow() // PHASE4 超軽量版で強制完了
+emergencyStopOhlcvTimeoutLoop()       // OHLCV本番取得のタイムアウトループ停止・進捗プロパティ全クリア
+
+// 日付別OHLCV回復（one-shot補修）
+previewOhlcvRecovery20260513()        // 2026-05-13 OHLCV回復のDryRun確認
+startOhlcvRecovery20260513()          // 2026-05-13 のtimestamp正規化→cleanup→GAP修復スケジュール
+previewRepairOhlcvAm20260511Only()    // 2026-05-11 AM行修復のDryRun確認
+repairOhlcvAm20260511Only()           // 2026-05-11 AM行修復 本番
 
 // 単発補填
 refetchTodayOhlcv()                          // 当日OHLCV再取得
