@@ -702,21 +702,23 @@ function runDailyMaintenanceInternal_(isResume, newCount, refreshId) {
     clearDailyMaintenanceState_();
     deleteTriggersByHandler_(CONFIG.DAILY_CONT_TRIGGER_HANDLER);
 
-    // Discord通知をここで即時送信。GitHub Actionsはpost-repair cleanup完了後に起動する。
-    const displayCount = meta.newCount !== "" ? String(meta.newCount) : "0";
-    const tag = (meta.refreshId && typeof meta.refreshId === "string") ? (meta.refreshId.includes("AM") ? "AM" : "PM") : "AUTO";
-    sendCompletionNotice_(displayCount, "0", tag);
-    deleteTriggersByHandler_("quickRepairTrigger");
-    ScriptApp.newTrigger("quickRepairTrigger")
-      .timeBased()
-      .after(60 * 1000)
-      .create();
+// Discord通知はここでは送らず、post-repair cleanup完了後に送るため保存だけする
+const displayCount = meta.newCount !== "" ? String(meta.newCount) : "0";
+const tag = (meta.refreshId && typeof meta.refreshId === "string") ? (meta.refreshId.includes("AM") ? "AM" : "PM") : "AUTO";
 
-    writeProcessLog_("日次メンテナンス", "評価更新完了・Discord通知送信済み。GAP修復を1分後に起動します。GitHub optimize はGAP修復完了後に起動します。", {
-      handlerName: "quickRepairTrigger",
-      discordNotice: "sent",
-      githubOptimize: "after_quick_repair"
-    });
+savePendingOhlcvCompletionNotice_(displayCount, "0", tag);
+
+deleteTriggersByHandler_("quickRepairTrigger");
+ScriptApp.newTrigger("quickRepairTrigger")
+  .timeBased()
+  .after(60 * 1000)
+  .create();
+
+writeProcessLog_("日次メンテナンス", "評価更新完了。Discord通知はpost-repair cleanup完了後に送信します。GAP修復を1分後に起動します。", {
+  handlerName: "quickRepairTrigger",
+  discordNotice: "pending_after_post_repair_cleanup",
+  githubOptimize: "after_post_repair_cleanup"
+});
 
     const purgeDebugResult = purgeOldDebugLogs_();
     return { ok: true, evaluation: result, purgeDebugResult: purgeDebugResult };
@@ -11429,10 +11431,13 @@ function completeOhlcvPostRepairCleanup_(state) {
   deleteTriggersByHandler_("resumeQuickRepair");
   clearManualOhlcvBusinessDate_();
 
-  summary.githubOptimize = triggerGitHubActionsOptimize_();
+summary.githubOptimize = triggerGitHubActionsOptimize_();
 
-  writeProcessLog_("OHLCV_POST_REPAIR", "Post-repair cleanup completed. GitHub Actions triggered. Discord notice was already sent at daily maintenance completion.", summary);
-  return summary;
+// post-repair cleanup完了後に、保留していたDiscord通知を送信する
+summary.discordNotice = sendPendingOhlcvCompletionNoticeAfterQuickRepair_(summary);
+
+writeProcessLog_("OHLCV_POST_REPAIR", "Post-repair cleanup completed. GitHub Actions triggered. Discord notice sent after post-repair cleanup.", summary);
+return summary;
 }
 
 function loadOhlcvPostRepairCleanupState_() {
