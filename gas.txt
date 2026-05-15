@@ -4912,6 +4912,7 @@ function parseIntraResponse_(tvSymbol, intraRes, factorMap, dailyMap, options) {
   }
 
   const candlesByPeriod = {};
+  const flatZeroFallbackByPeriod = {};
   const zeroVolumePriceSessionMap = {};
   const round = val => Math.round(Number(val) * 100) / 100;
 
@@ -5023,8 +5024,22 @@ function parseIntraResponse_(tvSymbol, intraRes, factorMap, dailyMap, options) {
       continue;
     }
 
-    // その他の V=0 かつ OHLC同値バーは、従来どおりダミーとしてスキップ
+    // その他の V=0 かつ OHLC同値バーは、通常はダミーとしてスキップする。
+    // ただし normal バーが一本も無いセッションでは行ゼロになって永久に gap が
+    // 埋まらないため、最後に観測した flat-zero バーを「同セッションキーに
+    // normal バーが無ければ採用する候補」として一旦控えておく。
     if (isFlatZeroVolume) {
+      const sessionHour = sessionName === "AM" ? 9 : 13;
+      const normalizedTs = new Date(`${dateKey}T${String(sessionHour).padStart(2, "0")}:00:00+09:00`);
+      flatZeroFallbackByPeriod[key] = {
+        timestamp: normalizedTs,
+        symbol: tvSymbol,
+        open: round(open),
+        high: round(high),
+        low: round(low),
+        close: round(close),
+        volume: 0
+      };
       continue;
     }
 
@@ -5059,6 +5074,14 @@ function parseIntraResponse_(tvSymbol, intraRes, factorMap, dailyMap, options) {
       }
     }
   }
+
+  // flat-zero フォールバック: normal バーが一本も無いセッションキーだけ採用する。
+  // これで薄商い銘柄（出来高 0 / OHLC 同値しか返らない日）の AM/PM 行を取りこぼさない。
+  Object.keys(flatZeroFallbackByPeriod).forEach(key => {
+    if (candlesByPeriod[key]) return;
+    candlesByPeriod[key] = flatZeroFallbackByPeriod[key];
+    zeroVolumePriceSessionMap[key] = true;
+  });
 
   // ★ここで日足出来高による補正を実行する
   repairSessionVolumesWithDailyVolume_(candlesByPeriod, dailyMap, zeroVolumePriceSessionMap);
@@ -5715,6 +5738,11 @@ function refetchSymbolRange(options) {
 // ============================================================
 
 const QUICK_REPAIR_STATE_KEY = "QUICK_REPAIR_STATE";
+const QUICK_REPAIR_FAIL_COUNTS_KEY = "QUICK_REPAIR_FAIL_COUNTS_V1";
+// 同じ symbol|date が連続でこの回数 0 行返却となったら GAP_FAILED を書き込み、ループを断つ
+const QUICK_REPAIR_FAIL_THRESHOLD = 3;
+// 失敗カウンタの保持期間（日）。過ぎたキーは書き戻し時にパージする
+const QUICK_REPAIR_FAIL_RETAIN_DAYS = 21;
 const QUICK_REPAIR_BATCH_SYMBOLS = 40;
 const QUICK_REPAIR_MAX_RUN_MS = 3.5 * 60 * 1000;
 const QUICK_REPAIR_RESUME_AFTER_MS = 60 * 1000;
@@ -6700,12 +6728,14 @@ function createQuickRepairState_(version, businessDate, daysBack, minSessions) {
     processedGroups: 0,
     processedTasks: 0,
     repairedDates: 0,
+    partialDates: 0,
     failedDates: 0,
     deferredDates: 0,
     deferredSymbols: 0,
     staleSymbols: 0,
     staleDates: 0,
     parseErrors: 0,
+    markedFailed: 0,
     batches: 0,
     lastScanSymbols: 0,
     lastScanTasks: 0,
@@ -7241,9 +7271,11 @@ function processQuickRepairGroups_(sheet, groups, sessionInfo, minSessions) {
     groups: pendingGroups.length,
     tasks: countQuickRepairGroupTasks_(pendingGroups),
     repairedDates: 0,
+    partialDates: 0,
     failedDates: 0,
     deferredDates: 0,
     noDataDates: 0,
+    markedFailed: 0,
     missingSamples: [],
     rows: 0,
     parseErrors: 0,
@@ -7342,6 +7374,9 @@ function processQuickRepairGroups_(sheet, groups, sessionInfo, minSessions) {
     recordIntradayStaleSymbols_(staleRecords, getOhlcvBusinessDateKey_());
   }
 
+  const failMap = readQuickRepairFailCounts_();
+  const gapFailedRows = [];
+  const gapFailedSamples = [];
   metaList.forEach(meta => {
     meta.dates.forEach(dateStr => {
       const key = meta.symbol + "|" + dateStr;
@@ -7351,22 +7386,110 @@ function processQuickRepairGroups_(sheet, groups, sessionInfo, minSessions) {
       const fetchedCount = countMergedSessionPeriods_(sessionInfo.periodMap, fetchedPeriodMap, key);
       if (savedCount >= minSessions) {
         summary.repairedDates++;
-      } else {
-        summary.noDataDates++;
-        if (summary.missingSamples.length < 10) {
-          summary.missingSamples.push({
+        delete failMap[key];
+        return;
+      }
+      if (savedCount >= 1) {
+        summary.partialDates++;
+        delete failMap[key];
+        return;
+      }
+      // savedCount === 0 → 真の失敗。連続失敗回数を加算し、閾値に達したら GAP_FAILED を書き込む。
+      summary.noDataDates++;
+      summary.failedDates++;
+      if (summary.missingSamples.length < 10) {
+        summary.missingSamples.push({
+          symbol: meta.symbol,
+          date: dateStr,
+          sessionsAfterFetch: fetchedCount,
+          sessionsAfterSave: savedCount
+        });
+      }
+      const prevCount = Number(failMap[key]) || 0;
+      const nextCount = prevCount + 1;
+      if (nextCount >= QUICK_REPAIR_FAIL_THRESHOLD) {
+        try {
+          const failedRowsForKey = makeGapFailedRows_(meta.symbol, dateStr, sessionInfo.periodMap, savedPeriodMap);
+          failedRowsForKey.forEach(r => gapFailedRows.push(r));
+          if (failedRowsForKey.length > 0) {
+            summary.markedFailed++;
+            if (gapFailedSamples.length < 10) {
+              gapFailedSamples.push({ symbol: meta.symbol, date: dateStr, attempts: nextCount });
+            }
+          }
+          delete failMap[key];
+        } catch (err) {
+          // GAP_FAILED 行が作れない場合は失敗カウンタだけ残し、次回再試行。
+          failMap[key] = nextCount;
+          writeProcessLog_("ギャップ修復", `${meta.symbol} ${dateStr} の GAP_FAILED 行を作れませんでした。次回も再試行します。`, {
             symbol: meta.symbol,
             date: dateStr,
-            sessionsAfterFetch: fetchedCount,
-            sessionsAfterSave: savedCount
+            message: err && err.message
           });
         }
-        summary.failedDates++;
+      } else {
+        failMap[key] = nextCount;
       }
     });
   });
 
+  if (gapFailedRows.length > 0) {
+    const gapFailedAppend = appendOhlcvRowsToSheetDetailed_(sheet, gapFailedRows, "quickRepair.gapFailed");
+    summary.rows += gapFailedAppend.rows || 0;
+    if (gapFailedAppend.appendFailed) {
+      summary.appendFailed = true;
+      summary.appendFailure = summary.appendFailure || {
+        requestedRows: gapFailedAppend.requestedRows || gapFailedRows.length,
+        validRows: gapFailedAppend.validRows || 0,
+        persistedRows: gapFailedAppend.rows || 0,
+        deletedRows: gapFailedAppend.deletedRows || 0,
+        preWriteSamples: gapFailedAppend.preWriteSamples || []
+      };
+    }
+    writeProcessLog_("ギャップ修復", `0行が ${QUICK_REPAIR_FAIL_THRESHOLD} 回続いた銘柄+日付に GAP_FAILED マーカーを記録しました。次回以降は missing から除外されます。`, {
+      markedFailed: summary.markedFailed,
+      rowsWritten: gapFailedAppend.rows || 0,
+      samples: gapFailedSamples
+    });
+  }
+
+  writeQuickRepairFailCounts_(failMap);
+
   return summary;
+}
+
+function readQuickRepairFailCounts_() {
+  try {
+    const raw = PropertiesService.getScriptProperties().getProperty(QUICK_REPAIR_FAIL_COUNTS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return {};
+    return parsed;
+  } catch (e) {
+    return {};
+  }
+}
+
+function writeQuickRepairFailCounts_(failMap) {
+  const props = PropertiesService.getScriptProperties();
+  const cleaned = {};
+  const now = new Date();
+  const cutoff = new Date(now.getTime() - QUICK_REPAIR_FAIL_RETAIN_DAYS * 24 * 60 * 60 * 1000);
+  const cutoffKey = Utilities.formatDate(cutoff, CONFIG.TIMEZONE, "yyyy/MM/dd");
+  Object.keys(failMap || {}).forEach(key => {
+    const count = Number(failMap[key]) || 0;
+    if (count <= 0) return;
+    const parts = key.split("|");
+    if (parts.length !== 2) return;
+    const dateStr = normalizeDateStrSlash_(parts[1]);
+    if (!dateStr || dateStr < cutoffKey) return;
+    cleaned[key] = count;
+  });
+  if (Object.keys(cleaned).length === 0) {
+    props.deleteProperty(QUICK_REPAIR_FAIL_COUNTS_KEY);
+  } else {
+    props.setProperty(QUICK_REPAIR_FAIL_COUNTS_KEY, JSON.stringify(cleaned));
+  }
 }
 
 function readOhlcvRepairSymbols_() {
@@ -8014,12 +8137,14 @@ function quickRepairRecentGaps(options) {
       state.processedGroups += batchGroups.length;
       state.processedTasks += countQuickRepairGroupTasks_(batchGroups);
       state.repairedDates += result.repairedDates || 0;
+      state.partialDates = (state.partialDates || 0) + (result.partialDates || 0);
       state.failedDates += result.failedDates || 0;
       state.deferredDates += result.deferredDates || 0;
       state.staleSymbols += result.staleSymbols || 0;
       state.staleDates += result.staleDates || 0;
       state.totalRows += result.rows || 0;
       state.parseErrors += result.parseErrors || 0;
+      state.markedFailed = (state.markedFailed || 0) + (result.markedFailed || 0);
       state.batches++;
       if ((result.deferredDates || 0) === 0) {
         state.lastProcessedSymbol = batchGroups.length ? batchGroups[batchGroups.length - 1].symbol : (state.lastProcessedSymbol || "");
@@ -8030,10 +8155,12 @@ function quickRepairRecentGaps(options) {
       writeProcessLog_("ギャップ修復", `補填バッチが完了しました。進捗は ${groupIndex}/${groups.length} 銘柄グループです。`, {
         rowsAdded: result.rows || 0,
         repairedDates: result.repairedDates || 0,
+        partialDates: result.partialDates || 0,
         failedDates: result.failedDates || 0,
         deferredDates: result.deferredDates || 0,
         staleSymbols: result.staleSymbols || 0,
         staleDates: result.staleDates || 0,
+        markedFailed: result.markedFailed || 0,
         parseErrors: result.parseErrors || 0
       });
       if ((result.deferredDates || 0) > 0) {
@@ -8055,7 +8182,7 @@ function quickRepairRecentGaps(options) {
     }
 
     writeProcessLog_("GAP_REPAIR", "Gap append phase finished. Scheduling post-repair cleanup instead of inline full dedupe/sort.", { rowsAddedThisRun: state.totalRows });
-    const completeSummary = { ok: true, complete: true, totalGroups: groups.length, totalTasks: tasks.length, rows: state.totalRows, processedGroups: state.processedGroups, processedTasks: state.processedTasks, repairedDates: state.repairedDates, failedDates: state.failedDates, deferredDates: state.deferredDates, staleSymbols: state.staleSymbols || 0, staleDates: state.staleDates || 0, parseErrors: state.parseErrors };
+    const completeSummary = { ok: true, complete: true, totalGroups: groups.length, totalTasks: tasks.length, rows: state.totalRows, processedGroups: state.processedGroups, processedTasks: state.processedTasks, repairedDates: state.repairedDates, partialDates: state.partialDates || 0, failedDates: state.failedDates, deferredDates: state.deferredDates, staleSymbols: state.staleSymbols || 0, staleDates: state.staleDates || 0, markedFailed: state.markedFailed || 0, parseErrors: state.parseErrors };
     return finalizeQuickRepairWithPostCleanup_(props, state, completeSummary);
     writeProcessLog_("ギャップ修復", "ギャップ修復が完了しました。", {
       groups: groups.length,
@@ -8112,6 +8239,7 @@ function resetQuickRepairState() {
   PropertiesService.getScriptProperties().deleteProperty(QUICK_REPAIR_STATE_KEY);
   PropertiesService.getScriptProperties().deleteProperty(QUICK_REPAIR_CLEANUP_STATE_KEY);
   PropertiesService.getScriptProperties().deleteProperty(OHLCV_POST_REPAIR_CLEANUP_STATE_KEY);
+  PropertiesService.getScriptProperties().deleteProperty(QUICK_REPAIR_FAIL_COUNTS_KEY);
   deleteTriggersByHandler_("resumeQuickRepair");
   deleteTriggersByHandler_("quickRepairTrigger");
   deleteTriggersByHandler_(OHLCV_POST_REPAIR_CLEANUP_HANDLER);

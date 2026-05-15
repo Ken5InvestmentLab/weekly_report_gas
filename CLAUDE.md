@@ -120,9 +120,7 @@ status, note, logged_at
 | `SPLIT_QUEUE` / `SPLIT_INDEX` | 株式分割調整キューの進捗 |
 | `VARIANT_HISTORY_V1` | 週次レポート文言の重複防止履歴（JSON） |
 | `OHLCV_REPAIR_SYMBOLS` | 次回OHLCV取得で120日再取得する修復対象銘柄 |
-| `OHLCV_MANUAL_BUSINESS_DATE` / `OHLCV_MANUAL_BUSINESS_EXPIRES_AT` | 手動基準日と期限 |
-| `EVAL_OHLCV_COVERAGE_REPAIR_STATE_V1` | 評価対象銘柄120日OHLCV補填の再開状態 |
-| `HISTORICAL_VOLUME_REPAIR_STATE_V1` | 過去OHLCV出来高補正の再開状態 |
+
 
 ## アーキテクチャ上の重要事項
 

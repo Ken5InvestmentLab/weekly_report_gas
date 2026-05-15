@@ -4,7 +4,9 @@
       "Bash(python3)",
       "Bash(where python3 *)",
       "Bash(where python *)",
-      "Bash(python3 -c \"print\\('hello'\\)\")"
+      "Bash(python3 -c \"print\\('hello'\\)\")",
+      "Bash(mkdir -p /root/.claude/plans)",
+      "Read(//root/.claude/plans/**)"
     ]
   }
 }
