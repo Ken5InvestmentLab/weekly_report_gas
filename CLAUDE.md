@@ -83,7 +83,7 @@ status, note, logged_at
 列: `timestamp, alert_id, symbol, open, high, low, close, volume`
 
 - timestamp は `09:00 JST`（AM代表）または `13:00 JST`（PM代表）のみ。`09:00` のゼロ埋め必須（`9:00` は不正）
-- A列 timestamp は文字列 `yyyy/MM/dd HH:mm` 形式でテキストセル（`setNumberFormat("@")`）として保存する。シリアル値で保存しない
+- A列 timestamp は Date オブジェクトとして書き込み、セル書式 `"yyyy/mm/dd hh:mm"` を設定する（テキスト形式 `"@"` は使わない）
 - B列 `alert_id` に入るマーカー：通常取得は空文字/refresh ID、`MIDDAY_yyyy-mm-dd`（13:30先行取得）、`MIDDAY_LOCKED_yyyy-mm-dd`（保護行）、`GAP_REPAIR`（ギャップ修復）
 - `MIDDAY_LOCKED_yyyy-mm-dd` は13:30で `alerts_raw` の出来高を転記したAM保護行。16:00本番・GAP修復・重複整理でも削除・上書き禁止
 - 重複排除は `timestamp + symbol` で行う
