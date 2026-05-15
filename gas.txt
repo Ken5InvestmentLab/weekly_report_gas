@@ -6736,8 +6736,7 @@ function createQuickRepairState_(version, businessDate, daysBack, minSessions) {
     staleDates: 0,
     parseErrors: 0,
     markedFailed: 0,
-    dailyFallbackDates: 0,
-    dailyFallbackRows: 0,
+
     batches: 0,
     lastScanSymbols: 0,
     lastScanTasks: 0,
@@ -7278,8 +7277,7 @@ function processQuickRepairGroups_(sheet, groups, sessionInfo, minSessions) {
     deferredDates: 0,
     noDataDates: 0,
     markedFailed: 0,
-    dailyFallbackDates: 0,
-    dailyFallbackRows: 0,
+
     missingSamples: [],
     rows: 0,
     parseErrors: 0,
@@ -8257,8 +8255,7 @@ function quickRepairRecentGaps(options) {
       state.totalRows += result.rows || 0;
       state.parseErrors += result.parseErrors || 0;
       state.markedFailed = (state.markedFailed || 0) + (result.markedFailed || 0);
-      state.dailyFallbackDates = (state.dailyFallbackDates || 0) + (result.dailyFallbackDates || 0);
-      state.dailyFallbackRows = (state.dailyFallbackRows || 0) + (result.dailyFallbackRows || 0);
+
       state.batches++;
       if ((result.deferredDates || 0) === 0) {
         state.lastProcessedSymbol = batchGroups.length ? batchGroups[batchGroups.length - 1].symbol : (state.lastProcessedSymbol || "");
@@ -8275,8 +8272,7 @@ function quickRepairRecentGaps(options) {
         staleSymbols: result.staleSymbols || 0,
         staleDates: result.staleDates || 0,
         markedFailed: result.markedFailed || 0,
-        dailyFallbackDates: result.dailyFallbackDates || 0,
-        dailyFallbackRows: result.dailyFallbackRows || 0,
+
         parseErrors: result.parseErrors || 0
       });
       if ((result.deferredDates || 0) > 0) {
@@ -8298,7 +8294,7 @@ function quickRepairRecentGaps(options) {
     }
 
     writeProcessLog_("GAP_REPAIR", "Gap append phase finished. Scheduling post-repair cleanup instead of inline full dedupe/sort.", { rowsAddedThisRun: state.totalRows });
-    const completeSummary = { ok: true, complete: true, totalGroups: groups.length, totalTasks: tasks.length, rows: state.totalRows, processedGroups: state.processedGroups, processedTasks: state.processedTasks, repairedDates: state.repairedDates, partialDates: state.partialDates || 0, failedDates: state.failedDates, deferredDates: state.deferredDates, staleSymbols: state.staleSymbols || 0, staleDates: state.staleDates || 0, markedFailed: state.markedFailed || 0, dailyFallbackDates: state.dailyFallbackDates || 0, dailyFallbackRows: state.dailyFallbackRows || 0, parseErrors: state.parseErrors };
+
     return finalizeQuickRepairWithPostCleanup_(props, state, completeSummary);
     writeProcessLog_("ギャップ修復", "ギャップ修復が完了しました。", {
       groups: groups.length,
