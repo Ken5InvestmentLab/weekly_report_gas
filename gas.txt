@@ -7979,7 +7979,7 @@ function quickRepairRecentGaps(options) {
     const sessionInfo = scan.sessionInfo || { countMap: {}, periodMap: {}, markerMap: {} };
     let groupIndex = findQuickRepairStartGroupIndex_(groups, state.lastProcessedSymbol);
     if (groupIndex > 0) {
-      writeProcessLog_("繧ｮ繝｣繝・・菫ｮ蠕ｩ", "保存済みの再開位置からGAP修復を続行します。", {
+      writeProcessLog_("ギャップ修復", "保存済みの再開位置からGAP修復を続行します。", {
         lastProcessedSymbol: state.lastProcessedSymbol || "",
         resumeGroupIndex: groupIndex,
         totalGroups: groups.length
@@ -7990,7 +7990,7 @@ function quickRepairRecentGaps(options) {
 
       const batchGroups = groups.slice(groupIndex, groupIndex + batchSymbols);
       const batchTasks = flattenQuickRepairGroupsToTasks_(batchGroups);
-      writeProcessLog_("ギャップ修復", `不足セッションを補填中です。銘柄グループ ${groupIndex + 1}?${groupIndex + batchGroups.length} / ${groups.length} を処理します。`, {
+      writeProcessLog_("ギャップ修復", `不足セッションを補填中です。銘柄グループ ${groupIndex + 1}〜${groupIndex + batchGroups.length} / ${groups.length} を処理します。`, {
         tasks: batchTasks.length
       });
       const result = processQuickRepairGroups_(ohlcvSh, batchGroups, sessionInfo, minSessions);
@@ -8002,7 +8002,7 @@ function quickRepairRecentGaps(options) {
         state.updatedAt = new Date().toISOString();
         props.setProperty(QUICK_REPAIR_STATE_KEY, JSON.stringify(state));
         deleteTriggersByHandler_("resumeQuickRepair");
-        writeProcessLog_("繧ｮ繝｣繝・・菫ｮ蠕ｩ", "OHLCV補填行のA列timestampを保存できなかったため、再開ループを止めました。", {
+        writeProcessLog_("ギャップ修復", "OHLCV補填行のA列timestampを保存できなかったため、再開ループを止めました。", {
           groupStart: groupIndex + 1,
           groupEnd: groupIndex + batchGroups.length,
           appendFailure: state.appendFailure
