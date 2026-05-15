@@ -6736,6 +6736,7 @@ function createQuickRepairState_(version, businessDate, daysBack, minSessions) {
     staleDates: 0,
     parseErrors: 0,
     markedFailed: 0,
+
     batches: 0,
     lastScanSymbols: 0,
     lastScanTasks: 0,
@@ -7276,6 +7277,7 @@ function processQuickRepairGroups_(sheet, groups, sessionInfo, minSessions) {
     deferredDates: 0,
     noDataDates: 0,
     markedFailed: 0,
+
     missingSamples: [],
     rows: 0,
     parseErrors: 0,
@@ -7337,6 +7339,114 @@ function processQuickRepairGroups_(sheet, groups, sessionInfo, minSessions) {
       });
     }
   });
+
+  // === 日足フォールバック ===
+  // 1h で 0 行しか取れなかった (symbol, date) だけを対象に 1d を後追い取得し、
+  // AM(09:00)/PM(13:00) を 50/50 出来高分割で合成する。1418 のような薄商い銘柄で
+  // Yahoo の 1h データが完全に欠落している日を救うための保険。
+  const dailyFallbackTargets = [];
+  metaList.forEach(meta => {
+    if (staleSymbolMap[meta.symbol]) return;
+    const fallbackDates = meta.dates.filter(dateStr => {
+      const key = meta.symbol + "|" + dateStr;
+      if (deferredDateMap[key]) return false;
+      if (fetchedPeriodMap[key]) return false;
+      return true;
+    });
+    if (fallbackDates.length > 0) {
+      dailyFallbackTargets.push({ symbol: meta.symbol, dates: fallbackDates });
+    }
+  });
+
+  if (dailyFallbackTargets.length > 0) {
+    const dailyRequests = [];
+    const dailyTargetMeta = [];
+    dailyFallbackTargets.forEach(target => {
+      const start = parseJstDate_(target.dates[0], false);
+      const end = parseJstDate_(target.dates[target.dates.length - 1], true);
+      if (!start || !end) return;
+      const fetchStart = new Date(start.getTime() - MARGIN_DAYS * 24 * 60 * 60 * 1000);
+      const fetchEnd = new Date(end.getTime() + MARGIN_DAYS * 24 * 60 * 60 * 1000);
+      let pair;
+      try {
+        pair = buildOhlcvRequestPair_(
+          target.symbol,
+          null,
+          Math.floor(fetchStart.getTime() / 1000),
+          Math.floor(fetchEnd.getTime() / 1000)
+        );
+      } catch (err) {
+        return;
+      }
+      dailyTargetMeta.push(target);
+      dailyRequests.push({ url: pair.dailyUrl, muteHttpExceptions: true, headers: { "User-Agent": "Mozilla/5.0" } });
+    });
+
+    if (dailyRequests.length > 0) {
+      const dailyResponses = UrlFetchApp.fetchAll(dailyRequests);
+      const dailyFallbackSamples = [];
+      dailyTargetMeta.forEach((target, idx) => {
+        const dailyRes = dailyResponses[idx];
+        if (!dailyRes || isTransientHttpResponse_(dailyRes)) return;
+        let dailyMap;
+        try {
+          dailyMap = buildDailyOhlcvMapFromYahooResponse_(dailyRes);
+        } catch (err) {
+          return;
+        }
+        target.dates.forEach(dateStr => {
+          const ymd = dateStr.replace(/\//g, "-");
+          const daily = dailyMap[ymd];
+          if (!daily) return;
+          if (daily.open == null && daily.close == null) return;
+
+          const open = daily.open != null ? daily.open : daily.close;
+          const close = daily.close != null ? daily.close : daily.open;
+          const high = daily.high != null ? daily.high : Math.max(open, close);
+          const low = daily.low != null ? daily.low : Math.min(open, close);
+          const dailyVol = Math.round(Number(daily.volume) || 0);
+          const amVol = Math.floor(dailyVol / 2);
+          const pmVol = dailyVol - amVol; // 奇数は PM 側を 1 多く
+
+          const key = target.symbol + "|" + dateStr;
+          const existing = sessionInfo.periodMap[key] || {};
+          let synthRowsForDate = 0;
+
+          if (!existing.AM) {
+            const ts = makeJstSessionTimestamp_(dateStr, "AM");
+            if (isValidOhlcvTimestamp_(ts)) {
+              repairRows.push([ts, "GAP_REPAIR", target.symbol, open, high, low, close, amVol]);
+              addSessionPeriod_(fetchedPeriodMap, key, "AM");
+              synthRowsForDate++;
+            }
+          }
+          if (!existing.PM) {
+            const ts = makeJstSessionTimestamp_(dateStr, "PM");
+            if (isValidOhlcvTimestamp_(ts)) {
+              repairRows.push([ts, "GAP_REPAIR", target.symbol, open, high, low, close, pmVol]);
+              addSessionPeriod_(fetchedPeriodMap, key, "PM");
+              synthRowsForDate++;
+            }
+          }
+          if (synthRowsForDate > 0) {
+            summary.dailyFallbackDates++;
+            summary.dailyFallbackRows += synthRowsForDate;
+            if (dailyFallbackSamples.length < 10) {
+              dailyFallbackSamples.push({ symbol: target.symbol, date: dateStr, dailyVol: dailyVol, rows: synthRowsForDate });
+            }
+          }
+        });
+      });
+      if (summary.dailyFallbackDates > 0) {
+        writeProcessLog_("ギャップ修復", "1h レスポンスに無かった日付を日足から AM/PM 50:50 で合成しました。", {
+          fallbackDates: summary.dailyFallbackDates,
+          fallbackRows: summary.dailyFallbackRows,
+          requestedSymbols: dailyRequests.length,
+          samples: dailyFallbackSamples
+        });
+      }
+    }
+  }
 
   const rowsToAppend = repairRows.concat(failedRows);
   let appendDetail = { rows: 0, persistedRows: [], deletedRows: 0, appendFailed: false };
@@ -8145,6 +8255,7 @@ function quickRepairRecentGaps(options) {
       state.totalRows += result.rows || 0;
       state.parseErrors += result.parseErrors || 0;
       state.markedFailed = (state.markedFailed || 0) + (result.markedFailed || 0);
+
       state.batches++;
       if ((result.deferredDates || 0) === 0) {
         state.lastProcessedSymbol = batchGroups.length ? batchGroups[batchGroups.length - 1].symbol : (state.lastProcessedSymbol || "");
@@ -8161,6 +8272,7 @@ function quickRepairRecentGaps(options) {
         staleSymbols: result.staleSymbols || 0,
         staleDates: result.staleDates || 0,
         markedFailed: result.markedFailed || 0,
+
         parseErrors: result.parseErrors || 0
       });
       if ((result.deferredDates || 0) > 0) {
@@ -8182,7 +8294,7 @@ function quickRepairRecentGaps(options) {
     }
 
     writeProcessLog_("GAP_REPAIR", "Gap append phase finished. Scheduling post-repair cleanup instead of inline full dedupe/sort.", { rowsAddedThisRun: state.totalRows });
-    const completeSummary = { ok: true, complete: true, totalGroups: groups.length, totalTasks: tasks.length, rows: state.totalRows, processedGroups: state.processedGroups, processedTasks: state.processedTasks, repairedDates: state.repairedDates, partialDates: state.partialDates || 0, failedDates: state.failedDates, deferredDates: state.deferredDates, staleSymbols: state.staleSymbols || 0, staleDates: state.staleDates || 0, markedFailed: state.markedFailed || 0, parseErrors: state.parseErrors };
+
     return finalizeQuickRepairWithPostCleanup_(props, state, completeSummary);
     writeProcessLog_("ギャップ修復", "ギャップ修復が完了しました。", {
       groups: groups.length,

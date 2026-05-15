@@ -122,6 +122,7 @@ status, note, logged_at
 | `OHLCV_REPAIR_SYMBOLS` | 次回OHLCV取得で120日再取得する修復対象銘柄 |
 
 
+
 ## アーキテクチャ上の重要事項
 
 ### 日次処理の実行チェーン
