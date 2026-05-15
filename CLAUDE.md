@@ -6,6 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 天底極致スコアリングBot の週次レポート・OHLCV管理を担う Google Apps Script (GAS) プロジェクト。TradingView からのアラート Webhook を受信し、JPX 銘柄の中期パフォーマンス（5/10/20/40営業日後）を追跡してDiscordに週次レポートを送信する。
 
+## コードベース構造
+
+GAS 本体のコードはすべて **`gas.txt`** 一ファイルに集約されている（リポジトリ内で編集する場合はこのファイルを対象にする）。`premium_worker/worker.mjs` は独立した Node.js worker。
+
 ## デプロイ・実行方法
 
 - GAS プロジェクトは Google Apps Script エディタ上で管理（ファイルは `.gs` 拡張子）
@@ -38,6 +42,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `resumeDailyMaintenance` | `runDailyMaintenance` 再開時 | `runDailyMaintenanceInternal_` を再起動 |
 | `resumeQuickRepair` | `quickRepairRecentGaps` 再開時 | ギャップ修復を再起動 |
 | `resumeOhlcvPostRepairCleanup` | GAP修復完了後 | timestamp正規化・AM保護マーキング・重複整理・最終ソートを再開 |
+| `postprocessMiddayOhlcv` | 13:30先行OHLCV取得完了後 | 追記後のtimestamp正規化・不正timestamp削除を小分けで再開 |
+| `resumeMiddayOhlcvRollback` | 13:30先行OHLCV戻し処理の再開時 | 触った銘柄の120日OHLCV削除を再開 |
 | `purgeOldOhlcvResumeTrigger` | `purgeOldOhlcvDataDaily` 未完了時 | OHLCV削除を再起動 |
 | `resumeCleanupLegacyGapFailedAndEmptyTimestamps` | 旧OHLCV残骸整理未完了時 | 空timestamp・非09:00/13:00・長期GAP_FAILED整理を再開 |
 | `resumeEvaluationOhlcvCoverageRepair` | 評価対象銘柄OHLCV補填未完了時 | 120日OHLCV補填を再開 |
@@ -46,6 +52,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **重要**: ワンショットトリガーは各ハンドラー関数の冒頭で `deleteTriggersByHandler_("自分の関数名")` を呼び、自分自身を削除してから処理を実行する。
 
 ## スプレッドシート構造
+
+### `alerts_raw` 列定義
+
+`RAW_HEADERS` の順序：
+
+```text
+alert_id, received_at, signal_date, signal_week_start, signal_type,
+timeframe, symbol_code, symbol_name, entry_price, volume, tv_symbol,
+eval_date_5bd, eval_close_5bd, perf_5bd, win_flag_5bd, reported_5bd,
+eval_date_10bd, eval_close_10bd, perf_10bd, win_flag_10bd, reported_10bd,
+eval_date_20bd, eval_close_20bd, perf_20bd, win_flag_20bd, reported_20bd,
+eval_date_40bd, eval_close_40bd, perf_40bd, win_flag_40bd, reported_40bd,
+status, note, logged_at
+```
 
 | シート名 | 役割 |
 |----------|------|
@@ -87,13 +107,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | キー | 用途 |
 |------|------|
 | `OHLCV_CURRENT_PHASE` | OHLCV 取得フェーズ管理（1〜4） |
+| `OHLCV_PROGRESS_INDEX` / `OHLCV_SYMBOL_LIST` | 16:00 本番取得の再開カーソルと対象銘柄 |
+| `OHLCV_MIDDAY_PROGRESS_INDEX` / `OHLCV_MIDDAY_SYMBOL_LIST` | 13:30 先行取得の再開カーソルと対象銘柄 |
+| `OHLCV_MIDDAY_POSTPROCESS_STATE_V1` | 13:30 後処理（不正timestamp掃除）の再開状態 |
+| `OHLCV_MIDDAY_ROLLBACK_STATE_V1` | 13:30 戻し処理の再開状態 |
 | `DAILY_MAINT_CURSOR` | `runDailyMaintenance` の再開カーソル |
 | `QUICK_REPAIR_STATE` | `quickRepairRecentGaps` の再開状態（v7） |
+| `QUICK_REPAIR_TAIL_CLEANUP_STATE` | GAP修復入口の末尾不正timestamp掃除状態 |
 | `OHLCV_POST_REPAIR_CLEANUP_STATE_V1` | GAP修復後 cleanup の再開状態 |
+| `OHLCV_INTRADAY_STALE_SYMBOLS_V1` | Yahoo 1h が古い/null の銘柄の一時保留リスト |
+| `CLEANUP_LEGACY_STATE_V1` | 旧OHLCV残骸整理の再開状態 |
 | `SPLIT_QUEUE` / `SPLIT_INDEX` | 株式分割調整キューの進捗 |
 | `VARIANT_HISTORY_V1` | 週次レポート文言の重複防止履歴（JSON） |
 | `OHLCV_REPAIR_SYMBOLS` | 次回OHLCV取得で120日再取得する修復対象銘柄 |
-| `QUICK_REPAIR_FAIL_COUNTS_V1` | quickRepair で 0 行返却が続く銘柄+日付の失敗回数。3 回連続失敗で `GAP_FAILED` 行を書き込みループを断つ |
+
 
 ## アーキテクチャ上の重要事項
 
@@ -193,11 +220,16 @@ PHASE4: 重複排除・ソート・完了通知 → runDailyMaintenanceTrigger �
 // トリガー・初期設定
 setupAllTriggers()                    // 固定トリガーのみ再登録
 syncMarketHolidays()                  // 祝日同期
+clearManualOhlcvBusinessDate()        // 手動基準日解除
 
 // OHLCV取得
 fetchOHLCVForNewAlertsMidday()        // 13:30先行取得を手動実行
 fetchOHLCVForNewAlerts()              // 16:00本番OHLCVチェーンを手動実行
 resetAllOhlcvProperties()             // OHLCV関連進捗プロパティをリセット
+previewRollbackMiddayOhlcv20260511()  // 13:30取得戻し対象をDryRun確認
+rollbackMiddayOhlcv20260511()         // 13:30取得で触った銘柄の120日OHLCVを削除して修復キューへ積む
+resumeMiddayOhlcvRollback()           // 13:30取得戻し処理の再開
+resetMiddayOhlcvRollbackState()       // 13:30取得戻し処理の状態リセット
 
 // 週次レポート
 buildAndSendWeeklyReportManual()      // 週次レポートの手動送信
@@ -209,7 +241,9 @@ quickScanMissingSessions()            // セッション欠落の診断（書き
 quickRepairRecentGaps()               // GAP修復
 resetQuickRepairState()               // ギャップ修復の進捗リセット
 auditGapRepairCoverage(14, 2)         // GAP修復が埋まっているか監査
+previewOhlcvPostRepairCleanup()       // GAP修復後cleanupのDryRun確認
 startOhlcvPostRepairCleanupNow()      // GAP修復後cleanupを手動開始
+resumeOhlcvPostRepairCleanup()        // GAP修復後cleanup再開
 resetOhlcvPostRepairCleanupNow()      // GAP修復後cleanup状態リセット
 
 // timestamp診断・修復
@@ -232,11 +266,28 @@ auditEvaluationOhlcvCoverage120()    // 評価対象銘柄の120日OHLCV監査
 repairEvaluationOhlcvCoverage120()   // 評価対象銘柄の120日OHLCV補填
 resetEvaluationOhlcvCoverageRepairState()  // 補填状態リセット
 
+// 過去出来高補正
+previewHistoricalOhlcvVolumeRepair() // 過去出来高補正 DryRun
+repairHistoricalOhlcvVolumes()       // 過去出来高補正 本番
+resetHistoricalOhlcvVolumeRepairState()   // 過去出来高補正状態リセット
+
 // 削除
 purgeOldOhlcvDataDaily()             // 365日超のOHLCV削除
 purgeOldSignalArchiveRowsDaily()     // signals_archive保持期限超過データ削除
 ```
 
+## 実装時の注意
+
+- 一時デバッグ・one-shot補修関数は原則として恒久化しない。復旧・監査用として残す手動関数は CLAUDE.md / README.md / AGENTS.md に用途を書く。
+- スクリプトプロパティ名を変更する場合は、既存状態との移行・リセット手順も同時に書く。
+- トリガー名を変更する場合は、残留旧トリガー削除手順も書く。
+- `setupAllTriggers()` に動的ワンショットトリガーを入れない。
+- `alerts_raw` / `ohlcv_4h` レイアウトに列追加する場合は、移行関数とドキュメント更新を同時に行う。
+- `doPost`、`alerts_raw` スキーマ、既存トリガー、既存スクリプトプロパティ名を不用意に変更しない。
+- 投資助言・売買推奨・目標株価・スコア化に見える文言をDiscord投稿へ追加しない。
+
 ## premium_worker との関係
 
 `premium_worker/` は GAS 本体とは独立した読み取り専用 worker。`alerts_raw` を Google Sheets API で読むだけで、`doPost`・既存トリガー・`alerts_raw` スキーマは変更しない。投稿済み状態は worker 側で管理し、既存スプレッドシートにプレミアム投稿ログを混ぜない。
+
+プレミアム投稿ログをスプレッドシートへ残す場合は `PREMIUM_LOG_SPREADSHEET_ID` を使い、既存GAS対象とは別スプレッドシートにする。`premium_worker/state/` と `premium_worker/out/` は git 管理しない。
