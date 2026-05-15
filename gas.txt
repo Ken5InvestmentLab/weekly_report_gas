@@ -5750,8 +5750,8 @@ const QUICK_REPAIR_SAFETY_AFTER_MS = 10 * 60 * 1000;
 const QUICK_REPAIR_LOCK_WAIT_MS = 5000;
 const QUICK_REPAIR_STATE_VERSION = 7;
 const QUICK_REPAIR_SCAN_BUDGET_MS = 75 * 1000;
-const QUICK_REPAIR_SCAN_ROWS_PER_SYMBOL_DAY = 3;
-const QUICK_REPAIR_SCAN_MIN_ROWS = 20000;
+const QUICK_REPAIR_SCAN_ROWS_PER_SYMBOL_DAY = 5;
+const QUICK_REPAIR_SCAN_MIN_ROWS = 25000;
 const QUICK_REPAIR_SCAN_MAX_ROWS = 90000;
 const QUICK_REPAIR_TAIL_CLEANUP_ROWS = 12000;
 const QUICK_REPAIR_ENTRY_CLEANUP_ROWS = 1500;
@@ -6479,12 +6479,14 @@ function quickScanMissingSessions(daysBack = 14, minSessions = 2, options) {
   const periodMap = {};
   const hasGapMarker = {};
   const dateStrByDayKey = {};
+  const seenTargetSymbols = {};
 
   for (const row of values) {
     const ts = row[0];
     const alertId = String(row[1] || "").trim();
     const sym = String(row[2] || "").trim();
     if (!(ts instanceof Date) || !sym || !symbolLookup[sym]) continue;
+    seenTargetSymbols[sym] = true;
 
     const dayKey = toJstDayKeyFromDate_(ts);
     const dateStr = dateStrByDayKey[dayKey] || Utilities.formatDate(ts, CONFIG.TIMEZONE, "yyyy/MM/dd");
@@ -6530,10 +6532,28 @@ function quickScanMissingSessions(daysBack = 14, minSessions = 2, options) {
   }
 
   const symList = Object.keys(missing);
+  const seenCount = Object.keys(seenTargetSymbols).length;
+  const unseenSymbols = symbols.filter(sym => !seenTargetSymbols[sym]);
+  if (scanStats.stoppedBy === "maxRows" && unseenSymbols.length > 0) {
+    writeProcessLog_("ギャップ修復", "スキャンウィンドウが maxRows に達し、対象銘柄の一部が走査範囲外でした。QUICK_REPAIR_SCAN_MAX_ROWS の引き上げを検討してください。", {
+      businessDate: formatYmd_(now),
+      targetSymbols: symbols.length,
+      seenSymbols: seenCount,
+      unseenSymbols: unseenSymbols.length,
+      scannedRows: scanStats.scannedRows || 0,
+      maxRows: scanStats.maxRows || 0,
+      samples: unseenSymbols.slice(0, 10)
+    });
+  }
   writeProcessLog_("ギャップ修復", `直近 ${daysBack} 日を確認しました。休場日を除き、まだ補填対象の不足がある銘柄は ${symList.length} 件です。`, {
     businessDate: formatYmd_(now),
     targetSymbols: symbols.length,
-    missingSymbols: symList.length
+    seenSymbols: seenCount,
+    unseenSymbols: unseenSymbols.length,
+    missingSymbols: symList.length,
+    scannedRows: scanStats.scannedRows || 0,
+    maxRows: scanStats.maxRows || 0,
+    stoppedBy: scanStats.stoppedBy || ""
   });
   return {
     count: symList.length,
