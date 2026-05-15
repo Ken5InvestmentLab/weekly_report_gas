@@ -8284,16 +8284,26 @@ function quickRepairRecentGaps(options) {
 
     writeProcessLog_("GAP_REPAIR", "Gap append phase finished. Scheduling post-repair cleanup instead of inline full dedupe/sort.", { rowsAddedThisRun: state.totalRows });
 
-    return finalizeQuickRepairWithPostCleanup_(props, state, completeSummary);
-    writeProcessLog_("ギャップ修復", "ギャップ修復が完了しました。", {
-      groups: groups.length,
-      tasks: tasks.length,
-      rowsAddedThisRun: state.totalRows,
-      repairedDates: state.repairedDates,
-      failedDates: state.failedDates,
-      deferredDates: state.deferredDates,
-      parseErrors: state.parseErrors
-    });
+const completeSummary = {
+  ok: true,
+  complete: true,
+  processedGroups: state.processedGroups,
+  processedTasks: state.processedTasks,
+  totalGroups: groups.length,
+  totalTasks: tasks.length,
+  rows: state.totalRows,
+  repairedDates: state.repairedDates,
+  partialDates: state.partialDates || 0,
+  failedDates: state.failedDates,
+  deferredDates: state.deferredDates,
+  staleSymbols: state.staleSymbols || 0,
+  staleDates: state.staleDates || 0,
+  markedFailed: state.markedFailed || 0,
+  parseErrors: state.parseErrors
+};
+
+return finalizeQuickRepairWithPostCleanup_(props, state, completeSummary);
+    
 
   } catch (e) {
     if (isTransientError_(e)) {
