@@ -120,6 +120,7 @@ status, note, logged_at
 | `SPLIT_QUEUE` / `SPLIT_INDEX` | 株式分割調整キューの進捗 |
 | `VARIANT_HISTORY_V1` | 週次レポート文言の重複防止履歴（JSON） |
 | `OHLCV_REPAIR_SYMBOLS` | 次回OHLCV取得で120日再取得する修復対象銘柄 |
+| `QUICK_REPAIR_FAIL_COUNTS_V1` | quickRepair で 0 行返却が続く銘柄+日付の失敗回数。3 回連続失敗で `GAP_FAILED` 行を書き込みループを断つ |
 
 
 ## アーキテクチャ上の重要事項
