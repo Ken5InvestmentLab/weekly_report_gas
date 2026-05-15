@@ -4421,15 +4421,14 @@ function appendOhlcvRowsToSheetDetailed_(sheet, data, context) {
 // Write B:H first, then write A alone so timestamp write failures are isolated.
 sheet.getRange(startRow, 2, validData.length, 7).setValues(validData.map(row => row.slice(1, 8)));
 
-// ★A列timestampはシリアル値ではなく、YYYY/MM/DD hh:mm の文字列として保存する
-const timestampTextValues = validData.map(row => [formatOhlcvTimestampTextForSheet_(row[0])]);
+// A列timestampはDate オブジェクトとして書き込み、日時表示形式を設定する
+const timestampDateValues = validData.map(row => [normalizeOhlcvTimestamp_(row[0]) || row[0]]);
 const timestampRange = sheet.getRange(startRow, 1, validData.length, 1);
 
-timestampRange.setNumberFormat("@");
-timestampRange.setValues(timestampTextValues);
+timestampRange.setNumberFormat("yyyy/mm/dd hh:mm");
+timestampRange.setValues(timestampDateValues);
 
 SpreadsheetApp.flush();
-  rewriteOhlcvTimestampRangeAsText_(sheet, startRow, validData.length);
   const readback = purgeInvalidRecentlyAppendedOhlcvRows_(sheet, startRow, validData.length, context || "appendRowsToSheet_.readback", validData, preWriteSamples);
   detail.deletedRows = readback.deletedRows || 0;
   detail.repairSymbols = readback.repairSymbols || 0;
@@ -4440,57 +4439,8 @@ SpreadsheetApp.flush();
 }
 
 function rewriteOhlcvTimestampRangeAsText_(sheet, startRow, numRows) {
-  if (!sheet || !startRow || !numRows || numRows <= 0) {
-    return { convertedRows: 0 };
-  }
-
-  const range = sheet.getRange(startRow, 1, numRows, 1);
-  const values = range.getValues();
-
-  let convertedRows = 0;
-  const samples = [];
-
-  const output = values.map((row, i) => {
-    const original = row[0];
-    const ts = normalizeOhlcvTimestamp_(original);
-
-    if (!ts || !isOhlcvSessionTimestamp_(ts)) {
-      return [original];
-    }
-
-    const text = formatOhlcvTimestampTextForSheet_(ts);
-
-    if (String(original || "") !== text) {
-      convertedRows++;
-      if (samples.length < 10) {
-        samples.push({
-          row: startRow + i,
-          before: original == null ? "" : String(original),
-          after: text
-        });
-      }
-    }
-
-    return [text];
-  });
-
-  if (convertedRows > 0) {
-    range.setNumberFormat("@");
-    range.setValues(output);
-    SpreadsheetApp.flush();
-
-    writeProcessLog_("OHLCV", "追記直後のOHLCV timestampを yyyy/MM/dd HH:mm 文字列へ変換しました。", {
-      startRow: startRow,
-      numRows: numRows,
-      convertedRows: convertedRows,
-      samples: samples
-    });
-  }
-
-  return {
-    convertedRows: convertedRows,
-    samples: samples
-  };
+  // タイムスタンプは Date 形式で保存するため、この関数は何もしない
+  return { convertedRows: 0 };
 }
 
 function restoreRecentlyAppendedOhlcvTimestamps_(sheet, startRow, validData, context) {
@@ -6853,7 +6803,7 @@ function purgeInvalidOhlcvTimestampRowsInRange_(sheet, startRow, numRows, contex
   const repairSymbolSet = {};
   const samples = [];
 
-  const timestampTextValues = [];
+  const timestampDateValues = [];
   let convertedRows = 0;
   const convertedSamples = [];
 
@@ -6862,16 +6812,15 @@ function purgeInvalidOhlcvTimestampRowsInRange_(sheet, startRow, numRows, contex
     const ts = normalizeOhlcvTimestamp_(originalTs);
 
     if (ts && isOhlcvSessionTimestamp_(ts)) {
-      const text = formatOhlcvTimestampTextForSheet_(ts);
-      timestampTextValues.push([text]);
+      timestampDateValues.push([ts]);
 
-      if (String(originalTs || "") !== text) {
+      if (!(originalTs instanceof Date) || !isOhlcvSessionTimestamp_(originalTs)) {
         convertedRows++;
         if (convertedSamples.length < 10) {
           convertedSamples.push({
             row: safeStartRow + index,
             before: originalTs == null ? "" : String(originalTs),
-            after: text,
+            after: Utilities.formatDate(ts, CONFIG.TIMEZONE, "yyyy/MM/dd HH:mm"),
             symbol: String(row[2] || "").trim()
           });
         }
@@ -6879,7 +6828,7 @@ function purgeInvalidOhlcvTimestampRowsInRange_(sheet, startRow, numRows, contex
       return;
     }
 
-    timestampTextValues.push([originalTs]);
+    timestampDateValues.push([originalTs]);
 
     const invalidReason = !isValidOhlcvTimestamp_(ts)
       ? "invalid_timestamp"
@@ -6904,12 +6853,12 @@ function purgeInvalidOhlcvTimestampRowsInRange_(sheet, startRow, numRows, contex
 
   if (convertedRows > 0) {
     sheet.getRange(safeStartRow, 1, readRows, 1)
-      .setNumberFormat("@")
-      .setValues(timestampTextValues);
+      .setNumberFormat("yyyy/mm/dd hh:mm")
+      .setValues(timestampDateValues);
 
     SpreadsheetApp.flush();
 
-    writeProcessLog_("OHLCV", "OHLCV timestamp text normalization completed for a bounded range.", {
+    writeProcessLog_("OHLCV", "OHLCV timestamp を日時形式に変換しました。", {
       context: context || "",
       startRow: safeStartRow,
       scannedRows: readRows,
@@ -6963,7 +6912,7 @@ function purgeInvalidOhlcvTimestampRows_(sheet, context, maxRows) {
   const repairSymbolSet = {};
   const samples = [];
 
-  const timestampTextValues = [];
+  const timestampDateValues = [];
   let convertedRows = 0;
   const convertedSamples = [];
 
@@ -6971,18 +6920,17 @@ function purgeInvalidOhlcvTimestampRows_(sheet, context, maxRows) {
     const originalTs = row[0];
     const ts = normalizeOhlcvTimestamp_(originalTs);
 
-    // 正常timestampなら削除しない。A列は yyyy/MM/dd HH:mm 文字列に統一する。
+    // 正常timestampなら削除しない。A列は Date 形式（日時表示）に統一する。
     if (ts && isOhlcvSessionTimestamp_(ts)) {
-      const text = formatOhlcvTimestampTextForSheet_(ts);
-      timestampTextValues.push([text]);
+      timestampDateValues.push([ts]);
 
-      if (String(originalTs || "") !== text) {
+      if (!(originalTs instanceof Date) || !isOhlcvSessionTimestamp_(originalTs)) {
         convertedRows++;
         if (convertedSamples.length < 10) {
           convertedSamples.push({
             row: startRow + index,
             before: originalTs == null ? "" : String(originalTs),
-            after: text,
+            after: Utilities.formatDate(ts, CONFIG.TIMEZONE, "yyyy/MM/dd HH:mm"),
             symbol: String(row[2] || "").trim()
           });
         }
@@ -6990,7 +6938,7 @@ function purgeInvalidOhlcvTimestampRows_(sheet, context, maxRows) {
       return;
     }
 
-    timestampTextValues.push([originalTs]);
+    timestampDateValues.push([originalTs]);
 
     const invalidReason = !isValidOhlcvTimestamp_(ts)
       ? "invalid_timestamp"
@@ -7015,12 +6963,12 @@ function purgeInvalidOhlcvTimestampRows_(sheet, context, maxRows) {
 
   if (convertedRows > 0) {
     sheet.getRange(startRow, 1, scanRows, 1)
-      .setNumberFormat("@")
-      .setValues(timestampTextValues);
+      .setNumberFormat("yyyy/mm/dd hh:mm")
+      .setValues(timestampDateValues);
 
     SpreadsheetApp.flush();
 
-    writeProcessLog_("OHLCV", "OHLCV timestampを yyyy/MM/dd HH:mm 文字列へ変換しました。", {
+    writeProcessLog_("OHLCV", "OHLCV timestamp を日時形式に変換しました。", {
       context: context || "",
       scannedRows: scanRows,
       convertedRows: convertedRows,
@@ -8859,19 +8807,17 @@ function runOhlcvRecoveryTimestampNormalization_(dateKey, dryRun, reset) {
 
     values.forEach(function(row, index) {
       const before = row[0];
+      if (before instanceof Date && isOhlcvSessionTimestamp_(before)) return;
       const ts = normalizeOhlcvTimestamp_(before);
       if (!ts || !isOhlcvSessionTimestamp_(ts)) return;
 
-      const after = formatOhlcvTimestampTextForSheet_(ts);
-      if (String(before || "") === after) return;
-
-      timestampValues[index][0] = after;
+      timestampValues[index][0] = ts;
       convertedInChunk++;
       if (state.samples.length < 20) {
         state.samples.push({
           row: state.nextRow + index,
           before: before == null ? "" : String(before),
-          after: after,
+          after: Utilities.formatDate(ts, CONFIG.TIMEZONE, "yyyy/MM/dd HH:mm"),
           symbol: String(row[2] || "")
         });
       }
@@ -8879,7 +8825,7 @@ function runOhlcvRecoveryTimestampNormalization_(dateKey, dryRun, reset) {
 
     if (!dryRun && convertedInChunk > 0) {
       const range = sh.getRange(state.nextRow, 1, numRows, 1);
-      range.setNumberFormat("@");
+      range.setNumberFormat("yyyy/mm/dd hh:mm");
       range.setValues(timestampValues);
       SpreadsheetApp.flush();
     }
@@ -9998,29 +9944,26 @@ function processOhlcvTimestampCleanupChunk_(sheet, scanStartRow, cursor) {
 
   for (let i = 0; i < values.length; i++) {
     const before = values[i][0];
+    if (before instanceof Date && isOhlcvSessionTimestamp_(before)) continue;
     const ts = normalizeOhlcvTimestamp_(before);
-    if (!ts) continue;
+    if (!ts || !isOhlcvSessionTimestamp_(ts)) continue;
 
-    const after = formatOhlcvTimestampTextForSheet_(ts);
+    timestampValues[i][0] = ts;
+    convertedRows++;
 
-    if (String(before || "") !== String(after || "")) {
-      timestampValues[i][0] = after;
-      convertedRows++;
-
-      if (samples.length < 5) {
-        samples.push({
-          row: startRow + i,
-          before: String(before),
-          after: after,
-          symbol: String(values[i][2] || "")
-        });
-      }
+    if (samples.length < 5) {
+      samples.push({
+        row: startRow + i,
+        before: String(before),
+        after: Utilities.formatDate(ts, CONFIG.TIMEZONE, "yyyy/MM/dd HH:mm"),
+        symbol: String(values[i][2] || "")
+      });
     }
   }
 
   if (convertedRows > 0) {
     const timestampRange = sheet.getRange(startRow, 1, numRows, 1);
-    timestampRange.setNumberFormat("@");
+    timestampRange.setNumberFormat("yyyy/mm/dd hh:mm");
     timestampRange.setValues(timestampValues);
     SpreadsheetApp.flush();
 
@@ -10582,21 +10525,20 @@ function processOhlcvPostRepairTimestampChunk_(sheet, scanStartRow, cursor) {
 
   values.forEach((row, index) => {
     const before = row[0];
+    if (before instanceof Date && isOhlcvSessionTimestamp_(before)) return;
     const ts = normalizeOhlcvTimestamp_(before);
     if (!ts || !isOhlcvSessionTimestamp_(ts)) return;
-    const after = formatOhlcvTimestampTextForSheet_(ts);
-    if (String(before || "") === after) return;
-    timestampValues[index][0] = after;
+    timestampValues[index][0] = ts;
     convertedRows++;
     if (samples.length < 5) {
-      samples.push({ row: startRow + index, before: String(before), after: after, symbol: String(row[2] || "") });
+      samples.push({ row: startRow + index, before: String(before), after: Utilities.formatDate(ts, CONFIG.TIMEZONE, "yyyy/MM/dd HH:mm"), symbol: String(row[2] || "") });
     }
   });
 
   if (convertedRows > 0) {
-    sheet.getRange(startRow, 1, numRows, 1).setNumberFormat("@").setValues(timestampValues);
+    sheet.getRange(startRow, 1, numRows, 1).setNumberFormat("yyyy/mm/dd hh:mm").setValues(timestampValues);
     SpreadsheetApp.flush();
-    writeProcessLog_("OHLCV_POST_REPAIR", "Timestamp text normalized in a small chunk.", {
+    writeProcessLog_("OHLCV_POST_REPAIR", "Timestamp を日時形式に変換しました。", {
       startRow: startRow,
       endRow: endRow,
       convertedRows: convertedRows,
