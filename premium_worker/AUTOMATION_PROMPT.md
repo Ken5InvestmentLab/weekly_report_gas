@@ -243,6 +243,17 @@ Keep this as a source-grounded material impact label, not a trading action.
    content. Prefer direct `f.irbank.net` PDF/PR URLs over IRBANK HTML pages or
    secondary mirrored URLs.
 
+   Discord embed fields are capped at 1024 characters; if `開示リンク` exceeds
+   that limit Discord truncates the field mid-URL and the trailing `](url)` is
+   lost, leaving a broken link such as `...storage-yahoo.jp/disclosure/20260508/20…`.
+   To prevent this, do NOT use long Yahoo edge-storage URLs such as
+   `https://finance-frontend-pc-dist.*.storage-yahoo.jp/disclosure/...` in
+   `開示リンク`; substitute the equivalent short `f.irbank.net/pdf/...` or TDnet
+   `td_download.cgi` URL for the same document. Keep the assembled `開示リンク`
+   field (all link lines combined, including labels and newlines) under 1000
+   characters as a safety margin. If links would still exceed that, drop the
+   weakest disclosure rather than letting Discord cut a URL.
+
    Do NOT put IRBANK HTML disclosure pages such as
    `https://irbank.net/<code>/<document_id>` in `開示リンク`.
    IRBANK HTML pages are allowed only as an input page to discover the real PDF URL.
