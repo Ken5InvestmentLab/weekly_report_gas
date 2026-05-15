@@ -5750,8 +5750,8 @@ const QUICK_REPAIR_SAFETY_AFTER_MS = 10 * 60 * 1000;
 const QUICK_REPAIR_LOCK_WAIT_MS = 5000;
 const QUICK_REPAIR_STATE_VERSION = 7;
 const QUICK_REPAIR_SCAN_BUDGET_MS = 75 * 1000;
-const QUICK_REPAIR_SCAN_ROWS_PER_SYMBOL_DAY = 3;
-const QUICK_REPAIR_SCAN_MIN_ROWS = 20000;
+const QUICK_REPAIR_SCAN_ROWS_PER_SYMBOL_DAY = 5;
+const QUICK_REPAIR_SCAN_MIN_ROWS = 25000;
 const QUICK_REPAIR_SCAN_MAX_ROWS = 90000;
 const QUICK_REPAIR_TAIL_CLEANUP_ROWS = 12000;
 const QUICK_REPAIR_ENTRY_CLEANUP_ROWS = 1500;
@@ -6479,12 +6479,14 @@ function quickScanMissingSessions(daysBack = 14, minSessions = 2, options) {
   const periodMap = {};
   const hasGapMarker = {};
   const dateStrByDayKey = {};
+  const seenTargetSymbols = {};
 
   for (const row of values) {
     const ts = row[0];
     const alertId = String(row[1] || "").trim();
     const sym = String(row[2] || "").trim();
     if (!(ts instanceof Date) || !sym || !symbolLookup[sym]) continue;
+    seenTargetSymbols[sym] = true;
 
     const dayKey = toJstDayKeyFromDate_(ts);
     const dateStr = dateStrByDayKey[dayKey] || Utilities.formatDate(ts, CONFIG.TIMEZONE, "yyyy/MM/dd");
@@ -6530,10 +6532,28 @@ function quickScanMissingSessions(daysBack = 14, minSessions = 2, options) {
   }
 
   const symList = Object.keys(missing);
+  const seenCount = Object.keys(seenTargetSymbols).length;
+  const unseenSymbols = symbols.filter(sym => !seenTargetSymbols[sym]);
+  if (scanStats.stoppedBy === "maxRows" && unseenSymbols.length > 0) {
+    writeProcessLog_("ギャップ修復", "スキャンウィンドウが maxRows に達し、対象銘柄の一部が走査範囲外でした。QUICK_REPAIR_SCAN_MAX_ROWS の引き上げを検討してください。", {
+      businessDate: formatYmd_(now),
+      targetSymbols: symbols.length,
+      seenSymbols: seenCount,
+      unseenSymbols: unseenSymbols.length,
+      scannedRows: scanStats.scannedRows || 0,
+      maxRows: scanStats.maxRows || 0,
+      samples: unseenSymbols.slice(0, 10)
+    });
+  }
   writeProcessLog_("ギャップ修復", `直近 ${daysBack} 日を確認しました。休場日を除き、まだ補填対象の不足がある銘柄は ${symList.length} 件です。`, {
     businessDate: formatYmd_(now),
     targetSymbols: symbols.length,
-    missingSymbols: symList.length
+    seenSymbols: seenCount,
+    unseenSymbols: unseenSymbols.length,
+    missingSymbols: symList.length,
+    scannedRows: scanStats.scannedRows || 0,
+    maxRows: scanStats.maxRows || 0,
+    stoppedBy: scanStats.stoppedBy || ""
   });
   return {
     count: symList.length,
@@ -7344,9 +7364,7 @@ function processQuickRepairGroups_(sheet, groups, sessionInfo, minSessions) {
   // 1h で 0 行しか取れなかった (symbol, date) だけを対象に 1d を後追い取得し、
   // AM(09:00)/PM(13:00) を 50/50 出来高分割で合成する。1418 のような薄商い銘柄で
   // Yahoo の 1h データが完全に欠落している日を救うための保険。
-  const dailyFallbackTargets = [];
-  metaList.forEach(meta => {
-    if (staleSymbolMap[meta.symbol]) return;
+
     const fallbackDates = meta.dates.filter(dateStr => {
       const key = meta.symbol + "|" + dateStr;
       if (deferredDateMap[key]) return false;
@@ -7385,6 +7403,7 @@ function processQuickRepairGroups_(sheet, groups, sessionInfo, minSessions) {
     if (dailyRequests.length > 0) {
       const dailyResponses = UrlFetchApp.fetchAll(dailyRequests);
       const dailyFallbackSamples = [];
+
       dailyTargetMeta.forEach((target, idx) => {
         const dailyRes = dailyResponses[idx];
         if (!dailyRes || isTransientHttpResponse_(dailyRes)) return;
@@ -7394,11 +7413,7 @@ function processQuickRepairGroups_(sheet, groups, sessionInfo, minSessions) {
         } catch (err) {
           return;
         }
-        target.dates.forEach(dateStr => {
-          const ymd = dateStr.replace(/\//g, "-");
-          const daily = dailyMap[ymd];
-          if (!daily) return;
-          if (daily.open == null && daily.close == null) return;
+
 
           const open = daily.open != null ? daily.open : daily.close;
           const close = daily.close != null ? daily.close : daily.open;
@@ -7445,6 +7460,7 @@ function processQuickRepairGroups_(sheet, groups, sessionInfo, minSessions) {
           samples: dailyFallbackSamples
         });
       }
+
     }
   }
 
@@ -8294,7 +8310,7 @@ function quickRepairRecentGaps(options) {
     }
 
     writeProcessLog_("GAP_REPAIR", "Gap append phase finished. Scheduling post-repair cleanup instead of inline full dedupe/sort.", { rowsAddedThisRun: state.totalRows });
-    const completeSummary = { ok: true, complete: true, totalGroups: groups.length, totalTasks: tasks.length, rows: state.totalRows, processedGroups: state.processedGroups, processedTasks: state.processedTasks, repairedDates: state.repairedDates, partialDates: state.partialDates || 0, failedDates: state.failedDates, deferredDates: state.deferredDates, staleSymbols: state.staleSymbols || 0, staleDates: state.staleDates || 0, markedFailed: state.markedFailed || 0, dailyFallbackDates: state.dailyFallbackDates || 0, dailyFallbackRows: state.dailyFallbackRows || 0, parseErrors: state.parseErrors };
+
     return finalizeQuickRepairWithPostCleanup_(props, state, completeSummary);
     writeProcessLog_("ギャップ修復", "ギャップ修復が完了しました。", {
       groups: groups.length,
