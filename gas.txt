@@ -248,14 +248,71 @@ function sanitizeAlertsWithDiagnostics_(body) {
 // =====================================
 // 週刊レポート
 // =====================================
+// 週次レポートのタイムアウト自動リトライ（パターンA: 先行トリガー方式）
+const WEEKLY_REPORT_WATCHDOG_DELAY_MS = 10 * 60 * 1000;        // 10分（GAS 6分上限の後に発火）
+const WEEKLY_REPORT_MAX_RETRY_ATTEMPTS = 3;                    // 自動リトライ上限
+const WEEKLY_REPORT_RETRY_COUNT_KEY = "WEEKLY_REPORT_RETRY_COUNT_V1";
+const WEEKLY_REPORT_RESUME_HANDLER = "resumeBuildAndSendWeeklyReport";
+
 function buildAndSendWeeklyReport() {
-  return buildAndSendWeeklyReportInternal_({
-    force: false,
-    reportRange: getClosedBusinessWeekRangeJst_(new Date()),
-    ignoreReported: false,
-    markReported: true,
-    updateLastSentWeek: true
+  // エントリポイント（スケジューラ・手動共通）。リトライカウンタをリセットして本体へ。
+  PropertiesService.getScriptProperties().deleteProperty(WEEKLY_REPORT_RETRY_COUNT_KEY);
+  return executeWeeklyReportWithWatchdog_();
+}
+
+function executeWeeklyReportWithWatchdog_() {
+  // タイムアウト時に自動リトライさせるウォッチドッグトリガーを先にセット
+  deleteTriggersByHandler_(WEEKLY_REPORT_RESUME_HANDLER);
+  ScriptApp.newTrigger(WEEKLY_REPORT_RESUME_HANDLER)
+    .timeBased()
+    .after(WEEKLY_REPORT_WATCHDOG_DELAY_MS)
+    .create();
+
+  try {
+    const result = buildAndSendWeeklyReportInternal_({
+      force: false,
+      reportRange: getClosedBusinessWeekRangeJst_(new Date()),
+      ignoreReported: false,
+      markReported: true,
+      updateLastSentWeek: true
+    });
+    // 正常終了: ウォッチドッグとリトライカウンタを片付ける
+    deleteTriggersByHandler_(WEEKLY_REPORT_RESUME_HANDLER);
+    PropertiesService.getScriptProperties().deleteProperty(WEEKLY_REPORT_RETRY_COUNT_KEY);
+    return result;
+  } catch (e) {
+    // タイムアウト以外のエラーはリトライしても直らないので、ウォッチドッグも片付けて例外伝播
+    deleteTriggersByHandler_(WEEKLY_REPORT_RESUME_HANDLER);
+    PropertiesService.getScriptProperties().deleteProperty(WEEKLY_REPORT_RETRY_COUNT_KEY);
+    throw e;
+  }
+}
+
+function resumeBuildAndSendWeeklyReport() {
+  // 自分自身（残存するウォッチドッグトリガー）を先に削除
+  deleteTriggersByHandler_(WEEKLY_REPORT_RESUME_HANDLER);
+
+  const props = PropertiesService.getScriptProperties();
+  const newCount = Number(props.getProperty(WEEKLY_REPORT_RETRY_COUNT_KEY) || "0") + 1;
+
+  if (newCount > WEEKLY_REPORT_MAX_RETRY_ATTEMPTS) {
+    writeProcessLog_("週次レポート再開", "自動リトライ回数が上限に達したため、これ以上の再試行は行いません。手動で確認してください。", {
+      retryCount: newCount - 1,
+      maxAttempts: WEEKLY_REPORT_MAX_RETRY_ATTEMPTS
+    });
+    props.deleteProperty(WEEKLY_REPORT_RETRY_COUNT_KEY);
+    return { ok: false, retryStopped: true, attempt: newCount - 1 };
+  }
+
+  props.setProperty(WEEKLY_REPORT_RETRY_COUNT_KEY, String(newCount));
+  writeProcessLog_("週次レポート再開", "前回の週次レポート実行が中断された可能性があるため、自動リトライします。", {
+    attempt: newCount,
+    maxAttempts: WEEKLY_REPORT_MAX_RETRY_ATTEMPTS
   });
+
+  // 本体を再実行（buildAndSendWeeklyReport ではなく executeWithWatchdog_ を直接呼ぶ。
+  // buildAndSendWeeklyReport を呼ぶとカウンタがリセットされて無限ループになるため）
+  return executeWeeklyReportWithWatchdog_();
 }
 function buildAndSendWeeklyReportManual() {
   return buildAndSendWeeklyReportInternal_({

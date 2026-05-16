@@ -35,6 +35,7 @@ GAS 本体のコードはすべて **`gas.txt`** 一ファイルに集約され�
 | ハンドラー関数 | 生成元 | 役割 |
 |---|---|---|
 | `sendDeferredDiscordPayload` | Discord 429 レート制限時 | 延期した Discord ペイロードを再送 |
+| `resumeBuildAndSendWeeklyReport` | `buildAndSendWeeklyReport` 実行開始時 | 週次レポートがタイムアウトで強制終了した場合に自動リトライ（10分後発火、最大3回） |
 | `runDailyMaintenanceTrigger` | OHLCV PHASE4完了後 | `runDailyMaintenance` を起動 |
 | `quickRepairTrigger` | `runDailyMaintenance` 完了後 / post-maintenancecleanup完了後 | `quickRepairRecentGaps` を起動 |
 | `resumeOHLCVFetchMidday` | 13:30先行OHLCV取得の再開時 | `fetchOHLCVForNewAlertsMidday` を再起動 |
@@ -140,6 +141,7 @@ status, note, logged_at
 | `QUICK_REPAIR_FAIL_COUNTS_V1` | quickRepair で 0 行返却が続く銘柄+日付の失敗回数。1h と 1d の両方が空の場合は即時 `GAP_FAILED`、0 行返却が3回連続の場合も `GAP_FAILED` を書き込みループを断つ |
 | `EVAL_OHLCV_COVERAGE_REPAIR_STATE_V1` | 評価対象銘柄120日OHLCV補填の再開状態 |
 | `HISTORICAL_VOLUME_REPAIR_STATE_V1` | 過去OHLCV出来高補正の再開状態 |
+| `WEEKLY_REPORT_RETRY_COUNT_V1` | 週次レポート自動リトライ回数（成功時に削除、上限3回到達で停止） |
 
 ## アーキテクチャ上の重要事項
 
