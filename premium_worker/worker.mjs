@@ -98,6 +98,7 @@ async function collect(opts) {
   const outDir = env("PREMIUM_OUT_DIR") || DEFAULT_OUT_DIR;
 
   const state = loadState(statePath);
+  await replayPendingLogEvents_(state, statePath);
   pruneExpiredClaims(state, now);
 
   const token = await getGoogleAccessToken([SHEETS_READONLY_SCOPE]);
@@ -148,6 +149,7 @@ async function post(opts) {
   const statePath = env("PREMIUM_STATE_PATH") || DEFAULT_STATE_PATH;
   const webhookUrl = dryRun ? "" : requiredEnv("DISCORD_PREMIUM_WEBHOOK_URL");
   const state = loadState(statePath);
+  if (!dryRun) await replayPendingLogEvents_(state, statePath);
   const reports = sortReportsByImpact(normalizeReports(readJson(path.resolve(inputPath))));
   if (!reports.length) throw new Error("report file contains no reports");
 
@@ -197,7 +199,7 @@ async function post(opts) {
   } finally {
     if (!dryRun) {
       saveState(statePath, state);
-      await writePremiumLogEventsSafe(postLogEvents);
+      await writePremiumLogEventsSafe(postLogEvents, state, statePath);
     }
   }
 
@@ -224,20 +226,55 @@ async function fail(opts) {
     failures.push({ alertId: String(opts["alert-id"] || opts.alertId || ""), reason: String(opts.reason || "failed") });
   }
 
-  const now = new Date().toISOString();
+  const dryRun = opts["dry-run"] === true;
+  const webhookUrl = dryRun ? "" : requiredEnv("DISCORD_PREMIUM_WEBHOOK_URL");
+  const now = new Date();
+  const results = [];
+  const postLogEvents = [];
+
   for (const item of failures) {
     if (!item.alertId) throw new Error("fail requires --alert-id <id> or --input with alertId");
-    const previous = state.failed[item.alertId] || {};
-    state.failed[item.alertId] = {
-      attempts: Number(previous.attempts || 0) + 1,
-      lastFailedAt: now,
+    const claim = state.claims[item.alertId] || {};
+    const embed = buildSamayomiStubEmbed_(item.alertId, item.reason, claim);
+    const payload = {
+      username: env("DISCORD_PREMIUM_USERNAME") || "天底極致 Premium Report",
+      allowed_mentions: { parse: [] },
+      embeds: [embed]
+    };
+    assertNoInvestmentAdvice(JSON.stringify(payload));
+
+    if (dryRun) {
+      results.push({ alertId: item.alertId, dryRun: true, payload });
+      continue;
+    }
+
+    const discordMessage = await postDiscord(webhookUrl, payload);
+    const discordMessageUrl = buildDiscordMessageUrl(discordMessage);
+    const symbolCode = String(claim.symbolCode || "").trim();
+
+    state.posted[item.alertId] = {
+      postedAt: now.toISOString(),
+      symbolCode,
+      symbolName: String(claim.symbolName || ""),
+      title: embed.title,
+      url: embed.url || "",
+      discordMessageUrl,
+      source: "samayomi_stub",
       reason: item.reason
     };
     delete state.claims[item.alertId];
+    saveState(statePath, state);
+
+    postLogEvents.push(buildSamayomiStubLogEvent_(item, embed, claim, now, discordMessageUrl));
+    results.push({ alertId: item.alertId, posted: true, samayomiStub: true, discordMessageUrl });
   }
-  saveState(statePath, state);
-  await writePremiumLogEventsSafe(failures.map(item => buildFailureLogEvent(item, now)));
-  console.log(JSON.stringify({ ok: true, failed: failures.length, failures }, null, 2));
+
+  if (!dryRun) {
+    saveState(statePath, state);
+    await writePremiumLogEventsSafe(postLogEvents, state, statePath);
+  }
+
+  console.log(JSON.stringify({ ok: true, posted: results.filter(r => r.posted).length, results }, null, 2));
 }
 
 async function lockBefore(opts) {
@@ -1635,26 +1672,64 @@ async function ensureSheetWithHeader(spreadsheetId, sheetName, headers, accessTo
   return sheet.sheetId;
 }
 
-async function writePremiumLogEventsSafe(events) {
+async function writePremiumLogEventsCore_(events) {
+  if (!events.length) return;
+  if (env("PREMIUM_LOG_FORCE_FAIL")) throw new Error("forced failure for testing (PREMIUM_LOG_FORCE_FAIL)");
+  const config = getPremiumLogConfig();
+  if (!config) return;
+  const token = await getGoogleAccessToken([SHEETS_WRITE_SCOPE]);
+  const sheetId = await ensureSheetWithHeader(config.spreadsheetId, config.logSheetName, LOG_HEADERS, token);
+  await deleteOldPremiumLogRows(config, token, sheetId);
+  await appendSheetValues(
+    config.spreadsheetId,
+    `${quoteSheetName(config.logSheetName)}!A:${columnName(LOG_HEADERS.length)}`,
+    events.map(logEventToRow),
+    token
+  );
+}
+
+async function writePremiumLogEventsSafe(events, state, statePath) {
   if (!events.length) return;
   try {
-    const config = getPremiumLogConfig();
-    if (!config) return;
-    const token = await getGoogleAccessToken([SHEETS_WRITE_SCOPE]);
-    const sheetId = await ensureSheetWithHeader(config.spreadsheetId, config.logSheetName, LOG_HEADERS, token);
-    await deleteOldPremiumLogRows(config, token, sheetId);
-    await appendSheetValues(
-      config.spreadsheetId,
-      `${quoteSheetName(config.logSheetName)}!A:${columnName(LOG_HEADERS.length)}`,
-      events.map(logEventToRow),
-      token
-    );
+    await writePremiumLogEventsCore_(events);
+    if (state && state.pendingLogEvents && state.pendingLogEvents.length > 0) {
+      state.pendingLogEvents = [];
+      if (statePath) saveState(statePath, state);
+    }
   } catch (error) {
+    const alertIds = events.map(e => e.alertId).filter(Boolean);
     console.error(JSON.stringify({
       ok: false,
-      warning: "premium log spreadsheet write skipped",
+      reason: "premium_log_write_failed",
+      alert_ids: alertIds,
       error: error.message
-    }, null, 2));
+    }));
+    if (state && statePath) {
+      state.pendingLogEvents = [...(state.pendingLogEvents || []), ...events];
+      saveState(statePath, state);
+    }
+    process.exitCode = 2;
+  }
+}
+
+async function replayPendingLogEvents_(state, statePath) {
+  if (!state.pendingLogEvents || !state.pendingLogEvents.length) return;
+  const events = state.pendingLogEvents;
+  state.pendingLogEvents = [];
+  saveState(statePath, state);
+  try {
+    await writePremiumLogEventsCore_(events);
+    console.log(JSON.stringify({ ok: true, replayed: events.length, note: "pending log events replayed" }));
+  } catch (error) {
+    state.pendingLogEvents = events;
+    saveState(statePath, state);
+    console.error(JSON.stringify({
+      ok: false,
+      reason: "premium_log_replay_failed",
+      pending: events.length,
+      error: error.message
+    }));
+    process.exitCode = 2;
   }
 }
 
@@ -1755,6 +1830,64 @@ function buildFailureLogEvent(item, eventAt) {
     disclosureLinks: "",
     sourceUrls: "",
     reason: item.reason
+  };
+}
+
+function buildSamayomiStubEmbed_(alertId, reason, claim) {
+  const symbolCode = String(claim?.symbolCode || "").trim();
+  const symbolName = String(claim?.symbolName || alertId).trim();
+  const tvUrl = normalizeEmbedUrl(String(claim?.tradingViewUrl || ""));
+  const title = symbolName && symbolCode
+    ? `${symbolName} (${symbolCode}) | TradingView チャート`
+    : `${alertId} | TradingView チャート`;
+  const yahooUrl = symbolCode ? `https://finance.yahoo.co.jp/quote/${symbolCode}.T` : "";
+  const irbankIrUrl = symbolCode ? `https://irbank.net/${symbolCode}/ir` : "";
+  const reasonText = String(reason || "材料確認不足").slice(0, 120);
+
+  const sources = [
+    yahooUrl ? `[Yahoo!ファイナンス ${symbolName}(${symbolCode}) 株式情報](${yahooUrl})` : "",
+    irbankIrUrl ? `[IRBANK ${symbolName}(${symbolCode}) 開示一覧](${irbankIrUrl})` : ""
+  ].filter(Boolean).join("\n");
+
+  return {
+    title,
+    url: tvUrl,
+    color: 0x808080,
+    timestamp: new Date().toISOString(),
+    fields: [
+      { name: "材料インパクト", value: "様子見", inline: false },
+      { name: "事業概要", value: `${symbolName}（${symbolCode}）は東証上場銘柄。自動処理時点で十分な個別材料を確認できず、様子見判断とした。`, inline: false },
+      { name: "足元材料", value: `公式IRとIRBANKを少なくとも45日間確認したが、直近の個別開示・適時開示は限定的（${reasonText}）。次回の四半期決算・適時開示で改めて確認予定。`, inline: false },
+      { name: "ファンダ要点", value: "現時点で積み上がった個別材料が薄く様子見とした。次の決算短信・適時開示・月次データが出た時点で改めてファンダを精査する。", inline: false },
+      { name: "注意点", value: "このスナップショットは材料確認不足のため様子見扱い。次の開示イベントを確認してから材料を再評価したい。", inline: false },
+      { name: "開示リンク", value: "開示リンク未確認", inline: false },
+      { name: "Sources", value: sources || "確認済みソースなし", inline: false }
+    ],
+    footer: { text: "Premium fundamental snapshot / Not investment advice" }
+  };
+}
+
+function buildSamayomiStubLogEvent_(item, embed, claim, now, discordMessageUrl) {
+  const symbolCode = String(claim?.symbolCode || "").trim();
+  const symbolName = String(claim?.symbolName || "").trim();
+  const signalType = String(claim?.signalType || "BOTTOM").trim();
+  const reasonText = String(item.reason || "").slice(0, 800);
+  const summary = `様子見: ${reasonText}`;
+  const reason = discordMessageUrl
+    ? `[${escapeMarkdownLinkLabel(truncate(summary, 800))}](${discordMessageUrl})`
+    : truncate(summary, 1000);
+  return {
+    eventAt: now.toISOString(),
+    eventType: "POSTED",
+    alertId: item.alertId,
+    symbolCode,
+    symbolName,
+    signalType,
+    title: embed.title || "",
+    tradingViewUrl: embed.url || "",
+    disclosureLinks: "開示リンク未確認",
+    sourceUrls: (embed.fields || []).find(f => f.name === "Sources")?.value || "",
+    reason
   };
 }
 
@@ -1953,13 +2086,14 @@ function formatMinutePair(hour, minute) {
 }
 
 function loadState(statePath) {
-  if (!fs.existsSync(statePath)) return { version: 1, posted: {}, failed: {}, claims: {} };
+  if (!fs.existsSync(statePath)) return { version: 1, posted: {}, failed: {}, claims: {}, pendingLogEvents: [] };
   const state = readJson(statePath);
   return {
     version: 1,
     posted: state.posted || {},
     failed: state.failed || {},
-    claims: state.claims || {}
+    claims: state.claims || {},
+    pendingLogEvents: Array.isArray(state.pendingLogEvents) ? state.pendingLogEvents : []
   };
 }
 
