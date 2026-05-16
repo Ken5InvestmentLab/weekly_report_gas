@@ -332,27 +332,32 @@ Instead:
 
 Repeat this dry-run → fix → dry-run loop up to 3 total attempts.
 
-If the dry-run still fails after 3 attempts, run:
+If the dry-run still fails after 3 attempts, run the `fail` command to post a
+様子見 stub to Discord:
 
 `node premium_worker/worker.mjs fail --alert-id <alertId> --reason "failed validation after auto-regeneration"`
 
-Do not post that failed alert.
+The `fail` command posts a 様子見 (watch-and-wait) Discord embed and records
+the alert as POSTED in the premium log. Every BOTTOM alert must be posted;
+there is no "skip" path.
 
 10. Only after the dry-run succeeds, run the real post:
 
 `node premium_worker/worker.mjs post --input premium_worker/out/premium_reports.json`
-11. If a report cannot be grounded with at least one source URL, run
-    `node premium_worker/worker.mjs fail --alert-id <alertId> --reason "insufficient verified sources"`
-    for that alert instead of posting it.
+11. If a report cannot be grounded with at least one source URL, run the `fail`
+    command to post a 様子見 stub:
 
-If `PREMIUM_LOG_SPREADSHEET_ID` is configured, the worker records post/fail
-events in that separate spreadsheet, batches post log rows once per run, retries
-transient Sheets 429/5xx responses, and automatically deletes old active log
-rows. For posted reports, the `reason` column is a concise one-line summary
-generated from `材料インパクト` and the report's fundamental point; when Discord
-returns a message URL, that summary is stored as a Markdown link to the posted
-fundamental analysis. Do not use the existing GAS spreadsheet as the premium log
-spreadsheet.
+    `node premium_worker/worker.mjs fail --alert-id <alertId> --reason "insufficient verified sources"`
+
+    The worker posts a 様子見 Discord embed and records the alert as POSTED.
+    Do NOT skip the alert or leave it unposted.
+
+If `PREMIUM_LOG_SPREADSHEET_ID` is configured, the worker records all post
+events (including 様子見 stubs) in that separate spreadsheet. If the spreadsheet
+write fails, the events are persisted to `state.pendingLogEvents` and replayed
+automatically on the next run. The process exits with code 2 on write failure —
+check the exit code in automation scripts. Do not use the existing GAS
+spreadsheet as the premium log spreadsheet.
 
 Do not edit `gas.txt`, do not modify GAS triggers, and do not write to the
-existing spreadsheet.
+existing GAS spreadsheet (alerts_raw).

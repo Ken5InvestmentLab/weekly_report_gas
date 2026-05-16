@@ -349,3 +349,22 @@ purgeOldSignalArchiveRowsDaily()     // signals_archive保持期限超過デー�
 `premium_worker/` は GAS 本体とは独立した読み取り専用 worker。`alerts_raw` を Google Sheets API で読むだけで、`doPost`・既存トリガー・`alerts_raw` スキーマは変更しない。投稿済み状態は worker 側で管理し、既存スプレッドシートにプレミアム投稿ログを混ぜない。
 
 プレミアム投稿ログをスプレッドシートへ残す場合は `PREMIUM_LOG_SPREADSHEET_ID` を使い、既存GAS対象とは別スプレッドシートにする。`premium_worker/state/` と `premium_worker/out/` は git 管理しない。
+
+### BOTTOM 全件 POSTED 必須
+
+**BOTTOMシグナルは全件 Discord に投稿しなければならない。FAILEDで終わるパスは存在しない。**
+
+- ファンダ材料が十分な場合: `post` コマンドで通常投稿
+- 材料が不十分・ソース未確認の場合: `fail` コマンドで **様子見スタブ**を投稿（`材料インパクト: 様子見`）
+- バリデーション失敗でも: `fail` コマンドで様子見スタブを投稿
+
+`fail` コマンドは内部で Discord embed を送信し `state.posted[alertId]` に記録する。`event_type=FAILED` のログ行は今後生成されない。
+
+### スプシ書き込み失敗時の自動リカバリ
+
+`writePremiumLogEventsSafe` がスプシ書き込みに失敗した場合:
+- `state.pendingLogEvents` に events を永続化
+- `process.exitCode = 2` をセット（自動化スクリプト側で異常検知可能）
+- 次回 `collect` / `post` 起動時に自動 replay
+
+環境変数 `PREMIUM_LOG_FORCE_FAIL=1` でスプシ書き込み失敗をテスト可能。
