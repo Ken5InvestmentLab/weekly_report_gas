@@ -99,6 +99,8 @@ OVERLAP_DAYS = 3
   - `PREMIUM_ALLOWED_JST_HOURS=13,15`
   - `PREMIUM_ALLOWED_JST_MINUTES=13:00-13:10,15:30-15:40`
 - 対象時間以外は即終了する。
+- Automation起動が遅れても意図された13:05/15:36の実行枠なら、時間ゲートskipで止めず `collect --force` で回収を続ける。
+- `collect` / `post` / `fail` が read-only sandbox や実行ポリシーでNode起動前に拒否された場合は、通常skip扱いにしない。書き込み可能なローカル実行環境に戻して同じコマンドを再実行し、意図枠を過ぎていれば `collect --force` を使う。
 - 抽出対象は既定で `signal_type=BOTTOM`。
 - `received_at` 新しい順で処理する。
 - ロック粒度はシンボルではなく `alert_id` 単位。
@@ -136,6 +138,7 @@ OVERLAP_DAYS = 3
   - `ネガティブ材料`
   - `様子見`
   - `混在/要確認`
+- `材料インパクト` はラベル単独にしない。必ず `ラベル：根拠要約` 形式で、開示内容・数値・時期・事業影響の要約を1文添える。
 - 売買推奨・目標株価・スコア化はしない。
 
 ### 開示リンクルール

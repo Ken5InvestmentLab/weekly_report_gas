@@ -166,7 +166,8 @@ Default windows:
 Weekdays only
 ```
 
-Use `--force` for a manual test.
+Use `--force` for a manual test or for an automation run that started late but
+is still intended to cover the 13:05 or 15:36 run window.
 
 ```powershell
 node premium_worker/worker.mjs collect --force
@@ -183,6 +184,12 @@ selected again.
 
 The same symbol may be selected again when TradingView creates a different
 alert ID.
+
+If `collect`, `post`, or `fail` is rejected before Node starts because the
+Codex session is read-only, do not treat that as a normal skip. The workflow
+needs writable local execution because it must update `premium_worker/state/`
+and `premium_worker/out/`; rerun with writable execution and use
+`collect --force` if the intended window has already passed.
 
 By default:
 
@@ -384,6 +391,20 @@ Sources
 
 The worker uses `材料インパクト` to sort embeds and choose the embed color. It is
 mandatory and must not be phrased as a buy/sell recommendation.
+
+It must use this format:
+
+```text
+ラベル：根拠要約
+```
+
+The field must not be just `ポジティブ材料`, `ネガティブ材料`, `様子見`, or
+`混在/要確認`. Add one concise source-grounded sentence after the full-width
+colon, for example:
+
+```text
+ポジティブ材料：2026年3月期は売上高9,835百万円、経常利益458百万円、当期純利益441百万円と増収増益で、繰延税金資産計上も最終利益を押し上げている。
+```
 
 ---
 

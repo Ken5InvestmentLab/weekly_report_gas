@@ -3,7 +3,19 @@
 Run the premium alert worker for the weekly_report_gas repository.
 
 1. Run `node premium_worker/worker.mjs collect`.
-2. If the command reports `skipped` or `claimedCount: 0`, stop without posting.
+   If the automation prompt says the current startup is a delayed start for the
+   intended 13:05 or 15:36 run window and `collect` is skipped only by the
+   minute gate, immediately rerun `node premium_worker/worker.mjs collect --force`.
+   Do not stop solely because the local clock has moved outside the worker's
+   strict minute window.
+   If a local command such as `collect`, `post`, or `fail` is rejected by a
+   read-only sandbox or execution-policy error before Node starts, do not record
+   the workflow as skipped or complete. Restore/request writable local execution
+   for this automation run and retry the same command, using `collect --force`
+   when the intended window has already passed.
+2. If the command reports `skipped` for a real business-day/time gate reason
+   after the delayed-window rule above has been handled, or if it reports
+   `claimedCount: 0`, stop without posting.
 3. Read `premium_worker/out/latest_claim.json`.
    The worker is configured to claim every unsent `BOTTOM` alert ID, ordered by
    newest `received_at` first. Do not limit processing to only the latest
@@ -120,6 +132,16 @@ Use one of the following labels:
 - `様子見`
 - `混在/要確認`
 
+The `材料インパクト` field must not be only the label. Write it as
+`ラベル：根拠要約`, using a full-width colon and one concise source-grounded
+sentence. The summary should mention the disclosure substance, figures, timing,
+or business effect that justifies the label.
+
+Examples:
+
+- `ポジティブ材料：2026年3月期は売上高9,835百万円、経常利益458百万円、当期純利益441百万円と増収増益で、繰延税金資産計上も最終利益を押し上げている。`
+- `ネガティブ材料：2026年9月期中間期は小幅増収でも営業損失が続き、MSワラント行使による希薄化も残っている。`
+
 Guidance:
 
 - Use `ポジティブ材料` when the disclosure clearly improves fundamentals,
@@ -210,6 +232,10 @@ If the disclosure file cannot be opened or the content cannot be verified, use
 `材料インパクト` must be based on the content of the selected disclosure(s),
 not on the title alone. Read the actual PDF/detail page, compare the numbers,
 conditions, and business context, then choose the label.
+
+`材料インパクト` MUST use `ラベル：根拠要約` format. Bare labels such as
+`ネガティブ材料` or `様子見` are invalid because 13:05 and 15:36 Discord posts
+must use the same summarized format.
 
 Keep this as a source-grounded material impact label, not a trading action.
 6. Use the TradingView URL from the claim as the Embed URL. JPX symbols must use

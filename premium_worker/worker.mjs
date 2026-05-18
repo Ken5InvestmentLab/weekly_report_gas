@@ -527,6 +527,11 @@ function assertMaterialImpact(alertId, fieldMap) {
       `report ${alertId} field ${IMPACT_FIELD} must start with one of: ${VALID_MATERIAL_IMPACTS.join(", ")}`
     );
   }
+  if (!hasMaterialImpactSummary(normalized)) {
+    throw new Error(
+      `report ${alertId} field ${IMPACT_FIELD} must use "<label>：<source-grounded summary>", not a bare label`
+    );
+  }
   fieldMap.set(IMPACT_FIELD, normalized);
 }
 
@@ -544,10 +549,20 @@ function normalizeMaterialImpact(value) {
   for (const [pattern, label] of patterns) {
     const match = text.match(pattern);
     if (!match) continue;
-    const rest = text.slice(match[0].length).trimStart();
-    return `${label}${rest ? rest : ""}`;
+    const rest = text.slice(match[0].length).replace(/^[\s:：、。-]+/, "").trim();
+    return `${label}${rest ? `：${rest}` : ""}`;
   }
   return "";
+}
+
+function hasMaterialImpactSummary(value) {
+  const text = normalizeSpaces(String(value || ""));
+  for (const label of VALID_MATERIAL_IMPACTS) {
+    if (!text.startsWith(`${label}：`)) continue;
+    const summary = text.slice(`${label}：`.length).trim();
+    return summary.length >= 24 && hasJapaneseText(summary);
+  }
+  return false;
 }
 
 function dedupeDisclosureLinkLines(value) {
@@ -1788,7 +1803,7 @@ function buildPostLogReason(report, fields, discordMessageUrl = "") {
   const fundamental = firstSentence(fields.get("ファンダ要点") || "");
   const material = firstSentence(fields.get("足元材料") || "");
   const basis = normalizeOneLine(fundamental || material);
-  const summary = truncate(impact && basis ? `${impact}: ${basis}` : (basis || impact), discordMessageUrl ? 800 : 1000);
+  const summary = truncate(impact && basis ? `${impact} ${basis}` : (basis || impact), discordMessageUrl ? 800 : 1000);
   if (summary && discordMessageUrl) return `[${escapeMarkdownLinkLabel(summary)}](${discordMessageUrl})`;
   return summary;
 }
@@ -1855,7 +1870,7 @@ function buildSamayomiStubEmbed_(alertId, reason, claim) {
     color: 0x808080,
     timestamp: new Date().toISOString(),
     fields: [
-      { name: "材料インパクト", value: "様子見", inline: false },
+      { name: "材料インパクト", value: `様子見：検証済みソースが不足しており、個別材料の強弱は次回開示待ち（${reasonText}）。`, inline: false },
       { name: "事業概要", value: `${symbolName}（${symbolCode}）は東証上場銘柄。自動処理時点で十分な個別材料を確認できず、様子見判断とした。`, inline: false },
       { name: "足元材料", value: `公式IRとIRBANKを少なくとも45日間確認したが、直近の個別開示・適時開示は限定的（${reasonText}）。次回の四半期決算・適時開示で改めて確認予定。`, inline: false },
       { name: "ファンダ要点", value: "現時点で積み上がった個別材料が薄く様子見とした。次の決算短信・適時開示・月次データが出た時点で改めてファンダを精査する。", inline: false },
@@ -2277,7 +2292,7 @@ function selfTest() {
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
-      { name: "材料インパクト", value: "ポジティブ材料: 会社開示で確認できる増益要因。" },
+      { name: "材料インパクト", value: "ポジティブ材料: 会社開示で売上と営業利益の増加が確認でき、受注環境も改善している。" },
       { name: "事業概要", value: "精密部品を扱う製造業で、国内外の顧客向けに加工品と関連サービスを提供する会社。受注環境と工場稼働率が収益に効きやすい。" },
       { name: "足元材料", value: "直近決算では売上と利益の推移が確認材料。受注環境、原材料価格、固定費吸収の状況に加え、会社予想との進捗差も見る必要がある。単発材料ではなく継続性も確認したい。" },
       { name: "ファンダ要点", value: "増収要因が数量増なのか価格転嫁なのかで評価が変わる。利益率、在庫、キャッシュフローの改善が続くかを確認したい。会社予想との進捗差も重要になる。" },
@@ -2488,7 +2503,7 @@ function selfTest() {
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
-      { name: "材料インパクト", value: "様子見" },
+      { name: "材料インパクト", value: "様子見：直近45日内の新しい個別材料が乏しく、次回開示待ちの状態。" },
       { name: "事業概要", value: "単一領域のサービスを展開する企業で、契約数、単価、固定費の推移が業績確認の中心になる会社。" },
       { name: "足元材料", value: "確認できる新しい個別材料は乏しく、古い公式資料で事業構成、収益源、リスク要因だけを補助確認する局面。新規材料としては扱わず、次回決算や会社開示で足元の進捗を確認したい。" },
       { name: "ファンダ要点", value: "新しい個別材料が乏しいため、足元の評価は保留気味。既存事業の継続性、利益率、資金繰り、固定費の吸収状況、受注や契約数の変化、次回決算での進捗確認が重要になる。" },
@@ -2512,13 +2527,28 @@ function selfTest() {
       { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
     ]
   }), /材料インパクト/);
+  assert.throws(() => buildEmbed({
+    alertId: "a10c2",
+    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    symbolCode: "1234",
+    symbolName: "テスト",
+    fields: [
+      { name: "材料インパクト", value: "ネガティブ材料" },
+      { name: "事業概要", value: "精密部品を扱う製造業で、国内外の顧客向けに加工品と関連サービスを提供する会社。受注環境と工場稼働率が収益に効きやすい。" },
+      { name: "足元材料", value: "2026年5月14日に業績予想修正を開示し、売上と利益の進捗が確認材料になっている。利益率、受注残、キャッシュフローの改善が次回決算でも続くかを確認したい。" },
+      { name: "ファンダ要点", value: "販売数量、価格転嫁、固定費吸収、在庫水準が利益率の確認点になる。会社予想との進捗差や資金繰りも重要で、一過性利益と本業採算を分けて見る必要がある。" },
+      { name: "注意点", value: "短期の株価材料と中期の業績改善は分けて確認する。需要変動、為替、原材料価格、顧客集中に注意し、単発利益の有無も見たい。" },
+      { name: "開示リンク", value: "[2026-05-14 業績予想修正に関するお知らせ(15:30)](https://example.com/20260514534210.pdf)" },
+      { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
+    ]
+  }), /bare label/);
   const dedupeEmbed = buildEmbed({
     alertId: "a10d",
     url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
-      { name: "材料インパクト", value: "混在/要確認" },
+      { name: "材料インパクト", value: "混在/要確認：業績改善は確認できるが、投資負担と継続性の確認が必要。" },
       { name: "事業概要", value: "精密部品を扱う製造業で、国内外の顧客向けに加工品と関連サービスを提供する会社。受注環境と工場稼働率が収益に効きやすい。" },
       { name: "足元材料", value: "2026年5月14日に業績予想修正を開示し、売上と利益の進捗が確認材料になっている。利益率、受注残、キャッシュフローの改善が次回決算でも続くかを確認したい。" },
       { name: "ファンダ要点", value: "販売数量、価格転嫁、固定費吸収、在庫水準が利益率の確認点になる。会社予想との進捗差や資金繰りも重要で、一過性利益と本業採算を分けて見る必要がある。" },
@@ -2533,27 +2563,27 @@ function selfTest() {
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
-      { name: "材料インパクト", value: "混在/要確認" },
+      { name: "材料インパクト", value: "混在/要確認：事業進捗はあるが、利益率と資金繰りの確認が必要。" },
       { name: "ファンダ要点", value: "増収は確認できるが、投資負担と利益率の改善確認が必要。次回決算で継続性を見たい。" },
       { name: "足元材料", value: "直近資料で事業進捗を確認。" },
       { name: "開示リンク", value: "[決算短信](https://example.com/disclosure.pdf)" },
       { name: "Sources", value: "[IRニュース一覧](https://example.com/ir)" }
     ]
   }, { title: "テスト (1234) | TradingView チャート", url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234" }, {});
-  assert.equal(logEvent.reason, "混在/要確認: 増収は確認できるが、投資負担と利益率の改善確認が必要。");
+  assert.equal(logEvent.reason, "混在/要確認：事業進捗はあるが、利益率と資金繰りの確認が必要。 増収は確認できるが、投資負担と利益率の改善確認が必要。");
   const linkedLogEvent = buildPostLogEvent({
     alertId: "a11b",
     symbolCode: "8165",
     symbolName: "千趣会",
     fields: [
-      { name: "材料インパクト", value: "混在/要確認" },
+      { name: "材料インパクト", value: "混在/要確認：利益改善余地はあるが、投資負担と継続性の確認が必要。" },
       { name: "ファンダ要点", value: "1Qは売上高91.66億円で前年同期比7.1%減ながら、営業損失は9.88億円と前年同期から損失幅が縮小。固定資産売却益と本業改善は分けて確認したい。" },
       { name: "足元材料", value: "直近資料で第1四半期決算と月次を確認。" },
       { name: "開示リンク", value: "[決算短信](https://example.com/disclosure.pdf)" },
       { name: "Sources", value: "[IRニュース一覧](https://example.com/ir)" }
     ]
   }, { title: "千趣会 (8165) | TradingView チャート", url: "https://www.tradingview.com/chart/?symbol=TSE%3A8165" }, {}, "https://discord.com/channels/1/2/3");
-  assert.equal(linkedLogEvent.reason, "[混在/要確認: 1Qは売上高91.66億円で前年同期比7.1%減ながら、営業損失は9.88億円と前年同期から損失幅が縮小。](https://discord.com/channels/1/2/3)");
+  assert.equal(linkedLogEvent.reason, "[混在/要確認：利益改善余地はあるが、投資負担と継続性の確認が必要。 1Qは売上高91.66億円で前年同期比7.1%減ながら、営業損失は9.88億円と前年同期から損失幅が縮小。](https://discord.com/channels/1/2/3)");
   assert.equal(extractIrbankPdfUrlFromHtml('<a href="https://f.irbank.net/pr/20260401/140120260326590425.pdf">PDF</a>', "140120260326590425"), "https://f.irbank.net/pr/20260401/140120260326590425.pdf");
   assert.equal(extractIrbankPdfUrlFromHtml('<a href="https://f.irbank.net/pdf/20260430/140120260430514206.pdf">PDF</a>', "140120260430514206"), "https://f.irbank.net/pdf/20260430/140120260430514206.pdf");
   assert.equal(getPostSkipReason("posted-alert", { posted: { "posted-alert": {} }, claims: {} }, null), "already posted");
@@ -2565,7 +2595,7 @@ function selfTest() {
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
-      { name: "材料インパクト", value: "混在/要確認" },
+      { name: "材料インパクト", value: "混在/要確認：短期材料はあるが、事業KPIへの反映確認が必要。" },
       { name: "事業概要", value: "精密部品を扱う製造業で、国内外の顧客向けに加工品と関連サービスを提供する会社。受注環境と工場稼働率が収益に効きやすい。" },
       { name: "足元材料", value: "直近決算では売上と利益の推移が確認材料。受注環境、原材料価格、固定費吸収の状況に加え、会社予想との進捗差も見る必要がある。単発材料ではなく継続性も確認したい。" },
       { name: "ファンダ要点", value: "増収要因が数量増なのか価格転嫁なのかで評価が変わる。利益率、在庫、キャッシュフローの改善が続くかを確認したい。会社予想との進捗差も重要になる。" },
