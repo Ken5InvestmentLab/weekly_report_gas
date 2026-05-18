@@ -1,0 +1,35 @@
+name: Post Premium Alerts (Samayomi Stubs)
+
+on:
+  push:
+    branches:
+      - claude/eager-cannon-K81bI
+    paths:
+      - 'premium_worker/out/fail_alerts.json'
+
+permissions:
+  contents: write
+
+jobs:
+  post-alerts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Post 様子見 stubs to Discord
+        env:
+          DISCORD_PREMIUM_WEBHOOK_URL: "https://discord.com/api/webhooks/1501035641620795526/v3ytYan0kRRgQ2eDCjQGmP246BKy4HBo0nsCchlvlie4Kk0dp2VJxn1AG_6jS0pcZ_L4"
+          DISCORD_PREMIUM_GUILD_ID: "1479418833352785944"
+        run: node premium_worker/worker.mjs fail --input premium_worker/out/fail_alerts.json
+
+      - name: Commit updated state
+        run: |
+          git config user.email "github-actions@github.com"
+          git config user.name "GitHub Actions"
+          git add -f premium_worker/state/premium_alert_state.json
+          git diff --cached --quiet && echo "no state changes" || git commit -m "chore: update premium worker state after posting [skip ci]"
+          git push origin claude/eager-cannon-K81bI
