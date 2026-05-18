@@ -163,6 +163,14 @@ status, note, logged_at
 
 **重要**: Discord完了通知は `runDailyMaintenance` 完了直後には送らない。`OHLCV_COMPLETION_NOTICE_PENDING_V1` に保存し、`resumeOhlcvPostRepairCleanup` の最終ステップで送信する。
 
+### CacheService に保存される一時データ
+
+| キャッシュキー | 用途 | TTL | 無効化条件 |
+|---|---|---|---|
+| `OHLCV_EDT_META` / `OHLCV_EDT_<n>` | `resumeOhlcvPostRepairCleanup` の EARLY_DEDUP 用 tail key set（40k 行 × 3 列を毎回再構築すると 200s+ 消費しタイムアウトループに陥るため、resume 間で再利用する） | 1800s | `lastRow` / `readFromRow` がキャッシュ時と異なる場合は自動的に無効化される。Phase 2 完走 / `completeOhlcvPostRepairCleanup_` / `resetOhlcvPostRepairCleanupNow()` で破棄 |
+
+**ループ安全性**: キャッシュのクリアは「完了系（Phase 2 完走・cleanup チェーン完了・手動 reset・tail size 0）」と「cache miss 時の構築直前（古い不整合チャンクの掃除）」に限定。Phase 1 / Phase 2 のタイムアウト経路では一切クリアしない。Phase 1 が途中で中断した場合は save が呼ばれずキャッシュ空 → 次回 resume も Phase 1 を最初からやり直すが、これは旧実装と同じ振る舞いであり修正で悪化はしない。1 回 Phase 1 が完走すれば以降の resume は Phase 1 をスキップして Phase 2 のみ実行できる。
+
 ### タイムアウト対策パターン（2種類）
 
 GAS の実行上限は **6分**。長時間処理はどちらかのパターンで実装する：
