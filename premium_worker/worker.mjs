@@ -1799,11 +1799,12 @@ function buildPostLogEvent(report, embed, claim, discordMessageUrl = "") {
 }
 
 function buildPostLogReason(report, fields, discordMessageUrl = "") {
-  const impact = normalizeOneLine(fields.get("材料インパクト") || report.materialImpact || "");
+  const rawImpact = fields.get("材料インパクト") || report.materialImpact || "";
+  const impact = normalizeMaterialImpact(rawImpact) || normalizeOneLine(rawImpact);
   const fundamental = firstSentence(fields.get("ファンダ要点") || "");
   const material = firstSentence(fields.get("足元材料") || "");
   const basis = normalizeOneLine(fundamental || material);
-  const summary = truncate(impact && basis ? `${impact} ${basis}` : (basis || impact), discordMessageUrl ? 800 : 1000);
+  const summary = truncate(impact || basis, discordMessageUrl ? 800 : 1000);
   if (summary && discordMessageUrl) return `[${escapeMarkdownLinkLabel(summary)}](${discordMessageUrl})`;
   return summary;
 }
@@ -1887,7 +1888,8 @@ function buildSamayomiStubLogEvent_(item, embed, claim, now, discordMessageUrl) 
   const symbolName = String(claim?.symbolName || "").trim();
   const signalType = String(claim?.signalType || "BOTTOM").trim();
   const reasonText = String(item.reason || "").slice(0, 800);
-  const summary = `様子見: ${reasonText}`;
+  const impact = normalizeOneLine((embed.fields || []).find(f => f.name === IMPACT_FIELD)?.value || "");
+  const summary = impact || `様子見：${reasonText}`;
   const reason = discordMessageUrl
     ? `[${escapeMarkdownLinkLabel(truncate(summary, 800))}](${discordMessageUrl})`
     : truncate(summary, 1000);
@@ -2563,14 +2565,14 @@ function selfTest() {
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
-      { name: "材料インパクト", value: "混在/要確認：事業進捗はあるが、利益率と資金繰りの確認が必要。" },
+      { name: "材料インパクト", value: "混在/要確認: 事業進捗はあるが、利益率と資金繰りの確認が必要。" },
       { name: "ファンダ要点", value: "増収は確認できるが、投資負担と利益率の改善確認が必要。次回決算で継続性を見たい。" },
       { name: "足元材料", value: "直近資料で事業進捗を確認。" },
       { name: "開示リンク", value: "[決算短信](https://example.com/disclosure.pdf)" },
       { name: "Sources", value: "[IRニュース一覧](https://example.com/ir)" }
     ]
   }, { title: "テスト (1234) | TradingView チャート", url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234" }, {});
-  assert.equal(logEvent.reason, "混在/要確認：事業進捗はあるが、利益率と資金繰りの確認が必要。 増収は確認できるが、投資負担と利益率の改善確認が必要。");
+  assert.equal(logEvent.reason, "混在/要確認：事業進捗はあるが、利益率と資金繰りの確認が必要。");
   const linkedLogEvent = buildPostLogEvent({
     alertId: "a11b",
     symbolCode: "8165",
@@ -2583,7 +2585,7 @@ function selfTest() {
       { name: "Sources", value: "[IRニュース一覧](https://example.com/ir)" }
     ]
   }, { title: "千趣会 (8165) | TradingView チャート", url: "https://www.tradingview.com/chart/?symbol=TSE%3A8165" }, {}, "https://discord.com/channels/1/2/3");
-  assert.equal(linkedLogEvent.reason, "[混在/要確認：利益改善余地はあるが、投資負担と継続性の確認が必要。 1Qは売上高91.66億円で前年同期比7.1%減ながら、営業損失は9.88億円と前年同期から損失幅が縮小。](https://discord.com/channels/1/2/3)");
+  assert.equal(linkedLogEvent.reason, "[混在/要確認：利益改善余地はあるが、投資負担と継続性の確認が必要。](https://discord.com/channels/1/2/3)");
   assert.equal(extractIrbankPdfUrlFromHtml('<a href="https://f.irbank.net/pr/20260401/140120260326590425.pdf">PDF</a>', "140120260326590425"), "https://f.irbank.net/pr/20260401/140120260326590425.pdf");
   assert.equal(extractIrbankPdfUrlFromHtml('<a href="https://f.irbank.net/pdf/20260430/140120260430514206.pdf">PDF</a>', "140120260430514206"), "https://f.irbank.net/pdf/20260430/140120260430514206.pdf");
   assert.equal(getPostSkipReason("posted-alert", { posted: { "posted-alert": {} }, claims: {} }, null), "already posted");

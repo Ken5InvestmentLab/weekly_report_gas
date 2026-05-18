@@ -748,8 +748,9 @@ Discord posting is still treated as the primary delivery path.
 Log write failures are reported as warnings so a rate-limit on the log
 spreadsheet does not duplicate or block alert posts.
 
-Posted rows write a one-line `reason` summary generated from `材料インパクト` and
-the report's fundamental point.
+Posted rows write the `材料インパクト` value to the one-line `reason` summary.
+Because `材料インパクト` must already be `ラベル：根拠要約`, the log reason does not
+append `ファンダ要点`.
 
 When Discord returns a message URL, that summary is stored as a Markdown link to
 the posted analysis.
