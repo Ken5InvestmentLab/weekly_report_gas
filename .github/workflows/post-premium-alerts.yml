@@ -16,9 +16,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
+      - name: Check Node version
+        run: node --version
 
       - name: Post 様子見 stubs to Discord
         env:
@@ -26,10 +25,17 @@ jobs:
           DISCORD_PREMIUM_GUILD_ID: "1479418833352785944"
         run: node premium_worker/worker.mjs fail --input premium_worker/out/fail_alerts.json
 
-      - name: Commit updated state
+      - name: Clear fail list to prevent duplicate posting
+        if: success()
+        run: echo '[]' > premium_worker/out/fail_alerts.json
+
+      - name: Commit updated state and clear fail list
+        if: always()
         run: |
           git config user.email "github-actions@github.com"
           git config user.name "GitHub Actions"
           git add -f premium_worker/state/premium_alert_state.json
-          git diff --cached --quiet && echo "no state changes" || git commit -m "chore: update premium worker state after posting [skip ci]"
-          git push origin claude/eager-cannon-K81bI
+          git add premium_worker/out/fail_alerts.json
+          git diff --cached --quiet && echo "no changes to commit" || \
+            git commit -m "chore: update premium worker state after posting [skip ci]"
+          git push origin claude/eager-cannon-K81bI || echo "push failed (non-fatal)"
