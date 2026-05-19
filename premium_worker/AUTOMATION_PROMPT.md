@@ -137,6 +137,16 @@ The `材料インパクト` field must not be only the label. Write it as
 sentence. The summary should mention the disclosure substance, figures, timing,
 or business effect that justifies the label.
 
+Keep the summary short: aim for 45-80 Japanese characters after the label, and
+never exceed 90 characters. Do not put procedural research wording here, such as
+`PDF本文でも確認`, `主要損益項目を確認`, broad checklist phrases, or
+`次回開示で確認する局面`. Put document titles, multiple figures, and detailed
+confirmation points in `足元材料` / `ファンダ要点` / `開示リンク` instead.
+
+Do not default to `混在/要確認`. Use it only when positive and negative or
+uncertain elements truly coexist. Do not force label diversity either: if every
+report in a batch is genuinely supported by the same label, that is acceptable.
+
 Examples:
 
 - `ポジティブ材料：2026年3月期は売上高9,835百万円、経常利益458百万円、当期純利益441百万円と増収増益で、繰延税金資産計上も最終利益を押し上げている。`
@@ -236,6 +246,11 @@ conditions, and business context, then choose the label.
 `材料インパクト` MUST use `ラベル：根拠要約` format. Bare labels such as
 `ネガティブ材料` or `様子見` are invalid because 13:05 and 15:36 Discord posts
 must use the same summarized format.
+
+The `根拠要約` part must be one short sentence, no more than 90 Japanese
+characters after the label. It should state the substance behind the label, not
+the investigation process. A batch must not be rejected just because many
+reports share the same label; reject only unsupported or template-like labels.
 
 Keep this as a source-grounded material impact label, not a trading action.
 6. Use the TradingView URL from the claim as the Embed URL. JPX symbols must use

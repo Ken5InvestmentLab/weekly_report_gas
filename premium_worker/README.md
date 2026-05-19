@@ -330,6 +330,11 @@ Use:
 - `様子見` when the disclosure is relevant but the financial impact, timing,
   amount, or sustainability is not yet clear.
 
+Do not default to `混在/要確認`; choose it only when the actual content has both
+supportive and adverse or uncertain elements. Also do not force a mixed label
+distribution across a batch. If the evidence truly supports the same label for
+every report, that is valid.
+
 ## Report JSON shape
 
 Codex should create `premium_worker/out/premium_reports.json` like this:
@@ -414,7 +419,13 @@ It must use this format:
 
 The field must not be just `ポジティブ材料`, `ネガティブ材料`, `様子見`, or
 `混在/要確認`. Add one concise source-grounded sentence after the full-width
-colon, for example:
+colon. Keep the summary after the label to one sentence, aim for 45-80 Japanese
+characters, and never exceed 90 characters. Do not include procedural wording
+such as `PDF本文でも確認`, `主要損益項目を確認`, broad checklist phrases, or
+`次回開示で確認する局面`; those details belong in `足元材料`, `ファンダ要点`, and
+`開示リンク`.
+
+Example:
 
 ```text
 ポジティブ材料：2026年3月期は売上高9,835百万円、経常利益458百万円、当期純利益441百万円と増収増益で、繰延税金資産計上も最終利益を押し上げている。

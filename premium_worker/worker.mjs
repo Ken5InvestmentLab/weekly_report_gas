@@ -22,6 +22,16 @@ const RAW_HEADERS = [
 
 const IMPACT_FIELD = "材料インパクト";
 const VALID_MATERIAL_IMPACTS = ["ポジティブ材料", "ネガティブ材料", "様子見", "混在/要確認"];
+const MATERIAL_IMPACT_SUMMARY_MAX_CHARS = 90;
+const MATERIAL_IMPACT_PROCEDURAL_FRAGMENTS = [
+  "PDF本文でも",
+  "PDF本文",
+  "開示本文",
+  "次回開示で確認する局面",
+  "主要損益項目を確認",
+  "売上・利益進捗、会社予想、セグメント動向を確認",
+  "開示内容を確認"
+];
 const REQUIRED_FIELDS = [IMPACT_FIELD, "事業概要", "足元材料", "ファンダ要点", "注意点", "開示リンク", "Sources"];
 const OPTIONAL_FIELDS = [];
 const DEFAULT_ALLOWED_HOURS = "13,15";
@@ -559,6 +569,7 @@ function assertMaterialImpact(alertId, fieldMap) {
       `report ${alertId} field ${IMPACT_FIELD} must use "<label>：<source-grounded summary>", not a bare label`
     );
   }
+  assertConciseMaterialImpact(alertId, normalized);
   fieldMap.set(IMPACT_FIELD, normalized);
 }
 
@@ -590,6 +601,45 @@ function hasMaterialImpactSummary(value) {
     return summary.length >= 24 && hasJapaneseText(summary);
   }
   return false;
+}
+
+function assertConciseMaterialImpact(alertId, value) {
+  const parsed = splitMaterialImpact(value);
+  if (!parsed) return;
+
+  const { summary } = parsed;
+  if (summary.length > MATERIAL_IMPACT_SUMMARY_MAX_CHARS) {
+    throw new Error(
+      `report ${alertId} field ${IMPACT_FIELD} summary must be under ${MATERIAL_IMPACT_SUMMARY_MAX_CHARS} chars`
+    );
+  }
+  if (/[\r\n]/.test(summary)) {
+    throw new Error(`report ${alertId} field ${IMPACT_FIELD} must be a single line`);
+  }
+  for (const fragment of MATERIAL_IMPACT_PROCEDURAL_FRAGMENTS) {
+    if (summary.includes(fragment)) {
+      throw new Error(
+        `report ${alertId} field ${IMPACT_FIELD} summary is too procedural: ${fragment}`
+      );
+    }
+  }
+
+  const sentenceMarks = [...summary.matchAll(/[。！？!?]/g)];
+  if (sentenceMarks.length > 1) {
+    throw new Error(`report ${alertId} field ${IMPACT_FIELD} summary must be one concise sentence`);
+  }
+  if (sentenceMarks.length === 1 && sentenceMarks[0].index !== summary.length - 1) {
+    throw new Error(`report ${alertId} field ${IMPACT_FIELD} summary must keep details outside the impact field`);
+  }
+}
+
+function splitMaterialImpact(value) {
+  const text = normalizeSpaces(String(value || ""));
+  for (const label of VALID_MATERIAL_IMPACTS) {
+    if (!text.startsWith(`${label}：`)) continue;
+    return { label, summary: text.slice(`${label}：`.length).trim() };
+  }
+  return null;
 }
 
 function dedupeDisclosureLinkLines(value) {
@@ -2571,6 +2621,36 @@ function selfTest() {
       { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
     ]
   }), /bare label/);
+  assert.throws(() => buildEmbed({
+    alertId: "a10c3",
+    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    symbolCode: "1234",
+    symbolName: "テスト",
+    fields: [
+      { name: "材料インパクト", value: "ポジティブ材料：2026年5月14日の業績予想修正で売上高、営業利益、経常利益、純利益の計画が引き上がり、販売数量、価格転嫁、固定費吸収、在庫水準、資金繰り、営業CF改善まで確認材料が広がっている。" },
+      { name: "事業概要", value: "精密部品を扱う製造業で、国内外の顧客向けに加工品と関連サービスを提供する会社。受注環境と工場稼働率が収益に効きやすい。" },
+      { name: "足元材料", value: "2026年5月14日に業績予想修正を開示し、売上と利益の進捗が確認材料になっている。利益率、受注残、キャッシュフローの改善が次回決算でも続くかを確認したい。" },
+      { name: "ファンダ要点", value: "販売数量、価格転嫁、固定費吸収、在庫水準が利益率の確認点になる。会社予想との進捗差や資金繰りも重要で、一過性利益と本業採算を分けて見る必要がある。" },
+      { name: "注意点", value: "短期の株価材料と中期の業績改善は分けて確認する。需要変動、為替、原材料価格、顧客集中に注意し、単発利益の有無も見たい。" },
+      { name: "開示リンク", value: "[2026-05-14 業績予想修正に関するお知らせ(15:30)](https://example.com/20260514534210.pdf)" },
+      { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
+    ]
+  }), /under 90 chars/);
+  assert.throws(() => buildEmbed({
+    alertId: "a10c4",
+    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    symbolCode: "1234",
+    symbolName: "テスト",
+    fields: [
+      { name: "材料インパクト", value: "混在/要確認：PDF本文でも主要損益項目を確認し、次回開示で確認する局面。" },
+      { name: "事業概要", value: "精密部品を扱う製造業で、国内外の顧客向けに加工品と関連サービスを提供する会社。受注環境と工場稼働率が収益に効きやすい。" },
+      { name: "足元材料", value: "2026年5月14日に業績予想修正を開示し、売上と利益の進捗が確認材料になっている。利益率、受注残、キャッシュフローの改善が次回決算でも続くかを確認したい。" },
+      { name: "ファンダ要点", value: "販売数量、価格転嫁、固定費吸収、在庫水準が利益率の確認点になる。会社予想との進捗差や資金繰りも重要で、一過性利益と本業採算を分けて見る必要がある。" },
+      { name: "注意点", value: "短期の株価材料と中期の業績改善は分けて確認する。需要変動、為替、原材料価格、顧客集中に注意し、単発利益の有無も見たい。" },
+      { name: "開示リンク", value: "[2026-05-14 業績予想修正に関するお知らせ(15:30)](https://example.com/20260514534210.pdf)" },
+      { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
+    ]
+  }), /too procedural/);
   const dedupeEmbed = buildEmbed({
     alertId: "a10d",
     url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
