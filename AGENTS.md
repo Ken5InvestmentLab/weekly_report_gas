@@ -195,6 +195,9 @@ OVERLAP_DAYS = 3
 - ローカルに clasp を使う場合:
   - `clasp push` でデプロイ
   - `clasp pull` で取得
+  - `.clasp.json` は本番GASの `scriptId` と `rootDir: ".clasp-src"` を使う。
+  - `.clasp-src/` は `clasp pull/push` 用の生成ディレクトリで、git管理しない。
+  - 本番反映時は `clasp pull` でmanifestとファイル名を確認し、`gas.txt` を `.clasp-src/株価記録&週報作成.js` へ反映してから `clasp push -f` する。
 - トリガー再設定:
   - `setupAllTriggers()` を手動実行
 - 旧スキーマ移行:

@@ -4,6 +4,8 @@
 *service-account*.json
 token.json
 
+.clasp-src/
+
 premium_worker/.env
 premium_worker/*.json
 !premium_worker/package.json
