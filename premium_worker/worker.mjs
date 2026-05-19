@@ -226,6 +226,8 @@ async function fail(opts) {
     failures.push({ alertId: String(opts["alert-id"] || opts.alertId || ""), reason: String(opts.reason || "failed") });
   }
 
+  assertFailCommandScope(failures, opts, Boolean(inputPath));
+
   const dryRun = opts["dry-run"] === true;
   const webhookUrl = dryRun ? "" : requiredEnv("DISCORD_PREMIUM_WEBHOOK_URL");
   if (!dryRun) await replayPendingLogEvents_(state, statePath);
@@ -279,6 +281,27 @@ async function fail(opts) {
   }
 
   console.log(JSON.stringify({ ok: true, posted: results.filter(r => r.posted).length, results }, null, 2));
+}
+
+function assertFailCommandScope(failures, opts = {}, isInputBatch = false) {
+  const allowMassFail = opts["allow-mass-fail"] === true || /^(1|true|yes)$/i.test(env("PREMIUM_ALLOW_MASS_FAIL_STUBS"));
+  if (allowMassFail) return;
+
+  const insufficient = failures.filter(item => /insufficient\s+verified\s+sources/i.test(String(item.reason || "")));
+  if (!insufficient.length) return;
+
+  if (isInputBatch) {
+    throw new Error(
+      "batch insufficient-source fail is rejected; verify each alert individually and use fail --alert-id only for alerts that truly lack grounded sources"
+    );
+  }
+
+  const maxInsufficientFails = positiveInt(env("PREMIUM_MAX_INSUFFICIENT_FAILS_PER_COMMAND"), 1);
+  if (insufficient.length > maxInsufficientFails) {
+    throw new Error(
+      `too many insufficient-source fail stubs in one command (${insufficient.length}); verify each alert individually or set PREMIUM_ALLOW_MASS_FAIL_STUBS=true for a deliberate manual override`
+    );
+  }
 }
 
 async function lockBefore(opts) {
@@ -2668,6 +2691,17 @@ function selfTest() {
   const nearestDisclosureDate = extractNearestDisclosureDateInfo("quote date 2026/05/11 previous disclosure 2026/02/10", "Q3 earnings (15:30)");
   assert.equal(nearestDisclosureDate.dateText, "2026-02-10");
   assert.equal(nearestDisclosureDate.timeText, "15:30");
+  assert.throws(() => assertFailCommandScope([
+    { alertId: "f1", reason: "insufficient verified sources" },
+    { alertId: "f2", reason: "insufficient verified sources" }
+  ], { input: "failures.json" }, true), /batch insufficient-source fail is rejected/);
+  assert.doesNotThrow(() => assertFailCommandScope([
+    { alertId: "f1", reason: "insufficient verified sources" }
+  ], { "alert-id": "f1" }, false));
+  assert.doesNotThrow(() => assertFailCommandScope([
+    { alertId: "f1", reason: "insufficient verified sources" },
+    { alertId: "f2", reason: "insufficient verified sources" }
+  ], { "allow-mass-fail": true, input: "failures.json" }, true));
   console.log(JSON.stringify({ ok: true, selfTest: "passed" }, null, 2));
 }
 

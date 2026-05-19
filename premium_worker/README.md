@@ -227,6 +227,20 @@ If a report fails validation, fix only the failed report in
 
 ---
 
+## Fail-stub behavior
+
+Use `fail --alert-id <id> --reason "insufficient verified sources"` only after
+checking that specific alert against company IR/news pages, IRBANK, and a
+TDnet/JPX-equivalent disclosure source. Do not use `fail --input` to mark a
+whole batch as `insufficient verified sources`.
+
+The worker rejects batch insufficient-source stubs by default. A mass fail
+requires an explicit manual override with `--allow-mass-fail` or
+`PREMIUM_ALLOW_MASS_FAIL_STUBS=true`, and should be treated as an exceptional
+operator action, not normal automation behavior.
+
+---
+
 ## Fundamentally material disclosure policy
 
 The report does **not** need to include the absolute newest disclosure if that

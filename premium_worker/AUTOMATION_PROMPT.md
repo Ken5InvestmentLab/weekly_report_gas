@@ -367,6 +367,12 @@ The `fail` command posts a 様子見 (watch-and-wait) Discord embed and records
 the alert as POSTED in the premium log. Every BOTTOM alert must be posted;
 there is no "skip" path.
 
+Do not use `fail --input` to convert a whole batch into insufficient-source
+stubs. `insufficient verified sources` is an alert-by-alert conclusion after
+checking that symbol's company IR/news pages, IRBANK, and a TDnet/JPX-equivalent
+disclosure source. If several alerts look weak, verify and fail them one by one
+with `--alert-id`; otherwise keep regenerating grounded reports.
+
 10. Only after the dry-run succeeds, run the real post:
 
 `node premium_worker/worker.mjs post --input premium_worker/out/premium_reports.json`
@@ -377,6 +383,8 @@ there is no "skip" path.
 
     The worker posts a 様子見 Discord embed and records the alert as POSTED.
     Do NOT skip the alert or leave it unposted.
+    Batch insufficient-source fail input is rejected by default and requires
+    an explicit manual override; normal automation must not use that override.
 
 If `PREMIUM_LOG_SPREADSHEET_ID` is configured, the worker records all post
 events (including 様子見 stubs) in that separate spreadsheet. If the spreadsheet
