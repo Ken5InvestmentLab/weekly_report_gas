@@ -5785,19 +5785,19 @@ const OHLCV_POST_REPAIR_EARLY_DEDUP_LIMIT_MS = 300 * 1000;
 const OHLCV_POST_REPAIR_EARLY_SCAN_MIN_REMAINING_MS = 10 * 1000;
 const OHLCV_POST_REPAIR_RESUME_AFTER_MS = 60 * 1000;
 const OHLCV_POST_REPAIR_SORT_MAX_ROWS = OHLCV_SAFE_SORT_MAX_ROWS;
-const OHLCV_POST_REPAIR_MIN_DEDUP_REMAINING_MS = 40000;
+const OHLCV_POST_REPAIR_MIN_DEDUP_REMAINING_MS = 60000;
 const OHLCV_POST_REPAIR_SAFETY_AFTER_MS = 10 * 60 * 1000;
 // tailスキャン行数。シートが365日未満の間はtailだけでは不足するため、early行スキャンを併用する
-// 110000 から 40000 へ縮小: 1ショット内に確実に収めるため
-const OHLCV_POST_REPAIR_DEDUP_READ_ROWS = 20000;
+// 110000 -> 40000 -> 20000 -> 5000へ縮小: GASのgetValues待ちで6分枠を食い切らないため
+const OHLCV_POST_REPAIR_DEDUP_READ_ROWS = 5000;
 const OHLCV_POST_REPAIR_RAW_VOLUME_SCAN_ROWS = 20000;
 const OHLCV_RAW_ALERT_VOLUME_MAP_CHUNK_ROWS = 5000;
 // 1回のSCAN呼び出しで処理する targetDates 件数（メモリ・所要時間を予測可能にするための上限）
-const OHLCV_POST_REPAIR_DEDUP_DATE_BATCH = 20;
+const OHLCV_POST_REPAIR_DEDUP_DATE_BATCH = 10;
 // SCANループ内のデッドラインチェック間隔（行）
-const OHLCV_POST_REPAIR_DEDUP_TIMECHECK_EVERY = 5000;
+const OHLCV_POST_REPAIR_DEDUP_TIMECHECK_EVERY = 1000;
 // SCAN中断のための残り時間下限（ms）
-const OHLCV_POST_REPAIR_DEDUP_TAIL_MARGIN_MS = 10000;
+const OHLCV_POST_REPAIR_DEDUP_TAIL_MARGIN_MS = 30000;
 // PropertiesServiceへの削除対象行番号キャッシュ用
 const OHLCV_DEDUP_ROWS_META_KEY = "OHLCV_DEDUP_ROWS_META";
 const OHLCV_DEDUP_ROWS_KEY_PREFIX = "OHLCV_DEDUP_ROWS_";
@@ -11477,6 +11477,11 @@ function dedupeOhlcvAllTargetDates_(sheet, targetDates, deadlineMs) {
   const t0 = Date.now();
   const keyRows = sheet.getRange(readFromRow, 1, readRows, 3).getValues();
   const volumeRows = sheet.getRange(readFromRow, 8, readRows, 1).getValues();
+  writeProcessLog_("OHLCV_POST_REPAIR", "Multi-date dedup values read.", {
+    readRows: readRows,
+    readFromRow: readFromRow,
+    elapsedMs: Date.now() - t0
+  });
   if (deadlineMs && deadlineMs - Date.now() < OHLCV_POST_REPAIR_DEDUP_TAIL_MARGIN_MS) {
     writeProcessLog_("OHLCV_POST_REPAIR", "Multi-date dedup scan timed out after getValues().", {
       readRows: readRows, elapsedMs: Date.now() - t0
@@ -11575,9 +11580,9 @@ function dedupeOhlcvAllTargetDates_(sheet, targetDates, deadlineMs) {
 // 収集キー数が ~40k 件（~1MB）となり PS の 500KB 総クォータを超えてクラッシュした。
 // 新実装では PS 保存を廃止し、tail 再読み込みコストと引き換えにクォータ問題を根本解決する。
 //
-// 【Codex レビュー回答】OHLCV_POST_REPAIR_DEDUP_READ_ROWS=40000 < QUICK_REPAIR_SCAN_MAX_ROWS=90000 の
+// 【Codex レビュー回答】OHLCV_POST_REPAIR_DEDUP_READ_ROWS < QUICK_REPAIR_SCAN_MAX_ROWS の
 // 点: quickRepair が GAP_REPAIR 行を "追記" する仕様上、これらは常にシート末尾に存在するため
-// tail 40k 行スキャンで確実に捕捉できる。90k は quickRepair が "スキャンする" 行数であり
+// tailウィンドウのスキャンで確実に捕捉できる。90k は quickRepair が "スキャンする" 行数であり
 // GAP_REPAIR 行が存在する行数ではない。
 function dedupeOhlcvEarlyRows_(sheet, targetDates, state, deadlineMs) {
   const numDataRows = Math.max(0, sheet.getLastRow() - 1);
