@@ -228,11 +228,13 @@ async function fail(opts) {
 
   const dryRun = opts["dry-run"] === true;
   const webhookUrl = dryRun ? "" : requiredEnv("DISCORD_PREMIUM_WEBHOOK_URL");
+  if (!dryRun) await replayPendingLogEvents_(state, statePath);
   const now = new Date();
   const results = [];
   const postLogEvents = [];
 
-  for (const item of failures) {
+  try {
+    for (const item of failures) {
     if (!item.alertId) throw new Error("fail requires --alert-id <id> or --input with alertId");
     const claim = state.claims[item.alertId] || {};
     const embed = buildSamayomiStubEmbed_(item.alertId, item.reason, claim);
@@ -251,6 +253,7 @@ async function fail(opts) {
     const discordMessage = await postDiscord(webhookUrl, payload);
     const discordMessageUrl = buildDiscordMessageUrl(discordMessage);
     const symbolCode = String(claim.symbolCode || "").trim();
+    const logEvent = buildSamayomiStubLogEvent_(item, embed, claim, now, discordMessageUrl);
 
     state.posted[item.alertId] = {
       postedAt: now.toISOString(),
@@ -263,15 +266,16 @@ async function fail(opts) {
       reason: item.reason
     };
     delete state.claims[item.alertId];
-    saveState(statePath, state);
-
-    postLogEvents.push(buildSamayomiStubLogEvent_(item, embed, claim, now, discordMessageUrl));
+    postLogEvents.push(logEvent);
     results.push({ alertId: item.alertId, posted: true, samayomiStub: true, discordMessageUrl });
+    saveState(statePath, state);
   }
 
-  if (!dryRun) {
-    saveState(statePath, state);
-    await writePremiumLogEventsSafe(postLogEvents, state, statePath);
+  } finally {
+    if (!dryRun) {
+      saveState(statePath, state);
+      await writePremiumLogEventsSafe(postLogEvents, state, statePath);
+    }
   }
 
   console.log(JSON.stringify({ ok: true, posted: results.filter(r => r.posted).length, results }, null, 2));
