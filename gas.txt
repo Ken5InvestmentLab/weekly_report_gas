@@ -5789,7 +5789,9 @@ const OHLCV_POST_REPAIR_MIN_DEDUP_REMAINING_MS = 40000;
 const OHLCV_POST_REPAIR_SAFETY_AFTER_MS = 10 * 60 * 1000;
 // tailスキャン行数。シートが365日未満の間はtailだけでは不足するため、early行スキャンを併用する
 // 110000 から 40000 へ縮小: 1ショット内に確実に収めるため
-const OHLCV_POST_REPAIR_DEDUP_READ_ROWS = 40000;
+const OHLCV_POST_REPAIR_DEDUP_READ_ROWS = 20000;
+const OHLCV_POST_REPAIR_RAW_VOLUME_SCAN_ROWS = 20000;
+const OHLCV_RAW_ALERT_VOLUME_MAP_CHUNK_ROWS = 5000;
 // 1回のSCAN呼び出しで処理する targetDates 件数（メモリ・所要時間を予測可能にするための上限）
 const OHLCV_POST_REPAIR_DEDUP_DATE_BATCH = 20;
 // SCANループ内のデッドラインチェック間隔（行）
@@ -5809,10 +5811,10 @@ const OHLCV_POST_REPAIR_COMPACT_MARGIN_MS = 35000;
 // 中断時に状態を保存して安全に再開できる
 const OHLCV_POST_REPAIR_RANGED_DELETE_MARGIN_MS = 10 * 1000;
 // EARLY_DEDUP の早期ゾーン読み込みチャンク行数（165k 行を 1 ショットで読むと API ハードタイムアウト）
-const OHLCV_POST_REPAIR_EARLY_SCAN_CHUNK_ROWS = 30000;
+const OHLCV_POST_REPAIR_EARLY_SCAN_CHUNK_ROWS = 10000;
 // EARLY_DEDUP tailキーセット再構築のチャンク行数。40k行を1回のgetValues()で読むとスロットリング時に
 // 350秒超ブロックするため、10k行×4チャンクに分割しデッドラインチェックを挟む
-const OHLCV_POST_REPAIR_EARLY_TAIL_CHUNK_ROWS = 10000;
+const OHLCV_POST_REPAIR_EARLY_TAIL_CHUNK_ROWS = 5000;
 // EARLY_DEDUP tail key set の PropertiesService 保存用キー（チャンク化、タイムアウト跨ぎ再開のため）
 const OHLCV_EARLY_DEDUP_TAIL_META_KEY = "OHLCV_EARLY_DEDUP_TAIL_META";
 const OHLCV_EARLY_DEDUP_TAIL_KEY_PREFIX = "OHLCV_EARLY_DEDUP_TAIL_";
@@ -9381,7 +9383,7 @@ function isUrlFetchDailyLimitError_(err) {
   return msg.indexOf("Service invoked too many times for one day: urlfetch") !== -1;
 }
 
-function buildRawAlertVolumeMapForBusinessDate_(rawSheet, businessDateKey) {
+function buildRawAlertVolumeMapForBusinessDate_(rawSheet, businessDateKey, options) {
   const map = {};
   const stats = {
     businessDateKey: businessDateKey,
@@ -9399,6 +9401,7 @@ function buildRawAlertVolumeMapForBusinessDate_(rawSheet, businessDateKey) {
 
   const lastRow = rawSheet.getLastRow();
   if (lastRow < dataStartRow_()) return { volumeMap: map, stats: stats };
+  return buildRawAlertVolumeMapForBusinessDateChunked_(rawSheet, businessDateKey, options);
 
   const numRows = lastRow - dataStartRow_() + 1;
   const values = rawSheet.getRange(dataStartRow_(), 1, numRows, RAW_HEADERS.length).getValues();
@@ -9454,6 +9457,138 @@ function buildRawAlertVolumeMapForBusinessDate_(rawSheet, businessDateKey) {
       stats.mappedRows++;
     }
   });
+
+  return { volumeMap: map, stats: stats };
+}
+
+function buildRawAlertVolumeMapForBusinessDateChunked_(rawSheet, businessDateKey, options) {
+  options = options || {};
+  const normalizedBusinessDateKey = normalizeBusinessDateKey_(businessDateKey);
+  const map = {};
+  const stats = {
+    businessDateKey: normalizedBusinessDateKey,
+    scannedRows: 0,
+    mappedRows: 0,
+    skippedNoSymbol: 0,
+    skippedNoReceivedAt: 0,
+    skippedInvalidVolume: 0,
+    skippedOtherDate: 0,
+    skippedNonBottom: 0,
+    duplicatedKeys: 0,
+    readMode: "chunked_minimal_columns",
+    stoppedBy: "",
+    remainingExpectedKeys: 0
+  };
+
+  if (!rawSheet) return { volumeMap: map, stats: stats };
+
+  const lastRow = rawSheet.getLastRow();
+  const firstDataRow = dataStartRow_();
+  if (lastRow < firstDataRow) return { volumeMap: map, stats: stats };
+
+  const expectedKeys = options.expectedKeys || [];
+  const expectedKeySet = new Set(expectedKeys);
+  const hasExpectedKeys = expectedKeys.length > 0;
+  const readStartIndex = Math.min(RAW_IDX.received_at, RAW_IDX.signal_type, RAW_IDX.symbol_code, RAW_IDX.volume);
+  const readEndIndex = Math.max(RAW_IDX.received_at, RAW_IDX.signal_type, RAW_IDX.symbol_code, RAW_IDX.volume);
+  const readStartCol = readStartIndex + 1;
+  const readCols = readEndIndex - readStartIndex + 1;
+  const idxReceivedAt = RAW_IDX.received_at - readStartIndex;
+  const idxSignalType = RAW_IDX.signal_type - readStartIndex;
+  const idxSymbol = RAW_IDX.symbol_code - readStartIndex;
+  const idxVolume = RAW_IDX.volume - readStartIndex;
+
+  const totalDataRows = lastRow - firstDataRow + 1;
+  const chunkRows = Math.max(500, Number(options.chunkRows || OHLCV_RAW_ALERT_VOLUME_MAP_CHUNK_ROWS || 5000));
+  const maxScanRows = Number(options.maxScanRows || 0);
+  let rowsBudget = maxScanRows > 0 ? Math.min(maxScanRows, totalDataRows) : totalDataRows;
+  let endRow = lastRow;
+
+  while (endRow >= firstDataRow && rowsBudget > 0) {
+    if (options.deadlineMs && Date.now() > Number(options.deadlineMs) - 15000) {
+      stats.stoppedBy = "deadline";
+      break;
+    }
+
+    const count = Math.min(chunkRows, rowsBudget, endRow - firstDataRow + 1);
+    const startRow = endRow - count + 1;
+    const values = rawSheet.getRange(startRow, readStartCol, count, readCols).getValues();
+    let datedRows = 0;
+    let olderDatedRows = 0;
+    let targetOrNewerDatedRows = 0;
+
+    values.forEach(function(r) {
+      stats.scannedRows++;
+
+      const signalType = String(r[idxSignalType] || "").trim().toUpperCase();
+      if (signalType !== "BOTTOM") {
+        stats.skippedNonBottom++;
+        return;
+      }
+
+      const symbol = String(r[idxSymbol] || "").trim();
+      if (!symbol) {
+        stats.skippedNoSymbol++;
+        return;
+      }
+
+      const receivedAt = r[idxReceivedAt];
+      if (!receivedAt) {
+        stats.skippedNoReceivedAt++;
+        return;
+      }
+
+      const volume = toRawAlertVolumeNumber_(r[idxVolume]);
+      if (!Number.isFinite(volume)) {
+        stats.skippedInvalidVolume++;
+        return;
+      }
+
+      const ts = rawAlertReceivedAtToOhlcvTimestamp_(receivedAt);
+      if (!ts) {
+        stats.skippedNoReceivedAt++;
+        return;
+      }
+
+      const dateKey = Utilities.formatDate(ts, CONFIG.TIMEZONE, "yyyy-MM-dd");
+      datedRows++;
+      if (dateKey < normalizedBusinessDateKey) olderDatedRows++;
+      if (dateKey >= normalizedBusinessDateKey) targetOrNewerDatedRows++;
+
+      if (dateKey !== normalizedBusinessDateKey) {
+        stats.skippedOtherDate++;
+        return;
+      }
+
+      const key = makeRawAlertVolumeKey_(ts, symbol);
+      if (hasExpectedKeys && !expectedKeySet.has(key)) return;
+
+      if (map[key] !== undefined) {
+        stats.duplicatedKeys++;
+        map[key] = Math.max(toRawAlertVolumeNumber_(map[key]), volume);
+      } else {
+        map[key] = volume;
+        stats.mappedRows++;
+      }
+      if (hasExpectedKeys) expectedKeySet.delete(key);
+    });
+
+    if (hasExpectedKeys && expectedKeySet.size === 0) {
+      stats.stoppedBy = "all_expected_keys_found";
+      break;
+    }
+
+    endRow = startRow - 1;
+    rowsBudget -= count;
+
+    if (options.stopAtOlderDateBoundary && datedRows > 0 && olderDatedRows === datedRows && targetOrNewerDatedRows === 0) {
+      stats.stoppedBy = "older_date_boundary";
+      break;
+    }
+  }
+
+  if (!stats.stoppedBy && rowsBudget <= 0 && endRow >= firstDataRow) stats.stoppedBy = "max_scan_rows";
+  stats.remainingExpectedKeys = expectedKeySet.size;
 
   return { volumeMap: map, stats: stats };
 }
@@ -10315,7 +10450,6 @@ function resumeOhlcvPostRepairCleanup() {
 function runOhlcvPostRepairCleanup_() {
   let lock = null;
   const startedAt = Date.now();
-  let rawAlertVolumeMap = null;
 
   // ★ ハードタイムアウト対策: 先にリトライトリガーをセット（600秒後）
   // 正常完了時は completeOhlcvPostRepairCleanup_ 内で削除。GASに強制終了されても自動再開できる。
@@ -10370,11 +10504,8 @@ function runOhlcvPostRepairCleanup_() {
       }
 
       if (state.step === "LOCK_AM") {
-        if (rawAlertVolumeMap === null) {
-          const rawSh = ss.getSheetByName(CONFIG.RAW_SHEET);
-          rawAlertVolumeMap = buildRawAlertVolumeMapForBusinessDate_(rawSh, state.businessDate).volumeMap;
-        }
-        const r = processOhlcvPostRepairProtectMiddayAmChunk_(sh, state.scanStartRow, state.cursor, state.businessDate, rawAlertVolumeMap);
+        const rawSh = ss.getSheetByName(CONFIG.RAW_SHEET);
+        const r = processOhlcvPostRepairProtectMiddayAmChunk_(sh, rawSh, state.scanStartRow, state.cursor, state.businessDate, startedAt + OHLCV_POST_REPAIR_LIMIT_MS);
         state.cursor = r.nextCursor;
         state.totals.protectedRows += r.protectedRows || 0;
         state.updatedAt = new Date().toISOString();
@@ -10634,7 +10765,8 @@ function processOhlcvPostRepairTimestampChunk_(sheet, scanStartRow, cursor) {
   return { nextCursor: startRow - 1, convertedRows: convertedRows };
 }
 
-function processOhlcvPostRepairProtectMiddayAmChunk_(sheet, scanStartRow, cursor, businessDate, rawAlertVolumeMap) {
+function processOhlcvPostRepairProtectMiddayAmChunk_(sheet, rawSheet, scanStartRow, cursor, businessDate, deadlineMs) {
+  return processOhlcvPostRepairProtectMiddayAmChunkOptimized_(sheet, rawSheet, scanStartRow, cursor, businessDate, deadlineMs);
   // 一括読み込み方式:
   // 当日 MIDDAY_ 行はシート末尾付近にしか存在しない（当日データ = ソート済みシートの最末尾）。
   // 旧来の 1,200 行チャンク × 全行スキャンから、末尾 OHLCV_POST_REPAIR_DEDUP_READ_ROWS 行の
@@ -10682,6 +10814,92 @@ function processOhlcvPostRepairProtectMiddayAmChunk_(sheet, scanStartRow, cursor
   }
 
   // nextCursor = safeScanStart - 1 を返すことで、呼び出し元の状態機械が即座に次のステップへ進む
+  return { nextCursor: safeScanStart - 1, protectedRows: protectedRows };
+}
+
+function processOhlcvPostRepairProtectMiddayAmChunkOptimized_(sheet, rawSheet, scanStartRow, cursor, businessDate, deadlineMs) {
+  const lastRow = sheet.getLastRow();
+  const safeScanStart = Math.max(2, Number(scanStartRow || 2));
+  if (lastRow < safeScanStart) return { nextCursor: safeScanStart - 1, protectedRows: 0 };
+
+  const dateKey = normalizeBusinessDateKey_(businessDate);
+  const middayMarker = makeMiddayRefreshId_(dateKey);
+  const protectedMarker = makeProtectedMiddayRefreshId_(dateKey);
+  const readStart = Math.max(safeScanStart, lastRow - OHLCV_POST_REPAIR_DEDUP_READ_ROWS + 1);
+  const numRows = lastRow - readStart + 1;
+
+  writeProcessLog_("OHLCV_POST_REPAIR", "LOCK_AM tail scan starting.", {
+    businessDate: dateKey,
+    readStart: readStart,
+    lastRow: lastRow,
+    numRows: numRows
+  });
+
+  const keyRows = sheet.getRange(readStart, 1, numRows, 3).getValues();
+  const volumeRows = sheet.getRange(readStart, 8, numRows, 1).getValues();
+  const markerValues = keyRows.map(row => [row[1]]);
+  const candidates = [];
+  const expectedKeys = [];
+
+  keyRows.forEach((row, index) => {
+    const ts = normalizeOhlcvTimestamp_(row[0]);
+    if (!ts || formatYmd_(ts) !== dateKey || getOhlcvSessionName_(ts) !== "AM") return;
+    const marker = String(row[1] || "").trim();
+    if (marker !== middayMarker) return;
+    const symbol = String(row[2] || "").trim();
+    if (!symbol) return;
+    const volume = toSafeVolumeNumber_(volumeRows[index][0]);
+    if (!Number.isFinite(volume)) return;
+    const key = makeRawAlertVolumeKey_(ts, symbol);
+    candidates.push({ index: index, row: readStart + index, key: key, symbol: symbol, volume: volume });
+    expectedKeys.push(key);
+  });
+
+  if (candidates.length === 0) {
+    writeProcessLog_("OHLCV_POST_REPAIR", "LOCK_AM tail scan finished with no MIDDAY AM candidates.", {
+      businessDate: dateKey,
+      readStart: readStart,
+      lastRow: lastRow,
+      numRows: numRows
+    });
+    return { nextCursor: safeScanStart - 1, protectedRows: 0 };
+  }
+
+  const rawAlertVolumeMapData = buildRawAlertVolumeMapForBusinessDate_(rawSheet, dateKey, {
+    expectedKeys: Array.from(new Set(expectedKeys)),
+    maxScanRows: OHLCV_POST_REPAIR_RAW_VOLUME_SCAN_ROWS,
+    chunkRows: OHLCV_RAW_ALERT_VOLUME_MAP_CHUNK_ROWS,
+    stopAtOlderDateBoundary: true,
+    deadlineMs: deadlineMs
+  });
+  const rawAlertVolumeMap = rawAlertVolumeMapData.volumeMap;
+  let protectedRows = 0;
+  const samples = [];
+
+  candidates.forEach(candidate => {
+    const rawVolume = rawAlertVolumeMap[candidate.key];
+    if (rawVolume === undefined || !Number.isFinite(Number(rawVolume))) return;
+    if (Math.round(candidate.volume) !== Math.round(Number(rawVolume))) return;
+    markerValues[candidate.index][0] = protectedMarker;
+    protectedRows++;
+    if (samples.length < 5) samples.push({ row: candidate.row, symbol: candidate.symbol, volume: candidate.volume });
+  });
+
+  if (protectedRows > 0) {
+    sheet.getRange(readStart, 2, numRows, 1).setValues(markerValues);
+    SpreadsheetApp.flush();
+  }
+
+  writeProcessLog_("OHLCV_POST_REPAIR", "LOCK_AM tail scan finished.", {
+    businessDate: dateKey,
+    readStart: readStart,
+    lastRow: lastRow,
+    candidates: candidates.length,
+    protectedRows: protectedRows,
+    rawMapStats: rawAlertVolumeMapData.stats,
+    samples: samples
+  });
+
   return { nextCursor: safeScanStart - 1, protectedRows: protectedRows };
 }
 
@@ -11257,7 +11475,8 @@ function dedupeOhlcvAllTargetDates_(sheet, targetDates, deadlineMs) {
   const readFromRow = lastRow - readRows + 1;
 
   const t0 = Date.now();
-  const rows = sheet.getRange(readFromRow, 1, readRows, 8).getValues();
+  const keyRows = sheet.getRange(readFromRow, 1, readRows, 3).getValues();
+  const volumeRows = sheet.getRange(readFromRow, 8, readRows, 1).getValues();
   if (deadlineMs && deadlineMs - Date.now() < OHLCV_POST_REPAIR_DEDUP_TAIL_MARGIN_MS) {
     writeProcessLog_("OHLCV_POST_REPAIR", "Multi-date dedup scan timed out after getValues().", {
       readRows: readRows, elapsedMs: Date.now() - t0
@@ -11282,7 +11501,7 @@ function dedupeOhlcvAllTargetDates_(sheet, targetDates, deadlineMs) {
 
     // 高速プリフィルタ: テキスト形式 "yyyy/MM/dd HH:mm" の先頭10文字で dateSet に照合し、
     // マッチしない行は normalizeOhlcvTimestamp_（regex+Date parse）を呼ばずにスキップ
-    const rawTs = rows[i][0];
+    const rawTs = keyRows[i][0];
     let quickDate = null;
     if (rawTs instanceof Date) {
       const jstMs = rawTs.getTime() + 9 * 3600 * 1000;
@@ -11299,12 +11518,12 @@ function dedupeOhlcvAllTargetDates_(sheet, targetDates, deadlineMs) {
     if (!ts) continue;
     const dateStr = formatYmd_(ts);
     if (!dateSet[dateStr]) continue;
-    const symbol = String(rows[i][2] || "").trim();
+    const symbol = String(keyRows[i][2] || "").trim();
     if (!symbol) continue;
     const sheetRow = readFromRow + i;
     const key = formatOhlcvTimestampTextForSheet_(ts) + "|" + symbol;
     // compareOhlcvDuplicatePriority_ は row[1](alert_id) と row[7](volume) だけ使う
-    const valueRow = [rows[i][0], rows[i][1], rows[i][2], null, null, null, null, rows[i][7]];
+    const valueRow = [keyRows[i][0], keyRows[i][1], keyRows[i][2], null, null, null, null, volumeRows[i][0]];
     const item = { key: key, row: valueRow, sheetRow: sheetRow };
     items.push(item);
     const current = bestByKey[key];
