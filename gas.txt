@@ -1198,7 +1198,7 @@ function purgeArchivedRawRows_(sh) {
     }
 
     // ここでは OHLCV を alert_id 単位で消さない
-    // OHLCV は purgeOldOhlcvDataDaily() の365日保持に任せる
+    // OHLCV は purgeOldOhlcvDataDaily() の485日保持に任せる
     if (deleteRowNums.length > 0) {
       deleteRowsByRowNums_(sh, deleteRowNums);
     }
@@ -1381,7 +1381,7 @@ function purgeOldOhlcvDataDaily() {
   if (lastRow < firstDataRow) return;
 
   const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - 365);
+  cutoff.setDate(cutoff.getDate() - 485);
   cutoff.setHours(0, 0, 0, 0);
   console.log(`[purgeOldOhlcv] 基準日: ${formatYmd_(cutoff)} より古いデータを削除対象とします`);
 
