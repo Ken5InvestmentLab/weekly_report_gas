@@ -224,6 +224,10 @@ If every report is valid, dry-run returns a payload preview and does not post.
 
 If a report fails validation, fix only the failed report in
 `premium_worker/out/premium_reports.json`, then run dry-run again.
+Do not convert a grounded report into a watch-and-wait stub merely because a
+batch-level validation retry budget was exhausted. Isolate the failed alert and
+repair the validator-reported title, date, disclosure URL, or report field when
+verified disclosure material exists.
 
 ---
 

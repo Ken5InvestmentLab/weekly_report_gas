@@ -1422,8 +1422,10 @@ function looseTitleIncluded(reportText, title) {
 
 function normalizeTitleForCompare(value) {
   return String(value || "")
+    .normalize("NFKC")
+    .replace(/[（(]\d{1,2}:\d{2}[）)]/g, "")
     .replace(/[ \t\r\n　]/g, "")
-    .replace(/[【】「」『』（）()〔〕]/g, "")
+    .replace(/[【】「」『』（）()〔〕［］[\]・、，,.．:：/／\-‐‑–—]/g, "")
     .trim();
 }
 
@@ -2364,6 +2366,18 @@ function selfTest() {
   assert.equal(normalizeTradingViewSymbol("TYO:7203"), "TSE:7203");
   assert.equal(buildTradingViewUrl("TYO:7203"), "https://www.tradingview.com/chart/?symbol=TSE%3A7203");
   assert.equal(buildTradingViewUrl("TSE:8285"), "https://www.tradingview.com/chart/?symbol=TSE%3A8285");
+  assert.equal(
+    normalizeTitleForCompare("2026年４月度 月次売上概況"),
+    normalizeTitleForCompare("2026年4月度月次売上概況")
+  );
+  assert.equal(
+    normalizeTitleForCompare("2026年12月期 第１四半期決算説明資料"),
+    normalizeTitleForCompare("2026年12月期第1四半期決算説明資料")
+  );
+  assert.equal(
+    normalizeTitleForCompare("第１四半期決算説明動画公開のお知らせ（17:00）"),
+    normalizeTitleForCompare("第1四半期決算説明動画公開のお知らせ")
+  );
   const embed = buildEmbed({
     alertId: "a1",
     title: "テスト（1234）｜Premium Snapshot",

@@ -371,16 +371,18 @@ Instead:
 9. Rewrite `premium_worker/out/premium_reports.json`.
 10. Run the dry-run again.
 
-Repeat this dry-run → fix → dry-run loop up to 3 total attempts.
+Repeat this dry-run → fix → dry-run loop for the failed alert. A batch-level
+retry count is not evidence that the symbol lacks disclosures.
 
-If the dry-run still fails after 3 attempts, run the `fail` command to post a
-様子見 stub to Discord:
+If the dry-run still fails after repeated report repair:
+- keep the failed alert isolated from the next real post batch
+- read whether the validator is asking for a newer disclosure, a title/date
+  match, a direct disclosure URL, or a report-field rewrite
+- keep repairing the grounded report when verified disclosure material exists
 
-`node premium_worker/worker.mjs fail --alert-id <alertId> --reason "failed validation after auto-regeneration"`
-
-The `fail` command posts a 様子見 (watch-and-wait) Discord embed and records
-the alert as POSTED in the premium log. Every BOTTOM alert must be posted;
-there is no "skip" path.
+Do NOT post a 様子見 stub merely because validation retries were exhausted.
+`fail` is for alert-specific source insufficiency after the source checks below,
+not for a report that still needs validation repair.
 
 Do not use `fail --input` to convert a whole batch into insufficient-source
 stubs. `insufficient verified sources` is an alert-by-alert conclusion after
