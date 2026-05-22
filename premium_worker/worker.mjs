@@ -1085,7 +1085,73 @@ async function resolveIrbankPdfDisclosureLinks(report) {
   const field = fields.find(item => String(item.name || "").trim() === "開示リンク");
   if (!field || !field.value || String(field.value).trim() === "開示リンク未確認") return report;
   field.value = await replaceMarkdownLinkUrls(field.value, async url => resolveIrbankDisclosurePdfUrl(url));
+  field.value = await repairUnavailableIrbankPdfDisclosureLinks(field.value, report.alertId, report.symbolCode);
   return report;
+}
+
+async function repairUnavailableIrbankPdfDisclosureLinks(value, alertId = "", symbolCode = "") {
+  const lines = String(value || "").split(/\r?\n/);
+  const kept = [];
+  let removed = 0;
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    const link = extractFirstMarkdownLink(line);
+    if (!link || !isIrbankPdfFileUrl(link.url)) {
+      if (line) kept.push(line);
+      continue;
+    }
+
+    const status = await fetchDisclosureHeadStatus(link.url);
+    if (isUnavailableDisclosureStatus(status)) {
+      const fallbackUrl = buildIrbankDetailUrlFromPdf(link.url, symbolCode);
+      if (fallbackUrl) {
+        kept.push(line.replace(link.url, fallbackUrl));
+        continue;
+      }
+      removed += 1;
+      continue;
+    }
+    kept.push(line);
+  }
+
+  if (removed && !kept.some(line => hasUrl(line))) {
+    throw new Error(`report ${alertId || "unknown"} all f.irbank.net disclosure PDF links were unavailable`);
+  }
+  return kept.join("\n");
+}
+
+function isIrbankPdfFileUrl(url) {
+  try {
+    const parsed = new URL(String(url || ""));
+    const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+    return host === "f.irbank.net" && /^\/(?:pdf|pr)\/.+\.pdf$/i.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function buildIrbankDetailUrlFromPdf(url, symbolCode = "") {
+  const code = String(symbolCode || "").trim();
+  if (!/^[0-9A-Z]{4,5}$/i.test(code)) return "";
+  const match = String(url || "").match(/\/([0-9]{12,})\.pdf(?:[?#].*)?$/i);
+  return match ? `https://irbank.net/${code}/${match[1]}` : "";
+}
+
+async function fetchDisclosureHeadStatus(url) {
+  try {
+    const response = await fetch(url, {
+      method: "HEAD",
+      signal: AbortSignal.timeout(10000)
+    });
+    return response.status;
+  } catch {
+    return 0;
+  }
+}
+
+function isUnavailableDisclosureStatus(status) {
+  return [401, 403, 404, 410].includes(Number(status));
 }
 
 async function assertNoNewerIrbankDisclosureMiss(report, claim) {
@@ -2709,6 +2775,7 @@ function selfTest() {
   assert.equal(linkedLogEvent.reason, "[混在/要確認：利益改善余地はあるが、投資負担と継続性の確認が必要。](https://discord.com/channels/1/2/3)");
   assert.equal(extractIrbankPdfUrlFromHtml('<a href="https://f.irbank.net/pr/20260401/140120260326590425.pdf">PDF</a>', "140120260326590425"), "https://f.irbank.net/pr/20260401/140120260326590425.pdf");
   assert.equal(extractIrbankPdfUrlFromHtml('<a href="https://f.irbank.net/pdf/20260430/140120260430514206.pdf">PDF</a>', "140120260430514206"), "https://f.irbank.net/pdf/20260430/140120260430514206.pdf");
+  assert.equal(buildIrbankDetailUrlFromPdf("https://f.irbank.net/pdf/20260515/140120260515538238.pdf", "8585"), "https://irbank.net/8585/140120260515538238");
   assert.equal(getPostSkipReason("posted-alert", { posted: { "posted-alert": {} }, claims: {} }, null), "already posted");
   assert.equal(getPostSkipReason("unclaimed-alert", { posted: {}, claims: {} }, null), "no active claim");
   assert.equal(getPostSkipReason("claimed-alert", { posted: {}, claims: { "claimed-alert": { claimId: "c1" } } }, { claimId: "c1" }), "");

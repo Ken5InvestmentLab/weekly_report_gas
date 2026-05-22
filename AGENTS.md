@@ -160,6 +160,7 @@ OVERLAP_DAYS = 3
 - 開示リンクのラベルは必ず `YYYY-MM-DD 開示タイトル(hh:mm)` 形式にし、実際の資料タイトルまたはページタイトルを使う。
 - IRBANK個別開示ページ内に `f.irbank.net/pdf/...pdf` または `f.irbank.net/pr/...pdf` が確認できる場合はPDF直リンクを優先する。
 - `https://irbank.net/{code}/{documentId}` より、確認できるなら `https://f.irbank.net/pdf/{yyyymmdd}/{documentId}.pdf` 形式を優先する。
+- `f.irbank.net` のPDF直リンクが `AccessDenied` / 403 / 404 で開けない場合は投稿に残さず、開ける日本語版の直リンクまたは IRBANK 個別開示ページへ切り替える。
 - 本文は日本語で、各分析欄に日付・数値・事業ドライバー・確認点を含める。
 - 1行メモのような薄い要約にしない。
 - `足元材料` は調査ログや開示タイトルの羅列ではなく、最新重要開示の日付・材料・数値・確認点を短い時系列で書く。
