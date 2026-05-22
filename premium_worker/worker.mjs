@@ -1077,7 +1077,17 @@ function isDirectDisclosureFileUrl(url) {
 }
 
 function isDirectDisclosureLinkUrl(url) {
-  return isDirectDisclosureFileUrl(url) || isDisclosureDetailPageUrl(url);
+  return isDirectDisclosureFileUrl(url) || isAllowedDisclosureDetailPageUrl(url);
+}
+
+function isAllowedDisclosureDetailPageUrl(url) {
+  if (!isDisclosureDetailPageUrl(url)) return false;
+  try {
+    const host = new URL(String(url || "")).hostname.toLowerCase().replace(/^www\./, "");
+    return host !== "irbank.net";
+  } catch {
+    return false;
+  }
 }
 
 async function resolveIrbankPdfDisclosureLinks(report) {
@@ -1085,11 +1095,11 @@ async function resolveIrbankPdfDisclosureLinks(report) {
   const field = fields.find(item => String(item.name || "").trim() === "開示リンク");
   if (!field || !field.value || String(field.value).trim() === "開示リンク未確認") return report;
   field.value = await replaceMarkdownLinkUrls(field.value, async url => resolveIrbankDisclosurePdfUrl(url));
-  field.value = await repairUnavailableIrbankPdfDisclosureLinks(field.value, report.alertId, report.symbolCode);
+  field.value = await dropUnavailableIrbankPdfDisclosureLinks(field.value, report.alertId);
   return report;
 }
 
-async function repairUnavailableIrbankPdfDisclosureLinks(value, alertId = "", symbolCode = "") {
+async function dropUnavailableIrbankPdfDisclosureLinks(value, alertId = "") {
   const lines = String(value || "").split(/\r?\n/);
   const kept = [];
   let removed = 0;
@@ -1104,11 +1114,6 @@ async function repairUnavailableIrbankPdfDisclosureLinks(value, alertId = "", sy
 
     const status = await fetchDisclosureHeadStatus(link.url);
     if (isUnavailableDisclosureStatus(status)) {
-      const fallbackUrl = buildIrbankDetailUrlFromPdf(link.url, symbolCode);
-      if (fallbackUrl) {
-        kept.push(line.replace(link.url, fallbackUrl));
-        continue;
-      }
       removed += 1;
       continue;
     }
@@ -1129,13 +1134,6 @@ function isIrbankPdfFileUrl(url) {
   } catch {
     return false;
   }
-}
-
-function buildIrbankDetailUrlFromPdf(url, symbolCode = "") {
-  const code = String(symbolCode || "").trim();
-  if (!/^[0-9A-Z]{4,5}$/i.test(code)) return "";
-  const match = String(url || "").match(/\/([0-9]{12,})\.pdf(?:[?#].*)?$/i);
-  return match ? `https://irbank.net/${code}/${match[1]}` : "";
 }
 
 async function fetchDisclosureHeadStatus(url) {
@@ -2775,11 +2773,10 @@ function selfTest() {
   assert.equal(linkedLogEvent.reason, "[混在/要確認：利益改善余地はあるが、投資負担と継続性の確認が必要。](https://discord.com/channels/1/2/3)");
   assert.equal(extractIrbankPdfUrlFromHtml('<a href="https://f.irbank.net/pr/20260401/140120260326590425.pdf">PDF</a>', "140120260326590425"), "https://f.irbank.net/pr/20260401/140120260326590425.pdf");
   assert.equal(extractIrbankPdfUrlFromHtml('<a href="https://f.irbank.net/pdf/20260430/140120260430514206.pdf">PDF</a>', "140120260430514206"), "https://f.irbank.net/pdf/20260430/140120260430514206.pdf");
-  assert.equal(buildIrbankDetailUrlFromPdf("https://f.irbank.net/pdf/20260515/140120260515538238.pdf", "8585"), "https://irbank.net/8585/140120260515538238");
   assert.equal(getPostSkipReason("posted-alert", { posted: { "posted-alert": {} }, claims: {} }, null), "already posted");
   assert.equal(getPostSkipReason("unclaimed-alert", { posted: {}, claims: {} }, null), "no active claim");
   assert.equal(getPostSkipReason("claimed-alert", { posted: {}, claims: { "claimed-alert": { claimId: "c1" } } }, { claimId: "c1" }), "");
-  const detailEmbed = buildEmbed({
+  assert.throws(() => buildEmbed({
     alertId: "a7",
     url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
     symbolCode: "1234",
@@ -2793,9 +2790,7 @@ function selfTest() {
       { name: "開示リンク", value: "[2026-02-12 自己株式取得結果に関するお知らせ(15:00)](https://irbank.net/1234/140120260212558146)" },
       { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
     ]
-  });
-  assert.equal(detailEmbed.fields.find(f => f.name === "開示リンク").value, "・[2026-02-12 自己株式取得結果に関するお知らせ(15:00)](https://irbank.net/1234/140120260212558146)");
-  assert.equal(detailEmbed.fields.find(f => f.name === "Sources").value, "・[テスト株式会社 IRニュース一覧](https://example.com/ir/news)");
+  }), /direct disclosure URL/);
   const previousHours = process.env.PREMIUM_ALLOWED_JST_HOURS;
   const previousMinutes = process.env.PREMIUM_ALLOWED_JST_MINUTES;
   process.env.PREMIUM_ALLOWED_JST_HOURS = "13,15";
