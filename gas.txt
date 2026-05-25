@@ -13,7 +13,7 @@ const CONFIG = {
   MAX_STR_LEN: 300,
 
   DAILY_SOFT_LIMIT_MS: 120000,
-  DAILY_RESUME_AFTER_MS: 60 * 1000,
+  DAILY_RESUME_AFTER_MS: 10 * 1000,
   DAILY_SAFETY_AFTER_MS: 7 * 60 * 1000,
   DAILY_CONT_TRIGGER_HANDLER: "resumeDailyMaintenance",
 
@@ -768,10 +768,10 @@ savePendingOhlcvCompletionNotice_(displayCount, "0", tag);
 deleteTriggersByHandler_("quickRepairTrigger");
 ScriptApp.newTrigger("quickRepairTrigger")
   .timeBased()
-  .after(60 * 1000)
+  .after(5 * 1000)
   .create();
 
-writeProcessLog_("日次メンテナンス", "評価更新完了。Discord通知はpost-repair cleanup完了後に送信します。GAP修復を1分後に起動します。", {
+writeProcessLog_("日次メンテナンス", "評価更新完了。Discord通知はpost-repair cleanup完了後に送信します。GAP修復を5秒後に起動します。", {
   handlerName: "quickRepairTrigger",
   discordNotice: "pending_after_post_repair_cleanup",
   githubOptimize: "after_post_repair_cleanup"
@@ -1005,10 +1005,31 @@ function finalizeDueEvaluationsChunked_(startedAtMs, isResume) {
 }
 
 function writeDirtyRawRows_(sh, chunkStartRow, values, dirtyIndices) {
+  writeDirtyRowsBatched_(sh, chunkStartRow, values, dirtyIndices, RAW_HEADERS.length);
+}
+
+// 連続するインデックスを 1 つの setValues() にまとめて書き戻すヘルパー。
+// dirtyIndices は values 配列内のインデックス。chunkStartRow + index がシート行番号。
+// 1 行ずつ setValues する代わりに、連続区間ごとに 1 回でまとめて書き込む。
+function writeDirtyRowsBatched_(sh, chunkStartRow, values, dirtyIndices, numCols) {
   if (!dirtyIndices || dirtyIndices.length === 0) return;
-  dirtyIndices.forEach(i => {
-    sh.getRange(chunkStartRow + i, 1, 1, RAW_HEADERS.length).setValues([values[i]]);
-  });
+  const sorted = dirtyIndices.slice().sort((a, b) => a - b);
+  let runStart = sorted[0];
+  let runEnd = sorted[0];
+  for (let k = 1; k <= sorted.length; k++) {
+    const idx = k < sorted.length ? sorted[k] : -1;
+    if (k < sorted.length && idx === runEnd + 1) {
+      runEnd = idx;
+      continue;
+    }
+    const runLen = runEnd - runStart + 1;
+    sh.getRange(chunkStartRow + runStart, 1, runLen, numCols)
+      .setValues(values.slice(runStart, runEnd + 1));
+    if (k < sorted.length) {
+      runStart = idx;
+      runEnd = idx;
+    }
+  }
 }
 function getLatestMarketDataCached_(symbolCode, runMemo, options) {
   const code = String(symbolCode || "").trim().toUpperCase();
@@ -1839,7 +1860,7 @@ const MIDDAY_POSTPROCESS_SCAN_ROWS = OHLCV_APPEND_INTEGRITY_SCAN_ROWS;
 const MIDDAY_POSTPROCESS_CHUNK_ROWS = 5000;
 const MIDDAY_POSTPROCESS_TIME_LIMIT_MS = 4 * 60 * 1000;
 const MIDDAY_POSTPROCESS_MIN_REMAINING_MS = 45 * 1000;
-const MIDDAY_POSTPROCESS_RESUME_AFTER_MS = 60 * 1000;
+const MIDDAY_POSTPROCESS_RESUME_AFTER_MS = 5 * 1000;
 const MIDDAY_DEDUPE_GUARD_MS = 120 * 1000;
 const MIDDAY_FULL_BACKFILL_SYMBOLS_KEY = "OHLCV_MIDDAY_FULL_BACKFILL_SYMBOLS";
 const MIDDAY_HISTORY_COVERAGE_SCAN_MAX_ROWS = 250000;
@@ -2321,7 +2342,7 @@ if (symbols.length === 0) {
         elapsedMs: elapsedBeforeBatch
       });
 
-      scheduleMiddayOhlcvResumeIfAllowed_(60 * 1000);
+      scheduleMiddayOhlcvResumeIfAllowed_(10 * 1000);
       return { ok: true, incomplete: true, nextIndex: i, appendedRows: appended };
     }
 
@@ -2485,16 +2506,64 @@ clearMiddayOhlcvState_();
 
 sendCompletionNotice_(String(newAlertCount), "0", "AM");
 
-// 重複排除・ソートは別実行に逃がす
+// 重複排除・ソートは時間余裕があればインラインで実行。
+// 足りなければ既存通り別トリガー予約。GAS タイムアウト 360 秒から
+// 30 秒の安全バッファを引いた残り時間が 180 秒以上あればインライン化を試みる。
 if (appended > 0) {
-  scheduleMiddayOhlcvPostprocess_();
-}
+  const elapsedSoFar = Date.now() - startTime;
+  const INLINE_SAFETY_BUFFER_MS = 30 * 1000;
+  const INLINE_MIN_AVAILABLE_MS = 180 * 1000;
+  const availableForInlineMs = 360 * 1000 - elapsedSoFar - INLINE_SAFETY_BUFFER_MS;
 
-writeProcessLog_("OHLCV-AM", "13:30先行取得が完了しました。後処理は別トリガーで実行します。", {
-  fetchedSymbols: newAlertCount,
-  appendedRows: appended,
-  refreshId: refreshId
-});
+  if (availableForInlineMs >= INLINE_MIN_AVAILABLE_MS) {
+    try {
+      const state = loadMiddayOhlcvPostprocessState_(ohlcvSheet);
+      // runMiddayOhlcvPostprocessChunks_ の deadline = startedAt + MIDDAY_POSTPROCESS_TIME_LIMIT_MS。
+      // deadline = Date.now() + availableForInlineMs にしたいので startedAt を逆算する。
+      const spoofedStartedAt = Date.now() + availableForInlineMs - MIDDAY_POSTPROCESS_TIME_LIMIT_MS;
+      const result = runMiddayOhlcvPostprocessChunks_(ohlcvSheet, state, spoofedStartedAt);
+      if (result.complete) {
+        clearMiddayOhlcvPostprocessState_();
+        writeProcessLog_("OHLCV-AM", "13:30先行取得が完了し、後処理もインラインで完了しました。", {
+          fetchedSymbols: newAlertCount,
+          appendedRows: appended,
+          refreshId: refreshId,
+          postprocessTotals: result.state.totals,
+          inlineElapsedMs: result.elapsedMs
+        });
+      } else {
+        saveMiddayOhlcvPostprocessState_(result.state);
+        scheduleMiddayOhlcvPostprocess_({ keepState: true });
+        writeProcessLog_("OHLCV-AM", "13:30先行取得が完了。インライン後処理は途中までで時間切れのため、続きを別トリガーで実行します。", {
+          fetchedSymbols: newAlertCount,
+          appendedRows: appended,
+          refreshId: refreshId,
+          remainingRows: result.state.remainingRows,
+          inlineElapsedMs: result.elapsedMs
+        });
+      }
+    } catch (postErr) {
+      writeProcessLog_("OHLCV-AM", "インライン後処理で例外発生。別トリガーで再試行します。", {
+        message: postErr && postErr.message ? postErr.message : String(postErr)
+      });
+      scheduleMiddayOhlcvPostprocess_({ keepState: true });
+    }
+  } else {
+    scheduleMiddayOhlcvPostprocess_();
+    writeProcessLog_("OHLCV-AM", "13:30先行取得が完了しました。時間余裕がないため後処理は別トリガーで実行します。", {
+      fetchedSymbols: newAlertCount,
+      appendedRows: appended,
+      refreshId: refreshId,
+      elapsedMs: elapsedSoFar
+    });
+  }
+} else {
+  writeProcessLog_("OHLCV-AM", "13:30先行取得が完了しました（追記行なし）。", {
+    fetchedSymbols: newAlertCount,
+    appendedRows: appended,
+    refreshId: refreshId
+  });
+}
 
 return { ok: true, complete: true, fetchedSymbols: newAlertCount, appendedRows: appended };
 }
@@ -3968,9 +4037,7 @@ if (validRows.length > 0) {
           adjustedSymbolMap[splitKey].adjustedRows++;
         }
       });
-      modifiedRows.forEach(idx => {
-        rawSheet.getRange(chunkStartRow + idx, 1, 1, RAW_HEADERS.length).setValues([rawData[idx]]);
-      });
+      writeDirtyRowsBatched_(rawSheet, chunkStartRow, rawData, modifiedRows, RAW_HEADERS.length);
       const nextCursor = chunkEndRow + 1;
       props.setProperty(STATE_KEY, nextCursor.toString());
       chunkNo++;
@@ -4050,10 +4117,10 @@ if (phase === "PHASE4") {
 
   ScriptApp.newTrigger("runDailyMaintenanceTrigger")
     .timeBased()
-    .after(60 * 1000)
+    .after(5 * 1000)
     .create();
 
-  writeProcessLog_("OHLCV", "日次メンテナンスのワンショットトリガーを1分後に設定しました。", {
+  writeProcessLog_("OHLCV", "日次メンテナンスのワンショットトリガーを5秒後に設定しました。", {
     handlerName: "runDailyMaintenanceTrigger",
     phase4Mode: "ultra_light"
   });
@@ -4255,8 +4322,11 @@ function processSplitQueueBatch_(startTime, limitMs) {
       lastRow: lastRow
     });
 
+    // 連続する rowNum をまとめて読み書きすることで getValues/setValues 呼び出し回数を削減。
+    // 連続しない場合は run 長 1 として個別に処理する（既存挙動と同じ）。
     let updatedRows = 0;
-    for (let idx = 0; idx < rowNums.length; idx++) {
+    let idx = 0;
+    while (idx < rowNums.length) {
       const elapsed = Date.now() - startTime;
       if (elapsed > limitMs - FETCH_GUARD_MS) {
         props.setProperty("SPLIT_INDEX", String(startIndex));
@@ -4269,17 +4339,32 @@ function processSplitQueueBatch_(startTime, limitMs) {
         return false;
       }
 
-      const rowNum = rowNums[idx];
-      const row = ohlcvSheet.getRange(rowNum, 1, 1, 8).getValues()[0];
-      const ts = row[0];
-      if ((ts instanceof Date) && (ts.getTime() / 1000 < target.date)) {
-        for (let c = 3; c <= 6; c++) if (Number.isFinite(row[c])) row[c] = Math.round((row[c] / target.ratio) * 100) / 100;
-        if (Number.isFinite(row[7])) row[7] = Math.round(row[7] * target.ratio);
-        ohlcvSheet.getRange(rowNum, 4, 1, 5).setValues([row.slice(3, 8)]);
-        updatedRows++;
+      // 連続区間を検出
+      let runEnd = idx;
+      while (runEnd + 1 < rowNums.length && rowNums[runEnd + 1] === rowNums[runEnd] + 1) {
+        runEnd++;
       }
-      startIndex = rowNum + 1;
+      const runStartRow = rowNums[idx];
+      const runLen = rowNums[runEnd] - runStartRow + 1;
+      const rows = ohlcvSheet.getRange(runStartRow, 1, runLen, 8).getValues();
+
+      let anyChanged = false;
+      for (let r = 0; r < rows.length; r++) {
+        const ts = rows[r][0];
+        if ((ts instanceof Date) && (ts.getTime() / 1000 < target.date)) {
+          for (let c = 3; c <= 6; c++) if (Number.isFinite(rows[r][c])) rows[r][c] = Math.round((rows[r][c] / target.ratio) * 100) / 100;
+          if (Number.isFinite(rows[r][7])) rows[r][7] = Math.round(rows[r][7] * target.ratio);
+          anyChanged = true;
+          updatedRows++;
+        }
+      }
+      if (anyChanged) {
+        const writeData = rows.map(r => r.slice(3, 8));
+        ohlcvSheet.getRange(runStartRow, 4, runLen, 5).setValues(writeData);
+      }
+      startIndex = rowNums[runEnd] + 1;
       props.setProperty("SPLIT_INDEX", String(startIndex));
+      idx = runEnd + 1;
     }
 
     debugLogToSheet_("ohlcv.phase3.targetComplete", {
@@ -4662,7 +4747,7 @@ function scheduleOhlcvResume_(handlerName, delayMs) {
  * トリガー作成自体が Google サーバーエラーで失敗した場合にリトライします。
  */
 function setupResumeTrigger_(handlerName) {
-  scheduleOhlcvResume_(handlerName, 60 * 1000);
+  scheduleOhlcvResume_(handlerName, 10 * 1000);
 }
 
 /**
@@ -5756,8 +5841,8 @@ const QUICK_REPAIR_FAIL_THRESHOLD = 3;
 const QUICK_REPAIR_FAIL_RETAIN_DAYS = 21;
 const QUICK_REPAIR_BATCH_SYMBOLS = 40;
 const QUICK_REPAIR_MAX_RUN_MS = 3.5 * 60 * 1000;
-const QUICK_REPAIR_RESUME_AFTER_MS = 60 * 1000;
-const QUICK_REPAIR_SAFETY_AFTER_MS = 10 * 60 * 1000;
+const QUICK_REPAIR_RESUME_AFTER_MS = 10 * 1000;
+const QUICK_REPAIR_SAFETY_AFTER_MS = 7 * 60 * 1000;
 const QUICK_REPAIR_LOCK_WAIT_MS = 5000;
 const QUICK_REPAIR_STATE_VERSION = 7;
 const QUICK_REPAIR_SCAN_BUDGET_MS = 75 * 1000;
@@ -5783,10 +5868,10 @@ const OHLCV_POST_REPAIR_EARLY_DEDUP_LIMIT_MS = 300 * 1000;
 // EARLY_DEDUP: tail構築後に early scan を開始するための最低残り時間。Phase2はタイムアウトしても
 // earlyDedupEarlyCursor で再開できるため1チャンク分の余裕は不要。10sあれば必ず開始できる
 const OHLCV_POST_REPAIR_EARLY_SCAN_MIN_REMAINING_MS = 10 * 1000;
-const OHLCV_POST_REPAIR_RESUME_AFTER_MS = 60 * 1000;
+const OHLCV_POST_REPAIR_RESUME_AFTER_MS = 10 * 1000;
 const OHLCV_POST_REPAIR_SORT_MAX_ROWS = OHLCV_SAFE_SORT_MAX_ROWS;
 const OHLCV_POST_REPAIR_MIN_DEDUP_REMAINING_MS = 60000;
-const OHLCV_POST_REPAIR_SAFETY_AFTER_MS = 10 * 60 * 1000;
+const OHLCV_POST_REPAIR_SAFETY_AFTER_MS = 7 * 60 * 1000;
 // tailスキャン行数。シートが365日未満の間はtailだけでは不足するため、early行スキャンを併用する
 // 110000 -> 40000 -> 20000 -> 5000へ縮小: GASのgetValues待ちで6分枠を食い切らないため
 const OHLCV_POST_REPAIR_DEDUP_READ_ROWS = 5000;
@@ -5833,8 +5918,8 @@ const EVAL_OHLCV_COVERAGE_STATE_KEY = "EVAL_OHLCV_COVERAGE_REPAIR_STATE_V1";
 const EVAL_OHLCV_COVERAGE_RESUME_HANDLER = "resumeEvaluationOhlcvCoverageRepair";
 const EVAL_OHLCV_COVERAGE_BATCH_GROUPS = 12;
 const EVAL_OHLCV_COVERAGE_MAX_RUN_MS = 3.5 * 60 * 1000;
-const EVAL_OHLCV_COVERAGE_RESUME_AFTER_MS = 60 * 1000;
-const EVAL_OHLCV_COVERAGE_SAFETY_AFTER_MS = 10 * 60 * 1000;
+const EVAL_OHLCV_COVERAGE_RESUME_AFTER_MS = 10 * 1000;
+const EVAL_OHLCV_COVERAGE_SAFETY_AFTER_MS = 7 * 60 * 1000;
 
 /**
  * 単一銘柄の特定期間のOHLCVデータを強制再取得し、シートに反映する。
@@ -9383,6 +9468,41 @@ function isUrlFetchDailyLimitError_(err) {
   return msg.indexOf("Service invoked too many times for one day: urlfetch") !== -1;
 }
 
+// 当日の rawAlertVolumeMap を CacheService にキャッシュするキー。
+// 13:30 と 16:00 で同じ営業日のマップを 2 回計算する無駄を避けるため。
+// businessDate が変わったら自動的にミスする（payload 内の businessDate と照合）。
+const RAW_ALERT_VOLUME_MAP_CACHE_KEY = "RAW_ALERT_VOLUME_MAP_V1";
+const RAW_ALERT_VOLUME_MAP_CACHE_TTL_SEC = 6 * 60 * 60; // 6 時間。13:30→16:00 の再利用に十分
+const RAW_ALERT_VOLUME_MAP_CACHE_MAX_BYTES = 90 * 1024; // CacheService の 100KB 上限から安全マージン
+
+function loadCachedRawAlertVolumeMap_(businessDateKey) {
+  try {
+    const cache = CacheService.getScriptCache();
+    const cached = cache.get(RAW_ALERT_VOLUME_MAP_CACHE_KEY);
+    if (!cached) return null;
+    const parsed = JSON.parse(cached);
+    if (!parsed || parsed.businessDate !== businessDateKey) return null;
+    return { volumeMap: parsed.volumeMap || {}, stats: parsed.stats || {} };
+  } catch (e) {
+    return null;
+  }
+}
+
+function saveCachedRawAlertVolumeMap_(businessDateKey, result) {
+  try {
+    const payload = JSON.stringify({
+      businessDate: businessDateKey,
+      volumeMap: result.volumeMap || {},
+      stats: result.stats || {},
+      builtAt: new Date().toISOString()
+    });
+    if (payload.length > RAW_ALERT_VOLUME_MAP_CACHE_MAX_BYTES) return; // 大きすぎる場合はキャッシュしない
+    CacheService.getScriptCache().put(RAW_ALERT_VOLUME_MAP_CACHE_KEY, payload, RAW_ALERT_VOLUME_MAP_CACHE_TTL_SEC);
+  } catch (e) {
+    // ベストエフォート。失敗しても本処理に影響しない
+  }
+}
+
 function buildRawAlertVolumeMapForBusinessDate_(rawSheet, businessDateKey, options) {
   const map = {};
   const stats = {
@@ -9401,7 +9521,22 @@ function buildRawAlertVolumeMapForBusinessDate_(rawSheet, businessDateKey, optio
 
   const lastRow = rawSheet.getLastRow();
   if (lastRow < dataStartRow_()) return { volumeMap: map, stats: stats };
-  return buildRawAlertVolumeMapForBusinessDateChunked_(rawSheet, businessDateKey, options);
+
+  // expectedKeys 付き呼び出しは post-repair cleanup の AM 保護でフィルタ済みの部分集合を返す特殊用途なのでキャッシュをスキップ。
+  const cacheOk = !options || !options.expectedKeys || options.expectedKeys.length === 0;
+  if (cacheOk) {
+    const cached = loadCachedRawAlertVolumeMap_(businessDateKey);
+    if (cached) {
+      cached.stats = Object.assign({}, cached.stats, { cacheHit: true });
+      return cached;
+    }
+  }
+
+  const result = buildRawAlertVolumeMapForBusinessDateChunked_(rawSheet, businessDateKey, options);
+  if (cacheOk && result && result.volumeMap) {
+    saveCachedRawAlertVolumeMap_(businessDateKey, result);
+  }
+  return result;
 
   const numRows = lastRow - dataStartRow_() + 1;
   const values = rawSheet.getRange(dataStartRow_(), 1, numRows, RAW_HEADERS.length).getValues();
@@ -9870,10 +10005,10 @@ function forceFinishOhlcvPhase4LightNow() {
 
     ScriptApp.newTrigger("runDailyMaintenanceTrigger")
       .timeBased()
-      .after(60 * 1000)
+      .after(5 * 1000)
       .create();
 
-    writeProcessLog_("OHLCV", "PHASE4軽量版でOHLCV取得フローを完了扱いにしました。日次メンテナンスを1分後に起動します。", {
+    writeProcessLog_("OHLCV", "PHASE4軽量版でOHLCV取得フローを完了扱いにしました。日次メンテナンスを5秒後に起動します。", {
       newRowsOrSymbols: newCount,
       refreshId: refreshId,
       lightResult: lightResult
@@ -9926,10 +10061,10 @@ function forceFinishOhlcvPhase4UltraLightNow() {
 
     ScriptApp.newTrigger("runDailyMaintenanceTrigger")
       .timeBased()
-      .after(60 * 1000)
+      .after(5 * 1000)
       .create();
 
-    writeProcessLog_("OHLCV", "PHASE4超軽量版でOHLCV取得フローを完了扱いにしました。日次メンテナンスを1分後に起動します。", {
+    writeProcessLog_("OHLCV", "PHASE4超軽量版でOHLCV取得フローを完了扱いにしました。日次メンテナンスを5秒後に起動します。", {
       newRowsOrSymbols: newCount,
       refreshId: refreshId,
       phase4Result: result
@@ -10313,10 +10448,10 @@ function completeOhlcvPostMaintenanceCleanup_(summary) {
   deleteTriggersByHandler_("quickRepairTrigger");
   ScriptApp.newTrigger("quickRepairTrigger")
     .timeBased()
-    .after(60 * 1000)
+    .after(5 * 1000)
     .create();
 
-  writeProcessLog_("OHLCV掃除", "OHLCV掃除チェーンが完了しました。続いてギャップ修復を1分後に起動します。", {
+  writeProcessLog_("OHLCV掃除", "OHLCV掃除チェーンが完了しました。続いてギャップ修復を5秒後に起動します。", {
     handlerName: "quickRepairTrigger",
     newCount: newCount,
     refreshId: refreshId,

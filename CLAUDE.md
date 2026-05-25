@@ -149,12 +149,14 @@ status, note, logged_at
 
 ```
 13:30  fetchOHLCVForNewAlertsMidday → AM先行取得のみ（後続チェーンなし）
+         取得完了時に時間余裕（GAS残時間≥180秒）があれば postprocess を
+         インライン実行。足りなければ 5 秒後トリガーで postprocessMiddayOhlcv。
 
 16:00  fetchOHLCVForNewAlerts → (PHASE1→2→3→4)
-         → PHASE4完了: runDailyMaintenanceTrigger（1分後）
+         → PHASE4完了: runDailyMaintenanceTrigger（5秒後）
            → runDailyMaintenance: 評価日到達銘柄の価格更新
              → 完了後: Discord完了通知をOHLCV_COMPLETION_NOTICE_PENDING_V1に保存
-               + quickRepairTrigger（1分後）
+               + quickRepairTrigger（5秒後）
                → quickRepairRecentGaps: セッション欠落修復
                  → 完了後: resumeOhlcvPostRepairCleanup
                    → timestamp正規化・AM保護・重複整理・ソート
@@ -168,6 +170,7 @@ status, note, logged_at
 | キャッシュキー | 用途 | TTL | 無効化条件 |
 |---|---|---|---|
 | `OHLCV_EDT_META` / `OHLCV_EDT_<n>` | `resumeOhlcvPostRepairCleanup` の EARLY_DEDUP 用 tail key set（40k 行 × 3 列を毎回再構築すると 200s+ 消費しタイムアウトループに陥るため、resume 間で再利用する） | 1800s | `lastRow` / `readFromRow` がキャッシュ時と異なる場合は自動的に無効化される。Phase 2 完走 / `completeOhlcvPostRepairCleanup_` / `resetOhlcvPostRepairCleanupNow()` で破棄 |
+| `RAW_ALERT_VOLUME_MAP_V1` | `buildRawAlertVolumeMapForBusinessDate_` の結果。13:30 と 16:00 で同じ営業日のマップを 2 回計算する無駄を避ける。payload は `{ businessDate, volumeMap, stats, builtAt }` の JSON | 21600s (6h) | payload 内の `businessDate` がリクエストと不一致なら自動ミス。`expectedKeys` 付き呼び出しはキャッシュをスキップ（フィルタ済み部分集合のため）。payload > 90KB ならキャッシュしない |
 
 **ループ安全性**: キャッシュのクリアは「完了系（Phase 2 完走・cleanup チェーン完了・手動 reset・tail size 0）」と「cache miss 時の構築直前（古い不整合チャンクの掃除）」に限定。Phase 1 / Phase 2 のタイムアウト経路では一切クリアしない。Phase 1 が途中で中断した場合は save が呼ばれずキャッシュ空 → 次回 resume も Phase 1 を最初からやり直すが、これは旧実装と同じ振る舞いであり修正で悪化はしない。1 回 Phase 1 が完走すれば以降の resume は Phase 1 をスキップして Phase 2 のみ実行できる。
 
@@ -176,13 +179,13 @@ status, note, logged_at
 GAS の実行上限は **6分**。長時間処理はどちらかのパターンで実装する：
 
 **パターンA — 先行トリガー方式（`quickRepairRecentGaps`, `runOhlcvPostRepairCleanup_`）**
-1. 処理開始直後に `resumeXxx` トリガー（10分後）を先にセット
+1. 処理開始直後に `resumeXxx` safety トリガー（7分後 = 420 秒）を先にセット
 2. 処理が正常完了したらトリガーを削除
-3. GAS に強制終了されても自動再開される
+3. GAS の 360 秒強制終了対策。バッファ 60 秒は `.after()` のスケジュール遅延吸収用
 4. ロック取得前後・対象件数・バッチ進捗を `console.log` に必ず出す
 
 **パターンB — 内部タイムリミット方式（`fetchOHLCVForNewAlerts`, `runDailyMaintenance`）**
-1. 処理開始時に `setupResumeTrigger_(handlerName)` で1分後トリガーをセット
+1. 処理開始時に `setupResumeTrigger_(handlerName)` で 10 秒後の継続トリガーをセット
 2. 3.5〜4分経過で自発的に中断、スクリプトプロパティに進捗保存
 3. 正常完了時はトリガーを削除
 
