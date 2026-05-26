@@ -146,6 +146,7 @@ status, note, logged_at
 | `HISTORICAL_VOLUME_REPAIR_STATE_V1` | 過去OHLCV出来高補正の再開状態 |
 | `HIST_ALERT_VOL_REPAIR_PM_V1` | 過去PM出来高をalerts_rawから反映するリペアの再開状態 |
 | `HIST_ALERT_VOL_REPAIR_AM_V1` | 過去AM出来高をalerts_rawから反映するリペアの再開状態 |
+| `HIST_ALERT_VOL_REPAIR_CHAIN_PM_TO_AM` | PM完了後にAMを自動起動するチェーンフラグ（payload: `{dryRun: bool}`） |
 | `WEEKLY_REPORT_RETRY_COUNT_V1` | 週次レポート自動リトライ回数（成功時に削除、上限3回到達で停止） |
 
 ## アーキテクチャ上の重要事項
@@ -355,6 +356,9 @@ previewRepairHistoricalAmVolumeFromAlertsRaw() // 過去AM出来高をalerts_raw
 repairHistoricalAmVolumeFromAlertsRaw()        // 過去AM出来高をalerts_raw値で反映 本番
 resumeRepairHistoricalAmVolumeFromAlertsRaw()  // 同上 resume
 resetRepairHistoricalAmVolumeState()           // AM版の状態リセット
+chainAmRepairAfterPmCompletes()                // PM完了後にAMを自動起動するチェーンを有効化（PM実行中・実行前どちらでも可、本番モード）
+chainAmRepairAfterPmCompletes({dryRun:true})   // 同上、DryRunモードで AM をチェーン
+cancelChainAmRepairAfterPmCompletes()          // チェーン解除
 
 // 削除
 purgeOldOhlcvDataDaily()             // 365日超のOHLCV削除

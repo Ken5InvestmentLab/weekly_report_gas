@@ -6594,6 +6594,8 @@ const HIST_ALERTS_VOL_REPAIR_CHUNK_ROWS = 20000;
 // pendingAm の上限。ScriptProperties の 9KB 上限に収まるよう保守的に設定。
 // 通常は chunk = 20000 で同日AM/PMは同一チャンク内に収まるため pendingAm は数件以下で推移する。
 const HIST_ALERTS_VOL_REPAIR_MAX_PENDING = 60;
+// PM 完了 → AM 自動起動チェーン用フラグ。値は `{"dryRun": bool}` の JSON。
+const HIST_ALERTS_VOL_REPAIR_CHAIN_KEY = "HIST_ALERT_VOL_REPAIR_CHAIN_PM_TO_AM";
 
 function previewRepairHistoricalPmVolumeFromAlertsRaw() {
   return repairHistoricalAlertsRawVolume_("PM", { dryRun: true });
@@ -6631,6 +6633,72 @@ function resetRepairHistoricalAmVolumeState() {
   PropertiesService.getScriptProperties().deleteProperty("HIST_ALERT_VOL_REPAIR_AM_V1");
   deleteTriggersByHandler_("resumeRepairHistoricalAmVolumeFromAlertsRaw");
   return { ok: true, reset: true, session: "AM" };
+}
+
+// PM 完了後に AM を自動起動するチェーンを有効化する。
+// PM 実行中（または起動前）に呼んでおくと、PM が完了した invocation の最後に
+// AM の状態を初期化し、resume トリガー(10秒後)で AM を起動する。
+function chainAmRepairAfterPmCompletes(options) {
+  const props = PropertiesService.getScriptProperties();
+  const opts = options || {};
+  const pmState = props.getProperty("HIST_ALERT_VOL_REPAIR_PM_V1");
+  const dryRun = opts.dryRun === true;
+  const payload = { dryRun: dryRun };
+  props.setProperty(HIST_ALERTS_VOL_REPAIR_CHAIN_KEY, JSON.stringify(payload));
+  console.log(
+    "[chainAmAfterPm] PM 完了後の AM 自動起動を有効化しました。" +
+    " dryRun=" + dryRun + " pmRunningDetected=" + (!!pmState)
+  );
+  return { ok: true, configured: true, dryRun: dryRun, pmRunningDetected: !!pmState };
+}
+
+function cancelChainAmRepairAfterPmCompletes() {
+  PropertiesService.getScriptProperties().deleteProperty(HIST_ALERTS_VOL_REPAIR_CHAIN_KEY);
+  console.log("[chainAmAfterPm] PM 完了後の AM 自動起動を解除しました。");
+  return { ok: true, cancelled: true };
+}
+
+function scheduleChainedAmRepairIfRequested_(pmState) {
+  const props = PropertiesService.getScriptProperties();
+  const raw = props.getProperty(HIST_ALERTS_VOL_REPAIR_CHAIN_KEY);
+  if (!raw) return null;
+
+  let chainDryRun = !!(pmState && pmState.dryRun);
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.dryRun === "boolean") chainDryRun = parsed.dryRun;
+  } catch (e) {}
+
+  // フラグは一度だけ使用する
+  props.deleteProperty(HIST_ALERTS_VOL_REPAIR_CHAIN_KEY);
+
+  // AM の状態を事前に書き込んでおく（resume トリガーが起動した invocation でそのまま続行する）
+  const amInitState = {
+    version: 1,
+    session: "AM",
+    dryRun: chainDryRun,
+    nextRow: 2,
+    pendingAm: {},
+    pendingAmDroppedCount: 0,
+    stats: {
+      scannedRows: 0, chunks: 0,
+      pmTargets: 0, pmUpdated: 0, pmIdempotent: 0,
+      amTargets: 0, amUpdated: 0, amIdempotent: 0,
+      amSkippedMidday: 0
+    }
+  };
+  props.setProperty("HIST_ALERT_VOL_REPAIR_AM_V1", JSON.stringify(amInitState));
+
+  deleteTriggersByHandler_("resumeRepairHistoricalAmVolumeFromAlertsRaw");
+  ScriptApp.newTrigger("resumeRepairHistoricalAmVolumeFromAlertsRaw")
+    .timeBased()
+    .after(HIST_ALERTS_VOL_REPAIR_RESUME_DELAY_MS)
+    .create();
+
+  console.log(
+    "[repairHistoricalPM] PM 完了。AM を 10 秒後に自動起動します。dryRun=" + chainDryRun
+  );
+  return { dryRun: chainDryRun };
 }
 
 function repairHistoricalAlertsRawVolume_(targetSession, options) {
@@ -6698,6 +6766,16 @@ function repairHistoricalAlertsRawVolume_(targetSession, options) {
       props.deleteProperty(STATE_KEY);
       const summary = buildHistoricalAlertsRawVolumeSummary_(state, alertsMapSize, mapData.stats, true);
       console.log("[repairHistorical" + targetSession + "] complete: " + JSON.stringify(summary));
+
+      // PM 完了時に AM 自動起動フラグがあれば AM 側を 10 秒後に起動する
+      if (targetSession === "PM") {
+        const chainPayload = scheduleChainedAmRepairIfRequested_(state);
+        if (chainPayload) {
+          summary.chainedAm = true;
+          summary.chainedDryRun = chainPayload.dryRun;
+        }
+      }
+
       return summary;
     }
 
