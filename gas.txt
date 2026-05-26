@@ -6545,6 +6545,10 @@ function buildHistoricalVolumeRepairChunkContext_(sheet, rowStart, rowEnd, symbo
     const symbol = String(values[i][2] || "").trim();
     if (!symbolSet[symbol] || !isHistoricalVolumeRepairSessionTs_(ts)) continue;
 
+    // alerts_raw 由来の保護行（13:30 AM保護 / 16:00 PM保護）は出来高上書きから除外する
+    const marker = String(values[i][1] || "").trim();
+    if (isProtectedMiddayOhlcvMarker_(marker) || isPmLockedMarker_(marker)) continue;
+
     const key = makeHistoricalVolumeRepairKey_(symbol, ts);
     if (!rowMapByKey[key]) rowMapByKey[key] = [];
     rowMapByKey[key].push(rowNum);
@@ -6555,6 +6559,391 @@ function buildHistoricalVolumeRepairChunkContext_(sheet, rowStart, rowEnd, symbo
   }
 
   return { ranges: ranges, rowMapByKey: rowMapByKey };
+}
+
+// ─────────────────────────────────────────────────────────────
+// 一時リペア関数: alerts_raw / signals_archive の出来高を ohlcv_4h の AM/PM 行に反映
+//
+// 用途:
+//   PM版: 過去PM BOTTOM シグナル銘柄について、PM行の出来高を alerts_raw 値で上書きし
+//         (PM_LOCKED マーカー付与)、対応するAM行は AM = max(0, fetched_AM + fetched_PM
+//         - alerts_raw_PM) に補正する。AM行が既に MIDDAY_LOCKED の場合は触らない。
+//   AM版: 過去AM BOTTOM シグナル銘柄について、AM行の出来高を alerts_raw 値で上書きし
+//         MIDDAY_LOCKED マーカーを付与する。
+//
+// 実行:
+//   previewRepairHistoricalPmVolumeFromAlertsRaw()   // PM DryRun
+//   repairHistoricalPmVolumeFromAlertsRaw()          // PM 本番
+//   previewRepairHistoricalAmVolumeFromAlertsRaw()   // AM DryRun
+//   repairHistoricalAmVolumeFromAlertsRaw()          // AM 本番
+//   resetRepairHistoricalPmVolumeState()             // PM 状態リセット
+//   resetRepairHistoricalAmVolumeState()             // AM 状態リセット
+//
+// タイムアウト対策:
+//   - 内部タイムリミット方式 (3.5分) で OHLCV シートを chunk スキャン
+//   - 開始時に safety トリガー(7分後)を入れ、正常完了時に削除
+//   - 進捗 (nextRow, pendingAm, stats) を ScriptProperties に保存し
+//     タイムアップ時は10秒後の resume トリガーで自動再開
+//   - 何度実行しても idempotent: PM_LOCKED/MIDDAY_LOCKED かつ出来高一致なら更新スキップ
+// ─────────────────────────────────────────────────────────────
+
+const HIST_ALERTS_VOL_REPAIR_LIMIT_MS = 3.5 * 60 * 1000;
+const HIST_ALERTS_VOL_REPAIR_SAFETY_AFTER_MS = 7 * 60 * 1000;
+const HIST_ALERTS_VOL_REPAIR_RESUME_DELAY_MS = 10 * 1000;
+const HIST_ALERTS_VOL_REPAIR_CHUNK_ROWS = 20000;
+// pendingAm の上限。ScriptProperties の 9KB 上限に収まるよう保守的に設定。
+// 通常は chunk = 20000 で同日AM/PMは同一チャンク内に収まるため pendingAm は数件以下で推移する。
+const HIST_ALERTS_VOL_REPAIR_MAX_PENDING = 60;
+
+function previewRepairHistoricalPmVolumeFromAlertsRaw() {
+  return repairHistoricalAlertsRawVolume_("PM", { dryRun: true });
+}
+
+function repairHistoricalPmVolumeFromAlertsRaw() {
+  return repairHistoricalAlertsRawVolume_("PM", { dryRun: false });
+}
+
+function resumeRepairHistoricalPmVolumeFromAlertsRaw() {
+  deleteTriggersByHandler_("resumeRepairHistoricalPmVolumeFromAlertsRaw");
+  return repairHistoricalAlertsRawVolume_("PM", { resume: true });
+}
+
+function resetRepairHistoricalPmVolumeState() {
+  PropertiesService.getScriptProperties().deleteProperty("HIST_ALERT_VOL_REPAIR_PM_V1");
+  deleteTriggersByHandler_("resumeRepairHistoricalPmVolumeFromAlertsRaw");
+  return { ok: true, reset: true, session: "PM" };
+}
+
+function previewRepairHistoricalAmVolumeFromAlertsRaw() {
+  return repairHistoricalAlertsRawVolume_("AM", { dryRun: true });
+}
+
+function repairHistoricalAmVolumeFromAlertsRaw() {
+  return repairHistoricalAlertsRawVolume_("AM", { dryRun: false });
+}
+
+function resumeRepairHistoricalAmVolumeFromAlertsRaw() {
+  deleteTriggersByHandler_("resumeRepairHistoricalAmVolumeFromAlertsRaw");
+  return repairHistoricalAlertsRawVolume_("AM", { resume: true });
+}
+
+function resetRepairHistoricalAmVolumeState() {
+  PropertiesService.getScriptProperties().deleteProperty("HIST_ALERT_VOL_REPAIR_AM_V1");
+  deleteTriggersByHandler_("resumeRepairHistoricalAmVolumeFromAlertsRaw");
+  return { ok: true, reset: true, session: "AM" };
+}
+
+function repairHistoricalAlertsRawVolume_(targetSession, options) {
+  options = options || {};
+  // 実関数名は Pm / Am（タイトルケース）なので合わせる
+  const sessionTitleCase = targetSession === "PM" ? "Pm" : "Am";
+  const STATE_KEY = "HIST_ALERT_VOL_REPAIR_" + targetSession + "_V1";
+  const RESUME_HANDLER = "resumeRepairHistorical" + sessionTitleCase + "VolumeFromAlertsRaw";
+  const startTime = Date.now();
+  const props = PropertiesService.getScriptProperties();
+
+  // 安全トリガー(7分後)を先に登録。正常完了時に削除する。
+  deleteTriggersByHandler_(RESUME_HANDLER);
+  ScriptApp.newTrigger(RESUME_HANDLER).timeBased().after(HIST_ALERTS_VOL_REPAIR_SAFETY_AFTER_MS).create();
+
+  let state = null;
+  try {
+    const rawState = props.getProperty(STATE_KEY);
+    state = rawState ? JSON.parse(rawState) : null;
+  } catch (e) { state = null; }
+
+  const dryRun = (options.resume === true && state) ? !!state.dryRun : options.dryRun === true;
+
+  if (!state || state.dryRun !== dryRun || state.session !== targetSession) {
+    state = {
+      version: 1,
+      session: targetSession,
+      dryRun: dryRun,
+      nextRow: 2,
+      pendingAm: {},
+      pendingAmDroppedCount: 0,
+      stats: {
+        scannedRows: 0, chunks: 0,
+        pmTargets: 0, pmUpdated: 0, pmIdempotent: 0,
+        amTargets: 0, amUpdated: 0, amIdempotent: 0,
+        amSkippedMidday: 0
+      }
+    };
+  }
+
+  const ss = openAppSpreadsheet_();
+  const ohlcvSheet = ss.getSheetByName(CONFIG.OHLCV_SHEET);
+  if (!ohlcvSheet) {
+    deleteTriggersByHandler_(RESUME_HANDLER);
+    throw new Error("ohlcv_4h sheet not found");
+  }
+
+  // alerts_raw + signals_archive から対象セッションの出来高マップを構築（毎呼び出し再構築）
+  const mapData = buildHistoricalAlertsRawVolumeMap_(ss, targetSession);
+  const alertsMap = mapData.map;
+  const alertsMapSize = Object.keys(alertsMap).length;
+
+  console.log(
+    "[repairHistorical" + targetSession + "] start dryRun=" + dryRun +
+    " resume=" + (options.resume === true) +
+    " alertsMapSize=" + alertsMapSize +
+    " nextRow=" + state.nextRow
+  );
+
+  while (Date.now() - startTime < HIST_ALERTS_VOL_REPAIR_LIMIT_MS) {
+    const lastRow = ohlcvSheet.getLastRow();
+    if (state.nextRow > lastRow) {
+      // 完了
+      deleteTriggersByHandler_(RESUME_HANDLER);
+      props.deleteProperty(STATE_KEY);
+      const summary = buildHistoricalAlertsRawVolumeSummary_(state, alertsMapSize, mapData.stats, true);
+      console.log("[repairHistorical" + targetSession + "] complete: " + JSON.stringify(summary));
+      return summary;
+    }
+
+    const startRow = state.nextRow;
+    const numRows = Math.min(HIST_ALERTS_VOL_REPAIR_CHUNK_ROWS, lastRow - startRow + 1);
+    const values = ohlcvSheet.getRange(startRow, 1, numRows, 8).getValues();
+
+    const updates = { markers: [], volumes: [] };
+    processHistoricalAlertsRawVolumeChunk_(values, startRow, targetSession, alertsMap, state, updates);
+
+    if (!dryRun) {
+      applyHistoricalAlertsRawVolumeUpdates_(ohlcvSheet, updates);
+    }
+
+    state.stats.scannedRows += numRows;
+    state.stats.chunks++;
+    state.nextRow = startRow + numRows;
+    props.setProperty(STATE_KEY, JSON.stringify(state));
+
+    if (state.stats.chunks % 5 === 0) {
+      console.log(
+        "[repairHistorical" + targetSession + "] chunk=" + state.stats.chunks +
+        " scanned=" + state.stats.scannedRows +
+        " pmUpdated=" + state.stats.pmUpdated +
+        " amUpdated=" + state.stats.amUpdated +
+        " pendingAm=" + Object.keys(state.pendingAm).length
+      );
+    }
+  }
+
+  // タイムアップ — resume をスケジュール
+  deleteTriggersByHandler_(RESUME_HANDLER);
+  ScriptApp.newTrigger(RESUME_HANDLER).timeBased().after(HIST_ALERTS_VOL_REPAIR_RESUME_DELAY_MS).create();
+
+  const summary = buildHistoricalAlertsRawVolumeSummary_(state, alertsMapSize, mapData.stats, false);
+  console.log("[repairHistorical" + targetSession + "] pause: " + JSON.stringify(summary));
+  return summary;
+}
+
+function processHistoricalAlertsRawVolumeChunk_(values, startRow, targetSession, alertsMap, state, updates) {
+  // チャンク内のAM候補をまず収集（PM処理時に同一チャンク内のAMを優先参照する）
+  const amCandidatesByKey = {};
+  for (let i = 0; i < values.length; i++) {
+    const ts = values[i][0];
+    if (!(ts instanceof Date) || isNaN(ts.getTime())) continue;
+    if (getOhlcvSessionName_(ts) !== "AM") continue;
+    const symbol = String(values[i][2] || "").trim();
+    if (!symbol) continue;
+    const dateKey = Utilities.formatDate(ts, CONFIG.TIMEZONE, "yyyy-MM-dd");
+    const key = dateKey + "|" + symbol;
+    if (alertsMap[key] === undefined) continue;
+    amCandidatesByKey[key] = {
+      idx: i,
+      sheetRow: startRow + i,
+      marker: String(values[i][1] || "").trim(),
+      vol: toSafeVolumeNumber_(values[i][7])
+    };
+  }
+
+  if (targetSession === "AM") {
+    // AM repair: AM行のmarker=MIDDAY_LOCKED, volume=alerts_raw_AM を書き込む
+    Object.keys(amCandidatesByKey).forEach(function(key) {
+      const am = amCandidatesByKey[key];
+      const dateKey = key.split("|")[0];
+      const alertsRawAm = Math.round(alertsMap[key]);
+      state.stats.amTargets++;
+
+      if (isProtectedMiddayOhlcvMarker_(am.marker) && am.vol === alertsRawAm) {
+        state.stats.amIdempotent++;
+        return;
+      }
+
+      updates.markers.push({ row: am.sheetRow, value: makeProtectedMiddayRefreshId_(dateKey) });
+      updates.volumes.push({ row: am.sheetRow, value: alertsRawAm });
+      state.stats.amUpdated++;
+    });
+    return;
+  }
+
+  // PM repair
+  for (let i = 0; i < values.length; i++) {
+    const ts = values[i][0];
+    if (!(ts instanceof Date) || isNaN(ts.getTime())) continue;
+    if (getOhlcvSessionName_(ts) !== "PM") continue;
+    const symbol = String(values[i][2] || "").trim();
+    if (!symbol) continue;
+    const dateKey = Utilities.formatDate(ts, CONFIG.TIMEZONE, "yyyy-MM-dd");
+    const key = dateKey + "|" + symbol;
+    if (alertsMap[key] === undefined) continue;
+
+    const alertsRawPm = Math.round(alertsMap[key]);
+    const pmMarker = String(values[i][1] || "").trim();
+    const pmVol = toSafeVolumeNumber_(values[i][7]);
+    const pmSheetRow = startRow + i;
+    state.stats.pmTargets++;
+
+    // 同一チャンク内のAMを優先、無ければ pendingAm（前チャンク由来）を参照
+    let amInfo = amCandidatesByKey[key] || null;
+    if (!amInfo && state.pendingAm[key]) {
+      amInfo = {
+        idx: null,
+        sheetRow: state.pendingAm[key].sheetRow,
+        marker: state.pendingAm[key].marker,
+        vol: state.pendingAm[key].vol
+      };
+    }
+
+    if (isPmLockedMarker_(pmMarker) && pmVol === alertsRawPm) {
+      state.stats.pmIdempotent++;
+      delete amCandidatesByKey[key];
+      delete state.pendingAm[key];
+      continue;
+    }
+
+    // PM行更新
+    updates.markers.push({ row: pmSheetRow, value: makePmLockedMarker_(dateKey) });
+    updates.volumes.push({ row: pmSheetRow, value: alertsRawPm });
+    state.stats.pmUpdated++;
+
+    // AM行調整: AM+PMトータルをfetched合計に維持。MIDDAY_LOCKED の場合は触らない
+    if (amInfo) {
+      if (isProtectedMiddayOhlcvMarker_(amInfo.marker)) {
+        state.stats.amSkippedMidday++;
+      } else {
+        const newAm = Math.max(0, amInfo.vol + pmVol - alertsRawPm);
+        updates.volumes.push({ row: amInfo.sheetRow, value: newAm });
+        state.stats.amUpdated++;
+      }
+      delete amCandidatesByKey[key];
+      delete state.pendingAm[key];
+    }
+  }
+
+  // 同一チャンク内でPMにマッチしなかったAM候補は、次チャンクのPMに備えてpendingへ送る
+  Object.keys(amCandidatesByKey).forEach(function(key) {
+    if (Object.keys(state.pendingAm).length >= HIST_ALERTS_VOL_REPAIR_MAX_PENDING) {
+      state.pendingAmDroppedCount++;
+      return;
+    }
+    const am = amCandidatesByKey[key];
+    state.pendingAm[key] = {
+      sheetRow: am.sheetRow,
+      marker: am.marker,
+      vol: am.vol
+    };
+  });
+}
+
+function applyHistoricalAlertsRawVolumeUpdates_(sheet, updates) {
+  if (updates.markers.length > 0) {
+    applyHistoricalAlertsRawColumnUpdates_(sheet, 2, updates.markers);
+  }
+  if (updates.volumes.length > 0) {
+    applyHistoricalAlertsRawColumnUpdates_(sheet, 8, updates.volumes);
+  }
+}
+
+function applyHistoricalAlertsRawColumnUpdates_(sheet, col, items) {
+  // 同一行への重複書き込みは最後の値を採用（PM_LOCKED上書き → AM補正でvolumeが上書きされる前提に合わせる）
+  const byRow = {};
+  items.forEach(function(it) { byRow[it.row] = it.value; });
+  const rows = Object.keys(byRow).map(Number).sort(function(a, b) { return a - b; });
+  let i = 0;
+  while (i < rows.length) {
+    let j = i + 1;
+    while (j < rows.length && rows[j] === rows[j - 1] + 1) j++;
+    const runLen = j - i;
+    const runValues = [];
+    for (let k = i; k < j; k++) runValues.push([byRow[rows[k]]]);
+    sheet.getRange(rows[i], col, runLen, 1).setValues(runValues);
+    i = j;
+  }
+}
+
+function buildHistoricalAlertsRawVolumeMap_(ss, targetSession) {
+  const stats = {
+    rawScanned: 0, archiveScanned: 0,
+    mapped: 0, duplicated: 0,
+    skippedNonBottom: 0, skippedNoSymbol: 0,
+    skippedNoReceivedAt: 0, skippedInvalidVolume: 0,
+    skippedSession: 0
+  };
+  const map = {};
+
+  const rawSheet = ss.getSheetByName(CONFIG.RAW_SHEET);
+  if (rawSheet) {
+    collectHistoricalAlertsRawVolumeFromSheet_(rawSheet, dataStartRow_(), targetSession, map, stats, "raw");
+  }
+  const archiveSheet = ss.getSheetByName(CONFIG.SIGNAL_ARCHIVE_SHEET);
+  if (archiveSheet) {
+    collectHistoricalAlertsRawVolumeFromSheet_(archiveSheet, 2, targetSession, map, stats, "archive");
+  }
+
+  return { map: map, stats: stats };
+}
+
+function collectHistoricalAlertsRawVolumeFromSheet_(sheet, dataStartRow, targetSession, map, stats, source) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < dataStartRow) return;
+  const numRows = lastRow - dataStartRow + 1;
+  const numCols = RAW_HEADERS.length;
+  const values = sheet.getRange(dataStartRow, 1, numRows, numCols).getValues();
+
+  values.forEach(function(r) {
+    if (source === "raw") stats.rawScanned++; else stats.archiveScanned++;
+
+    const signalType = String(r[RAW_IDX.signal_type] || "").trim().toUpperCase();
+    if (signalType !== "BOTTOM") { stats.skippedNonBottom++; return; }
+    const symbol = String(r[RAW_IDX.symbol_code] || "").trim();
+    if (!symbol) { stats.skippedNoSymbol++; return; }
+    const receivedAt = r[RAW_IDX.received_at];
+    if (!receivedAt) { stats.skippedNoReceivedAt++; return; }
+    const volume = toRawAlertVolumeNumber_(r[RAW_IDX.volume]);
+    if (!Number.isFinite(volume)) { stats.skippedInvalidVolume++; return; }
+    const ts = rawAlertReceivedAtToOhlcvTimestamp_(receivedAt);
+    if (!ts) { stats.skippedNoReceivedAt++; return; }
+    const sess = getOhlcvSessionName_(ts);
+    if (sess !== targetSession) { stats.skippedSession++; return; }
+
+    const dateKey = Utilities.formatDate(ts, CONFIG.TIMEZONE, "yyyy-MM-dd");
+    const key = dateKey + "|" + symbol;
+
+    if (map[key] === undefined) {
+      map[key] = volume;
+      stats.mapped++;
+    } else {
+      stats.duplicated++;
+      // 同一キーに複数該当がある場合は大きい方を採用（既存ロジックと整合）
+      if (volume > map[key]) map[key] = volume;
+    }
+  });
+}
+
+function buildHistoricalAlertsRawVolumeSummary_(state, alertsMapSize, mapStats, complete) {
+  return {
+    ok: true,
+    complete: complete,
+    dryRun: !!state.dryRun,
+    session: state.session,
+    nextRow: state.nextRow,
+    alertsMapSize: alertsMapSize,
+    pendingAmSize: Object.keys(state.pendingAm).length,
+    pendingAmDroppedCount: state.pendingAmDroppedCount || 0,
+    mapStats: mapStats,
+    stats: state.stats
+  };
 }
 
 /**

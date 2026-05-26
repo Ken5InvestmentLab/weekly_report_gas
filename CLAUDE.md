@@ -49,6 +49,8 @@ GAS 本体のコードはすべて **`gas.txt`** 一ファイルに集約され�
 | `resumeCleanupLegacyGapFailedAndEmptyTimestamps` | 旧OHLCV残骸整理未完了時 | 空timestamp・非09:00/13:00・長期GAP_FAILED整理を再開 |
 | `resumeEvaluationOhlcvCoverageRepair` | 評価対象銘柄OHLCV補填未完了時 | 120日OHLCV補填を再開 |
 | `resumeHistoricalOhlcvVolumeRepair` | 過去OHLCV出来高補正未完了時 | 出来高補正を再開 |
+| `resumeRepairHistoricalPmVolumeFromAlertsRaw` | `repairHistoricalPmVolumeFromAlertsRaw()` 未完了時 | alerts_raw由来PM出来高反映の再開 |
+| `resumeRepairHistoricalAmVolumeFromAlertsRaw` | `repairHistoricalAmVolumeFromAlertsRaw()` 未完了時 | alerts_raw由来AM出来高反映の再開 |
 | `runOhlcvPostMaintenanceCleanupTrigger` | `startOhlcvPostMaintenanceCleanupNow()` 手動実行時 | 日次メンテ後OHLCV掃除チェーン（timestamp正規化・superseded midday削除・重複整理）を再開 |
 | `resumeOhlcvRecoveryTimestampNormalization` | `startOhlcvRecovery20260513()` 等の日付別OHLCV回復処理の再開時 | timestamp正規化の再開 |
 
@@ -142,6 +144,8 @@ status, note, logged_at
 | `QUICK_REPAIR_FAIL_COUNTS_V1` | quickRepair で 0 行返却が続く銘柄+日付の失敗回数。1h と 1d の両方が空の場合は即時 `GAP_FAILED`、0 行返却が3回連続の場合も `GAP_FAILED` を書き込みループを断つ |
 | `EVAL_OHLCV_COVERAGE_REPAIR_STATE_V1` | 評価対象銘柄120日OHLCV補填の再開状態 |
 | `HISTORICAL_VOLUME_REPAIR_STATE_V1` | 過去OHLCV出来高補正の再開状態 |
+| `HIST_ALERT_VOL_REPAIR_PM_V1` | 過去PM出来高をalerts_rawから反映するリペアの再開状態 |
+| `HIST_ALERT_VOL_REPAIR_AM_V1` | 過去AM出来高をalerts_rawから反映するリペアの再開状態 |
 | `WEEKLY_REPORT_RETRY_COUNT_V1` | 週次レポート自動リトライ回数（成功時に削除、上限3回到達で停止） |
 
 ## アーキテクチャ上の重要事項
@@ -341,6 +345,16 @@ resetEvaluationOhlcvCoverageRepairState()  // 補填状態リセット
 previewHistoricalOhlcvVolumeRepair() // 過去出来高補正 DryRun
 repairHistoricalOhlcvVolumes()       // 過去出来高補正 本番
 resetHistoricalOhlcvVolumeRepairState()   // 過去出来高補正状態リセット
+
+// alerts_raw 由来の過去出来高反映（一時リペア）
+previewRepairHistoricalPmVolumeFromAlertsRaw() // 過去PM出来高をalerts_raw値で反映 DryRun（PM_LOCKED付与＋AM補正）
+repairHistoricalPmVolumeFromAlertsRaw()        // 過去PM出来高をalerts_raw値で反映 本番
+resumeRepairHistoricalPmVolumeFromAlertsRaw()  // 同上 resume（自動でも10秒後に発火）
+resetRepairHistoricalPmVolumeState()           // PM版の状態リセット
+previewRepairHistoricalAmVolumeFromAlertsRaw() // 過去AM出来高をalerts_raw値で反映 DryRun（MIDDAY_LOCKED付与）
+repairHistoricalAmVolumeFromAlertsRaw()        // 過去AM出来高をalerts_raw値で反映 本番
+resumeRepairHistoricalAmVolumeFromAlertsRaw()  // 同上 resume
+resetRepairHistoricalAmVolumeState()           // AM版の状態リセット
 
 // 削除
 purgeOldOhlcvDataDaily()             // 365日超のOHLCV削除
