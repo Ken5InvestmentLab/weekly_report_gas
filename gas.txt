@@ -4169,12 +4169,30 @@ function prepareMainRunRowsFastPmVolume_(symbol, rows, dailyMap, todayKey, rawAl
   if (fastPmRow) {
     if (fastUseProtectedPmVol) {
       const fastPmBefore = toSafeVolumeNumber_(fastPmRow[7]);
-      fastPmRow[7] = Math.round(fastRawPmVol);
+      const fastRawPmVolRounded = Math.round(fastRawPmVol);
+      fastPmRow[7] = fastRawPmVolRounded;
       fastPmRow[1] = makePmLockedMarker_(todayKey);
       debugLogToSheet_("ohlcv.mainToday.pmVolumePmLocked", {
         symbol: fastSym, todayKey: todayKey,
         pmBefore: fastPmBefore, pmAfter: fastPmRow[7], source: "alerts_raw_pm_locked"
       });
+      // PMをalerts_rawの出来高で上書きした分、AM側で吸収して AM+PM のトータルを fetched 合計に維持する。
+      // MIDDAY_LOCKED（13:30のAM保護）が付いているAM行は触らない（同日AM+PM両シグナルは発生しない想定）。
+      if (fastAmRow && !isProtectedMiddayOhlcvMarker_(fastAmRow[1])) {
+        const fastFetchedAm = toSafeVolumeNumber_(fastAmRow[7]);
+        const fastAmRawAdjusted = fastFetchedAm + fastPmBefore - fastRawPmVolRounded;
+        const fastAmAfter = Math.max(0, fastAmRawAdjusted);
+        fastAmRow[7] = fastAmAfter;
+        debugLogToSheet_("ohlcv.mainToday.amVolumeAdjustedForPmLock", {
+          symbol: fastSym, todayKey: todayKey,
+          fetchedAm: fastFetchedAm,
+          fetchedPm: fastPmBefore,
+          alertsRawPm: fastRawPmVolRounded,
+          amBefore: fastFetchedAm,
+          amAfter: fastAmAfter,
+          clippedToZero: fastAmRawAdjusted < 0
+        });
+      }
     } else if ((fastAmRow && fastHasValidDailyDiff) ||
         (!fastAmRow && (isDailyCompatibleWithSessionRow_(fastDaily, fastPmRow) || isSinglePriceDailyOhlcv_(fastDaily)))) {
       const fastPmBefore = toSafeVolumeNumber_(fastPmRow[7]);
