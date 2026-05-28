@@ -7795,16 +7795,25 @@ function compareOhlcvDuplicatePriority_(a, b) {
 function getOhlcvRowPriority_(row) {
   const marker = String(row[1] || "").trim();
 
+  // 1位: MIDDAY_LOCKED / PM_LOCKED（保護マーカー、最優先で残す）
   if (isProtectedMiddayOhlcvMarker_(marker)) return 0;
   if (isPmLockedMarker_(marker)) return 0;
 
-  // 本番取得・通常取得を最優先
-  if (marker && !marker.match(/^MIDDAY_/) && !isPmLockedMarker_(marker) && marker !== "GAP_FAILED") return 1;
+  // 2位: 16:00本番取得の refresh ID 系（PHASE1 で B 列に書かれる "new_session" /
+  //      yyyyMMdd_HHmmss / manual_phase4_* 等の本番取得ID）
+  if (marker
+      && !marker.match(/^MIDDAY_/)
+      && marker !== "GAP_REPAIR"
+      && marker !== "GAP_FAILED") {
+    return 1;
+  }
 
-  // GAP_REPAIRもMIDDAYより優先
+  // 3位以下: その他
+
+  // GAP_REPAIR は本番取得より下
   if (marker === "GAP_REPAIR") return 2;
 
-  // 13:30暫定行は本番より下
+  // 13:30暫定行（LOCKED以外のMIDDAY_*）は本番より下
   if (marker.match(/^MIDDAY_/)) return 3;
 
   // 何もない通常行
@@ -10409,8 +10418,10 @@ function deleteDuplicateOhlcvRowsRecentFast_(sheet, maxRows) {
   const samples = [];
 
   items.forEach(function(item) {
-    if (isProtectedMiddayOhlcvMarker_(item.row[1])) return;
-    if (isPmLockedMarker_(item.row[1])) return;
+    // 同一timestamp+symbol で best として選ばれた1行以外はすべて削除する。
+    // MIDDAY_LOCKED / PM_LOCKED が複数残ることを防ぐため、保護マーカーの
+    // 「絶対削除しない」ガードは撤廃。best の選定は compareOhlcvDuplicatePriority_
+    // で行い、保護マーカー側が priority 0 として確実に残るようにしている。
     const best = bestByKey[item.key];
     if (!best) return;
 
@@ -11623,8 +11634,7 @@ function dedupeOhlcvDateBucket_(sheet, dateKey, maxDeleteRows) {
   const deleteRows = [];
   const samples = [];
   items.forEach(item => {
-    if (isProtectedMiddayOhlcvMarker_(item.row[1])) return;
-    if (isPmLockedMarker_(item.row[1])) return;
+    // best 以外は保護マーカーでも削除（同一timestamp+symbol で複数残らないようにする）
     const best = bestByKey[item.key];
     if (!best || item.sheetRow === best.sheetRow) return;
     deleteRows.push(item.sheetRow);
@@ -12213,8 +12223,7 @@ function dedupeOhlcvAllTargetDates_(sheet, targetDates, deadlineMs) {
   const samples = [];
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
-    if (isProtectedMiddayOhlcvMarker_(item.row[1])) continue;
-    if (isPmLockedMarker_(item.row[1])) continue;
+    // best 以外は保護マーカーでも削除（同一timestamp+symbol で複数残らないようにする）
     const best = bestByKey[item.key];
     if (!best || item.sheetRow === best.sheetRow) continue;
     allDeleteRows.push(item.sheetRow);
