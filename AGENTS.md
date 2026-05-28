@@ -159,6 +159,7 @@ OVERLAP_DAYS = 3
 - リンクラベルは `開示1` / `出典1` / `会社IR` のような汎用名にしない。
 - 開示リンクのラベルは必ず `YYYY-MM-DD 開示タイトル(hh:mm)` 形式にし、実際の資料タイトルまたはページタイトルを使う。
 - IRBANK個別開示ページ内に `f.irbank.net/pdf/...pdf` または `f.irbank.net/pr/...pdf` が確認できる場合はPDF直リンクを優先する。
+- IRBANKのdocument ID内の日付と提出日がズレることがあるため、`f.irbank.net` の日付パスと `開示リンク` ラベル日はIRBANK個別開示ページまたはvalidatorが示す提出日で確認してから使う。
 - `https://irbank.net/{code}/{documentId}` より、確認できるなら `https://f.irbank.net/pdf/{yyyymmdd}/{documentId}.pdf` 形式を優先する。
 - `https://irbank.net/{code}/{documentId}` のHTML個別開示ページは `開示リンク` に置かない。IRBANK由来の開示は、検証できた `f.irbank.net` のPDF/PR直リンクだけを使う。
 - `f.irbank.net` のPDF直リンクが `AccessDenied` / 403 / 404 で開けない場合は投稿に残さず、開ける日本語版の `f.irbank.net` 直リンク、TDnet直リンク、または会社/PRの個別開示直リンクへ切り替える。
@@ -191,6 +192,7 @@ OVERLAP_DAYS = 3
 - POSTEDログの `Reason` は空欄にしない。
 - `Reason` には `材料インパクト` の `ラベル：根拠要約` をそのまま残し、`ファンダ要点` は追記しない。
 - Discord投稿URLが取得できた場合、プレミアムログの `Reason` は `材料インパクト` をMarkdownリンク化して記録する。
+- プレミアム投稿に銘柄別スキャンボタンを付ける場合は、`custom_id=premium_scan:<symbolCode>` / `label=🔍 <symbolCode> をスキャンする` を使い、`screening-bot` と同じDiscord Botアプリから投稿する。Webhook単体投稿では有効ボタンにならない。
 
 ## デプロイ・実行方法
 

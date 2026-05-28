@@ -34,6 +34,11 @@ const MATERIAL_IMPACT_PROCEDURAL_FRAGMENTS = [
 ];
 const REQUIRED_FIELDS = [IMPACT_FIELD, "事業概要", "足元材料", "ファンダ要点", "注意点", "開示リンク", "Sources"];
 const OPTIONAL_FIELDS = [];
+const PREMIUM_SCAN_BUTTON_PREFIX = "premium_scan:";
+const LIST_BULLET = "\u30fb";
+const DISCORD_COMPONENT_ACTION_ROW = 1;
+const DISCORD_COMPONENT_BUTTON = 2;
+const DISCORD_BUTTON_STYLE_SECONDARY = 2;
 const DEFAULT_ALLOWED_HOURS = "13,15";
 const DEFAULT_ALLOWED_MINUTES_BY_HOUR = "13:00-13:10,15:30-15:40";
 const DEFAULT_SIGNAL_TYPES = "BOTTOM";
@@ -180,7 +185,8 @@ async function post(opts) {
       const payload = {
         username: env("DISCORD_PREMIUM_USERNAME") || "天底極致 Premium Report",
         allowed_mentions: { parse: [] },
-        embeds: [embed]
+        embeds: [embed],
+        components: buildPremiumScanComponents(report, claim)
       };
 
       if (dryRun) {
@@ -188,7 +194,7 @@ async function post(opts) {
         continue;
       }
 
-      const discordMessage = await postDiscord(webhookUrl, payload);
+      const discordMessage = await postPremiumDiscord(payload, webhookUrl);
       const discordMessageUrl = buildDiscordMessageUrl(discordMessage);
       const symbolCode = String(report.symbolCode || claim.symbolCode || extractSymbolCodeFromUrl(embed.url) || "").trim();
       state.posted[report.alertId] = {
@@ -253,7 +259,8 @@ async function fail(opts) {
     const payload = {
       username: env("DISCORD_PREMIUM_USERNAME") || "天底極致 Premium Report",
       allowed_mentions: { parse: [] },
-      embeds: [embed]
+      embeds: [embed],
+      components: buildPremiumScanComponents(claim, claim)
     };
     assertNoInvestmentAdvice(JSON.stringify(payload));
 
@@ -262,7 +269,7 @@ async function fail(opts) {
       continue;
     }
 
-    const discordMessage = await postDiscord(webhookUrl, payload);
+    const discordMessage = await postPremiumDiscord(payload, webhookUrl);
     const discordMessageUrl = buildDiscordMessageUrl(discordMessage);
     const symbolCode = String(claim.symbolCode || "").trim();
     const logEvent = buildSamayomiStubLogEvent_(item, embed, claim, now, discordMessageUrl);
@@ -552,8 +559,8 @@ function formatEmbedFieldValue(name, value) {
   if (!hasUrl(text) || text === "開示リンク未確認") return text;
   return text.split(/\r?\n/).map(line => {
     const trimmed = line.trim();
-    if (!trimmed || /^・/.test(trimmed)) return trimmed;
-    return `・${trimmed}`;
+    if (!trimmed || trimmed.startsWith(LIST_BULLET)) return trimmed;
+    return `${LIST_BULLET}${trimmed}`;
   }).join("\n");
 }
 
@@ -1698,6 +1705,99 @@ function assertNoInvestmentAdvice(text) {
   }
 }
 
+function buildPremiumScanComponents(report = {}, claim = {}) {
+  const symbolCode = String(
+    report.symbolCode ||
+    claim.symbolCode ||
+    extractSymbolCodeFromUrl(report.url || claim.tradingViewUrl || "")
+  ).trim().toUpperCase();
+
+  if (!/^\d{3,4}[A-Z]?$/.test(symbolCode)) return [];
+
+  return [{
+    type: DISCORD_COMPONENT_ACTION_ROW,
+    components: [{
+      type: DISCORD_COMPONENT_BUTTON,
+      style: DISCORD_BUTTON_STYLE_SECONDARY,
+      custom_id: `${PREMIUM_SCAN_BUTTON_PREFIX}${symbolCode}`,
+      label: `🔍 ${symbolCode} をスキャンする`
+    }]
+  }];
+}
+
+function hasInteractiveComponents(payload) {
+  return Array.isArray(payload?.components) && payload.components.length > 0;
+}
+
+function toBotMessagePayload(payload) {
+  const { username, avatar_url, ...messagePayload } = payload || {};
+  return messagePayload;
+}
+
+function withoutComponents(payload) {
+  const { components, ...fallbackPayload } = payload || {};
+  return fallbackPayload;
+}
+
+async function postPremiumDiscord(payload, webhookUrl) {
+  const botToken = env("DISCORD_PREMIUM_BOT_TOKEN") || env("DISCORD_BOT_TOKEN") || env("DISCORD_TOKEN");
+  const hasButtons = hasInteractiveComponents(payload);
+
+  if (hasButtons && botToken) {
+    const channelId = env("DISCORD_PREMIUM_CHANNEL_ID") || await resolveWebhookChannelId(webhookUrl);
+    if (channelId) return postDiscordBot(channelId, botToken, toBotMessagePayload(payload));
+  }
+
+  if (hasButtons) {
+    console.warn("[premium] scan buttons were omitted because Discord bot token/channel configuration is missing");
+  }
+  return postDiscord(webhookUrl, withoutComponents(payload));
+}
+
+async function resolveWebhookChannelId(webhookUrl) {
+  const explicit = env("DISCORD_PREMIUM_CHANNEL_ID");
+  if (explicit) return explicit;
+  if (!webhookUrl) return "";
+
+  try {
+    const response = await fetch(new URL(webhookUrl), {
+      method: "GET",
+      headers: { "User-Agent": "premium-alert-worker" },
+      signal: AbortSignal.timeout(10000)
+    });
+    if (!response.ok) return "";
+    const data = await response.json();
+    return String(data.channel_id || "").trim();
+  } catch {
+    return "";
+  }
+}
+
+async function postDiscordBot(channelId, botToken, payload) {
+  const url = new URL(`https://discord.com/api/v10/channels/${encodeURIComponent(channelId)}/messages`);
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bot ${botToken}`
+      },
+      body: JSON.stringify(payload)
+    });
+    const body = await response.text();
+    if (response.status >= 200 && response.status < 300) return body ? JSON.parse(body) : {};
+
+    if (response.status === 429 && attempt < 3) {
+      const retryAfter = parseRetryAfterMs(response, body);
+      if (retryAfter <= 30000) {
+        await sleep(retryAfter);
+        continue;
+      }
+    }
+    throw new Error(`Discord bot post failed: HTTP ${response.status} ${body.slice(0, 500)}`);
+  }
+}
+
 async function postDiscord(webhookUrl, payload) {
   const url = new URL(webhookUrl);
   url.searchParams.set("wait", "true");
@@ -2744,7 +2844,9 @@ function selfTest() {
       { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
     ]
   });
-  assert.equal(dedupeEmbed.fields.find(field => field.name === "開示リンク").value, "・[2026-05-14 業績予想修正に関するお知らせ(15:30)](https://f.irbank.net/pdf/20260514/140120260514534210.pdf)");
+  assert.equal(dedupeEmbed.fields.find(field => field.name === "開示リンク").value, `${LIST_BULLET}[2026-05-14 業績予想修正に関するお知らせ(15:30)](https://f.irbank.net/pdf/20260514/140120260514534210.pdf)`);
+  assert.equal(formatEmbedFieldValue("Sources", "[IRニュース一覧](https://example.com/ir)").startsWith(LIST_BULLET), true);
+  assert.equal(formatEmbedFieldValue("Sources", "[IRニュース一覧](https://example.com/ir)").includes("?"), false);
   const logEvent = buildPostLogEvent({
     alertId: "a11",
     symbolCode: "1234",
@@ -2837,6 +2939,13 @@ function selfTest() {
   assert.ok(parseReceivedAtMs("2026/05/01 23:59:59") <= cutoff);
   assert.ok(parseReceivedAtMs("2026/05/02 00:00:00") > cutoff);
   assert.equal(extractSymbolCodeFromUrl("https://www.tradingview.com/chart/?symbol=TYO%3A8285"), "8285");
+  const scanComponents = buildPremiumScanComponents({ symbolCode: "3917" });
+  assert.equal(scanComponents[0].type, DISCORD_COMPONENT_ACTION_ROW);
+  assert.equal(scanComponents[0].components[0].type, DISCORD_COMPONENT_BUTTON);
+  assert.equal(scanComponents[0].components[0].style, DISCORD_BUTTON_STYLE_SECONDARY);
+  assert.equal(scanComponents[0].components[0].custom_id, "premium_scan:3917");
+  assert.equal(scanComponents[0].components[0].label, "🔍 3917 をスキャンする");
+  assert.deepEqual(buildPremiumScanComponents({ symbolCode: "BAD" }), []);
   const yahooDisclosure = parseYahooFinanceDisclosureText(
     "Full-year earnings 5/11 15:30 TDnet PDF (348KB)",
     new Date("2026-05-12T00:00:00Z")

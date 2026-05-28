@@ -12,3 +12,6 @@ premium_worker/*.json
 !premium_worker/package-lock.json
 premium_worker/out/
 premium_worker/state/
+
+# Claude Code 内部
+.claude/worktrees/

@@ -21,6 +21,7 @@ whether a newer fundamentally material disclosure was missed.
    - `PREMIUM_SPREADSHEET_ID`
    - `GOOGLE_APPLICATION_CREDENTIALS` or `GOOGLE_SERVICE_ACCOUNT_JSON`
    - `DISCORD_PREMIUM_WEBHOOK_URL`
+   - `DISCORD_PREMIUM_BOT_TOKEN` if premium posts should include scan buttons
 4. Keep the following untracked:
    - `premium_worker/.env`
    - credentials
@@ -73,6 +74,29 @@ appended.
 
 For safety, `PREMIUM_LOG_SPREADSHEET_ID` must be different from
 `PREMIUM_SPREADSHEET_ID`.
+
+---
+
+## Discord scan buttons
+
+Premium posts include one Discord Button per alert when the worker can send the
+message with the screening-bot application token. The button uses:
+
+```text
+custom_id=premium_scan:<symbolCode>
+label=🔍 <symbolCode> をスキャンする
+```
+
+Set `DISCORD_PREMIUM_BOT_TOKEN` to the same Discord bot token used by
+`screening-bot`. `DISCORD_PREMIUM_CHANNEL_ID` is optional; when it is omitted,
+the worker resolves the channel from `DISCORD_PREMIUM_WEBHOOK_URL`.
+
+If no bot token/channel configuration is available, the worker falls back to the
+existing webhook post path and omits components. This preserves posting but
+means scan buttons will not appear.
+
+The 13:05 and 15:36 automations both call this worker, so this one configuration
+controls scan buttons for both posting windows.
 
 ---
 
