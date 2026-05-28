@@ -53,6 +53,7 @@ GAS 本体のコードはすべて **`gas.txt`** 一ファイルに集約され�
 | `resumeRepairHistoricalAmVolumeFromAlertsRaw` | `repairHistoricalAmVolumeFromAlertsRaw()` 未完了時 | alerts_raw由来AM出来高反映の再開 |
 | `runOhlcvPostMaintenanceCleanupTrigger` | `startOhlcvPostMaintenanceCleanupNow()` 手動実行時 | 日次メンテ後OHLCV掃除チェーン（timestamp正規化・superseded midday削除・重複整理）を再開 |
 | `resumeOhlcvRecoveryTimestampNormalization` | `startOhlcvRecovery20260513()` 等の日付別OHLCV回復処理の再開時 | timestamp正規化の再開 |
+| `resumeCleanupOhlcvDuplicates` | `cleanupOhlcvDuplicatesNow()` がタイムアウト/ロック競合/エラーで未完了の場合 | 重複削除を続きから再実行（30秒〜2分後に発火、完了するまで自動継続。止めるには `deleteTriggersByHandler_("resumeCleanupOhlcvDuplicates")`） |
 
 **重要**: ワンショットトリガーは各ハンドラー関数の冒頭で `deleteTriggersByHandler_("自分の関数名")` を呼び、自分自身を削除してから処理を実行する。
 

@@ -10516,35 +10516,70 @@ function deleteDuplicateOhlcvRowsRecentFast_(sheet, maxRows, deadlineMs) {
 
 // 手動掃除エントリポイント。末尾 OHLCV_FINAL_DEDUPE_SCAN_ROWS 行をスキャンし、
 // 同一 timestamp+symbol の重複行を即削除する。GAS のエディタから直接実行する用途。
-// GAS 6 分上限内に終わるよう deadline 付きで呼び、未完了分があれば残数を返す。
-// 残っている場合はもう一度この関数を実行すれば続きから削除される。
+// GAS 6 分上限内に終わるよう deadline 付きで呼び、未完了分があれば 30 秒後の
+// resumeCleanupOhlcvDuplicates トリガーで自動継続する。完了するまで自動で繰り返す。
+// 途中で止めたい場合は deleteTriggersByHandler_("resumeCleanupOhlcvDuplicates") を実行する。
 function cleanupOhlcvDuplicatesNow() {
-  const startTime = Date.now();
-  const MAX_RUN_MS = 5 * 60 * 1000; // 5 分（6 分上限から 1 分バッファ）
+  // 入口で既存リトライトリガーを掃除（resume 経由でも自分自身でも常に再評価する）
+  deleteTriggersByHandler_("resumeCleanupOhlcvDuplicates");
 
-  const app = getAppConfig_();
-  const ss = SpreadsheetApp.openById(app.spreadsheetId);
-  const sheet = ss.getSheetByName(CONFIG.OHLCV_SHEET);
-  if (!sheet) throw new Error("ohlcv_4h not found");
+  let lock = null;
+  try {
+    lock = LockService.getScriptLock();
+    if (!lock.tryLock(30 * 1000)) {
+      // 他処理（16:00 取得など）がロック中。1 分後に再試行
+      ScriptApp.newTrigger("resumeCleanupOhlcvDuplicates").timeBased().after(60 * 1000).create();
+      writeProcessLog_("OHLCV", "手動重複削除: 別処理がロック中。1 分後に自動リトライします。", {});
+      return { skipped: true, reason: "lock_busy" };
+    }
 
-  const deadlineMs = startTime + MAX_RUN_MS;
-  const result = deleteDuplicateOhlcvRowsRecentFast_(sheet, OHLCV_FINAL_DEDUPE_SCAN_ROWS, deadlineMs);
-  const elapsedMs = Date.now() - startTime;
+    const startTime = Date.now();
+    const MAX_RUN_MS = 5 * 60 * 1000; // 5 分（6 分上限から 1 分バッファ）
 
-  const summary = Object.assign({}, result, { elapsedMs: elapsedMs });
-  console.log("[cleanupOhlcvDuplicatesNow] " + JSON.stringify(summary));
+    const app = getAppConfig_();
+    const ss = SpreadsheetApp.openById(app.spreadsheetId);
+    const sheet = ss.getSheetByName(CONFIG.OHLCV_SHEET);
+    if (!sheet) throw new Error("ohlcv_4h not found");
 
-  if ((result.remainingDuplicateRows || 0) > 0) {
-    writeProcessLog_(
-      "OHLCV",
-      `手動重複削除: タイムアウトを避けるため ${result.deletedRows} 件で中断。残り ${result.remainingDuplicateRows} 件あるので再度 cleanupOhlcvDuplicatesNow() を実行してください。`,
-      summary
-    );
-  } else {
-    writeProcessLog_("OHLCV", "手動重複削除: 完了しました。", summary);
+    const deadlineMs = startTime + MAX_RUN_MS;
+    const result = deleteDuplicateOhlcvRowsRecentFast_(sheet, OHLCV_FINAL_DEDUPE_SCAN_ROWS, deadlineMs);
+    const elapsedMs = Date.now() - startTime;
+
+    const summary = Object.assign({}, result, { elapsedMs: elapsedMs });
+    console.log("[cleanupOhlcvDuplicatesNow] " + JSON.stringify(summary));
+
+    if ((result.remainingDuplicateRows || 0) > 0) {
+      // 未完了 → 30 秒後に自動リトライ
+      ScriptApp.newTrigger("resumeCleanupOhlcvDuplicates").timeBased().after(30 * 1000).create();
+      writeProcessLog_(
+        "OHLCV",
+        `手動重複削除: ${result.deletedRows} 件削除、残り ${result.remainingDuplicateRows} 件は 30 秒後に自動リトライします。`,
+        summary
+      );
+    } else {
+      writeProcessLog_("OHLCV", "手動重複削除: 完了しました。", summary);
+    }
+
+    return summary;
+  } catch (e) {
+    // 致命的エラー時も自動リカバリのためリトライ予約
+    try {
+      ScriptApp.newTrigger("resumeCleanupOhlcvDuplicates").timeBased().after(2 * 60 * 1000).create();
+      writeProcessLog_("OHLCV", "手動重複削除: エラー発生。2 分後に自動リトライします。", { error: String(e) });
+    } catch (scheduleErr) {
+      // トリガー予約も失敗 → ユーザーに手動再実行を促す
+    }
+    throw e;
+  } finally {
+    if (lock && lock.hasLock()) lock.releaseLock();
   }
+}
 
-  return summary;
+// 自動リトライトリガー用ハンドラ。CLAUDE.md 規約どおり自分自身のトリガーを冒頭で削除し
+// cleanupOhlcvDuplicatesNow に処理を委譲する。
+function resumeCleanupOhlcvDuplicates() {
+  deleteTriggersByHandler_("resumeCleanupOhlcvDuplicates");
+  return cleanupOhlcvDuplicatesNow();
 }
 
 function stopOhlcvResumeLoopNow() {
