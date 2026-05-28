@@ -10351,6 +10351,17 @@ function finishOhlcvPhase4UltraLight_(ohlcvSheet, todayKey, startTime) {
 
   SpreadsheetApp.flush();
 
+  // 末尾 OHLCV_FINAL_DEDUPE_SCAN_ROWS 行内の同一 timestamp+symbol 重複を削除する。
+  // 後段の resumeOhlcvPostRepairCleanup は OHLCV_POST_REPAIR_DEDUP_READ_ROWS=5000 行しか
+  // スキャンしないため、それより前にある MIDDAY_yyyy-mm-dd / GAP_REPAIR 系の重複が
+  // 取りこぼされる。PHASE4 で広い範囲を一気に掃除しておく。
+  try {
+    const dupRes = deleteDuplicateOhlcvRowsRecentFast_(ohlcvSheet, OHLCV_FINAL_DEDUPE_SCAN_ROWS);
+    result.duplicateDeletedRows = dupRes.deletedRows || 0;
+  } catch (e) {
+    writeProcessLog_("OHLCV", "PHASE4超軽量版: 重複削除でエラー。後段のクリーンアップに委譲します。", { error: String(e) });
+  }
+
   result.invalidDeletedRows = 0;
   result.invalidConvertedRows = 0;
   result.afterLastRow = ohlcvSheet.getLastRow();
@@ -10458,6 +10469,20 @@ function deleteDuplicateOhlcvRowsRecentFast_(sheet, maxRows) {
     scannedRows: scanRows,
     deletedRows: deleteRows.length
   };
+}
+
+// 手動掃除エントリポイント。末尾 OHLCV_FINAL_DEDUPE_SCAN_ROWS 行をスキャンし、
+// 同一 timestamp+symbol の重複行を即削除する。GAS のエディタから直接実行する用途。
+function cleanupOhlcvDuplicatesNow() {
+  const app = getAppConfig_();
+  const ss = SpreadsheetApp.openById(app.spreadsheetId);
+  const sheet = ss.getSheetByName(CONFIG.OHLCV_SHEET);
+  if (!sheet) throw new Error("ohlcv_4h not found");
+
+  const result = deleteDuplicateOhlcvRowsRecentFast_(sheet, OHLCV_FINAL_DEDUPE_SCAN_ROWS);
+  console.log("[cleanupOhlcvDuplicatesNow] " + JSON.stringify(result));
+  writeProcessLog_("OHLCV", "手動の重複削除を実行しました。", result);
+  return result;
 }
 
 function stopOhlcvResumeLoopNow() {
