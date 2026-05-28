@@ -3591,6 +3591,18 @@ function hasMiddayOhlcvState_() {
 
 function finalizeMiddayOhlcvBeforeMainRun_() {
   deleteTriggersByHandler_(MIDDAY_RESUME_HANDLER);
+
+  // 13:30 先行取得時に構築した rawAlertVolumeMap キャッシュは、当日 PM の BOTTOM
+  // シグナルがまだ alerts_raw に書かれていない時点のスナップショット。これを 16:00
+  // PHASE1 で再利用すると PM 出来高 0 件の古い map を見て fastUseProtectedPmVol=false と
+  // なり、当日 PM の PM_LOCKED 化が全件スキップされる。16:00 への移行時に必ず破棄して
+  // PHASE1 で最新の alerts_raw から作り直させる。
+  try {
+    CacheService.getScriptCache().remove(RAW_ALERT_VOLUME_MAP_CACHE_KEY);
+  } catch (e) {
+    // ベストエフォート。失敗しても本処理に影響しない
+  }
+
   if (!hasMiddayOhlcvState_()) return;
   try {
     const ss = openAppSpreadsheet_();
