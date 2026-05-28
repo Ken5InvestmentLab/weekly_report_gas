@@ -10367,9 +10367,16 @@ function finishOhlcvPhase4UltraLight_(ohlcvSheet, todayKey, startTime) {
   // 後段の resumeOhlcvPostRepairCleanup は OHLCV_POST_REPAIR_DEDUP_READ_ROWS=5000 行しか
   // スキャンしないため、それより前にある MIDDAY_yyyy-mm-dd / GAP_REPAIR 系の重複が
   // 取りこぼされる。PHASE4 で広い範囲を一気に掃除しておく。
+  // GAS 6 分上限を超えないよう PHASE4 残時間内で打ち切り、未完了分は次回の 16:00
+  // または手動 cleanupOhlcvDuplicatesNow() に委譲する。
   try {
-    const dupRes = deleteDuplicateOhlcvRowsRecentFast_(ohlcvSheet, OHLCV_FINAL_DEDUPE_SCAN_ROWS);
+    const phase4DeadlineMs = startTime + 5 * 60 * 1000; // 5 分（6 分上限から 1 分バッファ）
+    const dupRes = deleteDuplicateOhlcvRowsRecentFast_(ohlcvSheet, OHLCV_FINAL_DEDUPE_SCAN_ROWS, phase4DeadlineMs);
     result.duplicateDeletedRows = dupRes.deletedRows || 0;
+    result.duplicateRemainingRows = dupRes.remainingDuplicateRows || 0;
+    if (result.duplicateRemainingRows > 0) {
+      writeProcessLog_("OHLCV", `PHASE4超軽量版: 重複削除を ${result.duplicateDeletedRows} 件で打ち切り。残り ${result.duplicateRemainingRows} 件は後段に委譲します。`, dupRes);
+    }
   } catch (e) {
     writeProcessLog_("OHLCV", "PHASE4超軽量版: 重複削除でエラー。後段のクリーンアップに委譲します。", { error: String(e) });
   }
@@ -10390,7 +10397,7 @@ function finishOhlcvPhase4UltraLight_(ohlcvSheet, todayKey, startTime) {
   return result;
 }
 
-function deleteDuplicateOhlcvRowsRecentFast_(sheet, maxRows) {
+function deleteDuplicateOhlcvRowsRecentFast_(sheet, maxRows, deadlineMs) {
   if (!sheet) return { deletedRows: 0 };
 
   const lastRow = sheet.getLastRow();
@@ -10464,37 +10471,80 @@ function deleteDuplicateOhlcvRowsRecentFast_(sheet, maxRows) {
   if (deleteRows.length === 0) {
     return {
       scannedRows: scanRows,
-      deletedRows: 0
+      deletedRows: 0,
+      totalDuplicateRows: 0,
+      remainingDuplicateRows: 0
     };
   }
 
-  deleteRowsByRowNums_(sheet, deleteRows);
+  // 削除は降順 + 連続行グループ化で deleteRows() を最小回数に抑える。
+  // 大規模シートでは deleteRows() 1 回が 1〜5 秒かかるため、削除対象が多い場合は
+  // GAS 6 分上限を超える可能性がある。deadlineMs が指定されていれば、それを超えた
+  // 時点で中断して残数を返す（呼び出し側で再実行する）。
+  const sorted = deleteRows.slice().sort(function(a, b) { return b - a; });
+  let actuallyDeleted = 0;
+  let i = 0;
+  while (i < sorted.length) {
+    if (deadlineMs && Date.now() > deadlineMs) break;
+    const groupStart = sorted[i];
+    let count = 1;
+    while (i + count < sorted.length && sorted[i + count] === groupStart - count) count++;
+    sheet.deleteRows(groupStart - count + 1, count);
+    actuallyDeleted += count;
+    i += count;
+  }
   SpreadsheetApp.flush();
 
+  const remaining = sorted.length - actuallyDeleted;
   writeProcessLog_("OHLCV", "PHASE4軽量版: 直近OHLCVの重複行を削除しました。", {
     scannedRows: scanRows,
-    deletedRows: deleteRows.length,
+    detectedDuplicateRows: sorted.length,
+    deletedRows: actuallyDeleted,
+    remainingDuplicateRows: remaining,
+    timedOut: remaining > 0,
     samples: samples
   });
 
   return {
     scannedRows: scanRows,
-    deletedRows: deleteRows.length
+    deletedRows: actuallyDeleted,
+    totalDuplicateRows: sorted.length,
+    remainingDuplicateRows: remaining,
+    timedOut: remaining > 0
   };
 }
 
 // 手動掃除エントリポイント。末尾 OHLCV_FINAL_DEDUPE_SCAN_ROWS 行をスキャンし、
 // 同一 timestamp+symbol の重複行を即削除する。GAS のエディタから直接実行する用途。
+// GAS 6 分上限内に終わるよう deadline 付きで呼び、未完了分があれば残数を返す。
+// 残っている場合はもう一度この関数を実行すれば続きから削除される。
 function cleanupOhlcvDuplicatesNow() {
+  const startTime = Date.now();
+  const MAX_RUN_MS = 5 * 60 * 1000; // 5 分（6 分上限から 1 分バッファ）
+
   const app = getAppConfig_();
   const ss = SpreadsheetApp.openById(app.spreadsheetId);
   const sheet = ss.getSheetByName(CONFIG.OHLCV_SHEET);
   if (!sheet) throw new Error("ohlcv_4h not found");
 
-  const result = deleteDuplicateOhlcvRowsRecentFast_(sheet, OHLCV_FINAL_DEDUPE_SCAN_ROWS);
-  console.log("[cleanupOhlcvDuplicatesNow] " + JSON.stringify(result));
-  writeProcessLog_("OHLCV", "手動の重複削除を実行しました。", result);
-  return result;
+  const deadlineMs = startTime + MAX_RUN_MS;
+  const result = deleteDuplicateOhlcvRowsRecentFast_(sheet, OHLCV_FINAL_DEDUPE_SCAN_ROWS, deadlineMs);
+  const elapsedMs = Date.now() - startTime;
+
+  const summary = Object.assign({}, result, { elapsedMs: elapsedMs });
+  console.log("[cleanupOhlcvDuplicatesNow] " + JSON.stringify(summary));
+
+  if ((result.remainingDuplicateRows || 0) > 0) {
+    writeProcessLog_(
+      "OHLCV",
+      `手動重複削除: タイムアウトを避けるため ${result.deletedRows} 件で中断。残り ${result.remainingDuplicateRows} 件あるので再度 cleanupOhlcvDuplicatesNow() を実行してください。`,
+      summary
+    );
+  } else {
+    writeProcessLog_("OHLCV", "手動重複削除: 完了しました。", summary);
+  }
+
+  return summary;
 }
 
 function stopOhlcvResumeLoopNow() {
