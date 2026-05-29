@@ -525,6 +525,7 @@ function buildEmbed(report) {
   assertJapaneseNarrativeFields(alertId, fieldMap);
   assertConciseMaterialNarrative(alertId, fieldMap);
   assertNoGenericNarrativeTemplates(alertId, fieldMap);
+  assertNoProceduralAnalysisLanguage(alertId, fieldMap);
   assertNoGenericBusinessOverview(alertId, fieldMap);
   assertNoGenericFundamentalPoint(alertId, fieldMap);
   assertNoNarrowDisclosureCaveat(alertId, fieldMap);
@@ -884,6 +885,40 @@ function assertNoGenericNarrativeTemplates(alertId, fieldMap) {
       if (pattern.test(value)) {
         throw new Error(`report ${alertId} field ${field} is too generic: ${reason}`);
       }
+    }
+  }
+}
+
+function assertNoProceduralAnalysisLanguage(alertId, fieldMap) {
+  const business = String(fieldMap.get("事業概要") || "");
+  const businessPatterns = [
+    /直近開示で示された事業領域を軸に/,
+    /開示タイトルからは.*材料になります/,
+    /売上成長と採算改善を確認する局面/
+  ];
+  if (businessPatterns.some(pattern => pattern.test(business))) {
+    throw new Error(`report ${alertId} field 事業概要 is too generic: describe the company's actual business model, products, customers, or revenue driver`);
+  }
+
+  const fields = ["材料インパクト", "足元材料", "ファンダ要点", "注意点"];
+  const proceduralPatterns = [
+    /確認対象です/,
+    /確認する局面です/,
+    /確認したい局面です/,
+    /次回進捗待ちです/,
+    /PDF本文と開示一覧で、当該材料の発生日と内容を確認しました/,
+    /還元・成長施策の具体化が材料です/,
+    /事業進捗と株主還元・財務影響を合わせて確認する局面/,
+    /短期の期待だけでなく契約条件と進捗開示を確認したい局面/,
+    /通期予想に対する達成度が確認軸/,
+    /一時要因と本業採算のどちらが数値を動かしたかを分けて見る必要があります/
+  ];
+
+  for (const field of fields) {
+    const value = String(fieldMap.get(field) || "");
+    const hit = proceduralPatterns.find(pattern => pattern.test(value));
+    if (hit) {
+      throw new Error(`report ${alertId} field ${field} uses procedural placeholder language instead of analysis: ${hit}`);
     }
   }
 }
@@ -2829,6 +2864,21 @@ function selfTest() {
       { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
     ]
   }), /too procedural/);
+  assert.throws(() => buildEmbed({
+    alertId: "a10c5",
+    url: "https://www.tradingview.com/chart/?symbol=TSE%3A3798",
+    symbolCode: "3798",
+    symbolName: "ULSグループ",
+    fields: [
+      { name: "材料インパクト", value: "ポジティブ材料：2026-05-20開示で2026年3月期決算説明会資料を確認し、還元・成長施策の具体化が材料です。" },
+      { name: "事業概要", value: "ULSグループは直近開示で示された事業領域を軸に、売上成長と採算改善を確認する局面です。開示タイトルからは事業施策、資本政策、決算進捗の組み合わせが材料になります。" },
+      { name: "足元材料", value: "2026-05-20の2026年3月期決算説明会資料が直近の中心材料です。同日資料では増配と成長施策が示され、事業進捗と株主還元・財務影響を合わせて確認する局面です。" },
+      { name: "ファンダ要点", value: "決算数値では売上、営業利益、経常利益、純利益の進捗と、通期予想に対する達成度が確認軸です。増配・資本政策が同時に出ている場合は、利益成長と還元余力の両立を見たい局面です。" },
+      { name: "注意点", value: "提携・M&A系の材料は、統合費用、顧客移行、収益貢献時期が遅れるリスクがあります。短期の期待だけでなく契約条件と進捗開示を確認したい局面です。" },
+      { name: "開示リンク", value: "[2026-05-20 2026年3月期決算説明会資料(10:30)](https://example.com/20260520.pdf)" },
+      { name: "Sources", value: "[ULSグループ IR情報](https://example.com/ir)" }
+    ]
+  }), /procedural placeholder language|too generic/);
   const dedupeEmbed = buildEmbed({
     alertId: "a10d",
     url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",

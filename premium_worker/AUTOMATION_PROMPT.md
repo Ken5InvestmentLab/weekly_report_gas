@@ -202,11 +202,29 @@ If the disclosure file cannot be opened or the content cannot be verified, use
    sentences, with source-grounded figures, dates, business drivers, or
    confirmation points where available. Avoid one-line generic summaries, but
    stay concise enough for Discord embeds.
+   Before writing reports, skim `premium_worker/FUNDAMENTAL_EXAMPLES.md`.
+   Treat those examples as quality calibration, not a rigid template: follow
+   their specificity around actual business, event dates, figures, KPIs, and
+   unresolved risks, but adapt structure and emphasis to the company and
+   disclosure.
+   Write the analytical conclusion, not the research procedure. Do not use
+   generic placeholder phrases such as `確認対象です`, `確認する局面です`,
+   `確認したい局面です`, or `次回進捗待ちです` as the main
+   content of `材料インパクト`, `足元材料`, `ファンダ要点`, or `注意点`.
+   Instead, state what the disclosure means now: positive/negative/mixed
+   effect, which KPI or risk moved, and what unresolved item remains.
+   You may use `確認軸` only when it is attached to concrete company-specific
+   KPIs, such as store sales, order backlog, utilization, ARR, churn, funding
+   terms, or dilution/exercise pace.
    Do not use boilerplate that could be copied across symbols. `事業概要`
    must name the actual business model, core product/service, customer segment,
    or revenue driver for that company. Never write a company overview like
    "開示資料で確認できる主要サービス・製品を中心に事業を展開する上場企業"
    or "直近の材料は、売上成長、利益率、資本政策、事業提携のどれに効くか".
+   Also never write a company overview like `直近開示で示された事業領域を軸に`
+   or `開示タイトルからは...材料になります`; that is not a business
+   description. Name the actual operation, product, customer, and revenue
+   driver.
    `足元材料` must explain why the selected
    disclosure matters for that specific company, such as SaaS ARR, store
    profitability, financing dilution, facility utilization, order backlog,
