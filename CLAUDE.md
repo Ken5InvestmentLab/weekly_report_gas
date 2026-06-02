@@ -53,7 +53,7 @@ GAS 本体のコードはすべて **`gas.txt`** 一ファイルに集約され�
 | `resumeRepairHistoricalAmVolumeFromAlertsRaw` | `repairHistoricalAmVolumeFromAlertsRaw()` 未完了時 | alerts_raw由来AM出来高反映の再開 |
 | `runOhlcvPostMaintenanceCleanupTrigger` | `startOhlcvPostMaintenanceCleanupNow()` 手動実行時 | 日次メンテ後OHLCV掃除チェーン（timestamp正規化・superseded midday削除・重複整理）を再開 |
 | `resumeOhlcvRecoveryTimestampNormalization` | `startOhlcvRecovery20260513()` 等の日付別OHLCV回復処理の再開時 | timestamp正規化の再開 |
-| `resumeCleanupOhlcvDuplicates` | `cleanupOhlcvDuplicatesNow()` がタイムアウト/ロック競合/エラーで未完了の場合 | 重複削除を続きから再実行（30秒〜2分後に発火、完了するまで自動継続。止めるには `deleteTriggersByHandler_("resumeCleanupOhlcvDuplicates")`） |
+| `resumeCleanupOhlcvDuplicates` | `cleanupOhlcvDuplicatesNow()` がタイムアウト/ロック競合/エラーで未完了の場合 | シート全体の重複削除を `cursor`（`OHLCV_FULL_DEDUP_STATE_V1`）から再開（30秒〜2分後に発火、完走するまで自動継続。止めるには `resetCleanupOhlcvDuplicatesState()`） |
 
 **重要**: ワンショットトリガーは各ハンドラー関数の冒頭で `deleteTriggersByHandler_("自分の関数名")` を呼び、自分自身を削除してから処理を実行する。
 
@@ -93,7 +93,8 @@ status, note, logged_at
 - B列 `alert_id` に入るマーカー：通常取得は空文字/refresh ID、`MIDDAY_yyyy-mm-dd`（13:30先行取得）、`MIDDAY_LOCKED_yyyy-mm-dd`（AM保護行）、`PM_LOCKED_yyyy-mm-dd`（PM保護行）、`GAP_REPAIR`（ギャップ修復）、`GAP_FAILED`（取得失敗マーカー）
 - `MIDDAY_LOCKED_yyyy-mm-dd` は13:30で `alerts_raw` の出来高を転記したAM保護行。16:00本番・GAP修復・重複整理でも削除・上書き禁止
 - `PM_LOCKED_yyyy-mm-dd` は16:00本番で当日PMにBOTTOMシグナルが点灯した銘柄のPM行に付くマーカー。PM出来高=`alerts_raw` PM出来高で上書きされ、削除・上書き禁止
-- 重複排除は `timestamp + symbol` で行う
+- 重複排除は `timestamp + symbol`（timestampは09:00/13:00バケット）で行い、同一キーは1行だけ残す（残す優先度は `compareOhlcvDuplicatePriority_`）
+- 日次チェーンの重複排除は末尾窓に限定（PHASE4=末尾60,000行、GAP修復後cleanup=末尾5,000行+`targetDates`）。窓より手前の古い重複には届かないため、過去分の一括掃除は `cleanupOhlcvDuplicatesNow()`（シート全体を前方カーソルで走査、resume対応）を使う
 - 最終状態は必ず A列 timestamp 昇順
 
 ## スクリプトプロパティ
@@ -143,6 +144,7 @@ status, note, logged_at
 | `OHLCV_REPAIR_SYMBOLS` | 次回OHLCV取得で120日再取得する修復対象銘柄 |
 | `OHLCV_MANUAL_BUSINESS_DATE` / `OHLCV_MANUAL_BUSINESS_EXPIRES_AT` | 手動基準日と期限 |
 | `QUICK_REPAIR_FAIL_COUNTS_V1` | quickRepair で 0 行返却が続く銘柄+日付の失敗回数。1h と 1d の両方が空の場合は即時 `GAP_FAILED`、0 行返却が3回連続の場合も `GAP_FAILED` を書き込みループを断つ |
+| `OHLCV_FULL_DEDUP_STATE_V1` | `cleanupOhlcvDuplicatesNow()`（全行重複削除）の再開カーソル。完走で削除、`resetCleanupOhlcvDuplicatesState()` でリセット |
 | `EVAL_OHLCV_COVERAGE_REPAIR_STATE_V1` | 評価対象銘柄120日OHLCV補填の再開状態 |
 | `HISTORICAL_VOLUME_REPAIR_STATE_V1` | 過去OHLCV出来高補正の再開状態 |
 | `HIST_ALERT_VOL_REPAIR_PM_V1` | 過去PM出来高をalerts_rawから反映するリペアの再開状態 |
@@ -316,6 +318,8 @@ cleanupLegacyGapFailedAndEmptyTimestamps(true)   // 旧OHLCV残骸整理 DryRun
 cleanupLegacyGapFailedAndEmptyTimestamps(false)  // 旧OHLCV残骸整理 本番
 emergencyStopQuickRepairAndCleanOhlcv()          // GAP修復停止→OHLCV整理→quickRepairTrigger予約
 purgeBogusGapRepairRows()             // 不正な GAP_REPAIR 行を削除
+cleanupOhlcvDuplicatesNow()           // シート全体の同一timestamp+symbol重複を一括削除（resume対応・完走まで自動継続）
+resetCleanupOhlcvDuplicatesState()    // 全行重複削除の進捗・自動リトライトリガーをリセット
 
 // 日次メンテ後OHLCV掃除チェーン（手動起動パス）
 startOhlcvPostMaintenanceCleanupNow() // OHLCV掃除チェーンを手動開始（timestamp正規化→superseded midday削除→重複整理→quickRepairTrigger予約）

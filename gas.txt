@@ -1840,6 +1840,11 @@ const OHLCV_LAST_TS_SCAN_CHUNK_ROWS = 5000;
 const OHLCV_LAST_TS_SCAN_MAX_ROWS = 60000;
 const OHLCV_APPEND_INTEGRITY_SCAN_ROWS = 30000;
 const OHLCV_FINAL_DEDUPE_SCAN_ROWS = 60000;
+// 全行重複削除（cleanupOhlcvDuplicatesNow）の resume 用状態キーとチャンク設定。
+// 末尾N行に限定せずシート全体を前方カーソルで走査し、6分上限を跨いで完走する。
+const OHLCV_FULL_DEDUP_STATE_KEY = "OHLCV_FULL_DEDUP_STATE_V1";
+const OHLCV_FULL_DEDUP_CHUNK_ROWS = 20000;
+const OHLCV_FULL_DEDUP_MAX_RUN_MS = 4 * 60 * 1000;
 const OHLCV_SAFE_SORT_MAX_ROWS = 300000;
 const PHASE3_SPLIT_ROW_CHUNK_SIZE = 1000;
 const OHLCV_TRACE_PROP_KEY = "OHLCV_TRACE_LAST";
@@ -10514,11 +10519,21 @@ function deleteDuplicateOhlcvRowsRecentFast_(sheet, maxRows, deadlineMs) {
   };
 }
 
-// 手動掃除エントリポイント。末尾 OHLCV_FINAL_DEDUPE_SCAN_ROWS 行をスキャンし、
-// 同一 timestamp+symbol の重複行を即削除する。GAS のエディタから直接実行する用途。
-// GAS 6 分上限内に終わるよう deadline 付きで呼び、未完了分があれば 30 秒後の
-// resumeCleanupOhlcvDuplicates トリガーで自動継続する。完了するまで自動で繰り返す。
-// 途中で止めたい場合は deleteTriggersByHandler_("resumeCleanupOhlcvDuplicates") を実行する。
+// 手動掃除エントリポイント。シート全体を前方カーソルで走査し、同一 timestamp+symbol の
+// 重複行をすべて削除する。GAS のエディタから直接実行する用途。
+//
+// 【重要】旧実装は末尾 OHLCV_FINAL_DEDUPE_SCAN_ROWS(=60000) 行しか見ていなかったため、
+// それより手前（＝シート上部の古い日付）に沈んでいる重複には構造的に届かず、
+// 「重複削除を動かしても消えない」状態になっていた。本実装は末尾N行に限定せず、
+// 2 行目から最終行まで OHLCV_FULL_DEDUP_CHUNK_ROWS 行ずつ前方に走査して全重複を削除する。
+//
+// 進捗は OHLCV_FULL_DEDUP_STATE_KEY（cursor 等）に保存し、GAS 6 分上限に達したら
+// 30 秒後の resumeCleanupOhlcvDuplicates トリガーで続きから自動継続する。完走するまで
+// 自動で繰り返す。途中で止める場合は resetCleanupOhlcvDuplicatesState() を実行する。
+//
+// シートは A 列 timestamp 昇順前提なので、ある日付の行は必ず連続する。チャンク末尾で
+// 日付グループが分断される場合はその日付ぶんを次回チャンクに持ち越し、同一日付の重複を
+// 取りこぼさないようにする。削除のみ行いソート順は変えない。
 function cleanupOhlcvDuplicatesNow() {
   // 入口で既存リトライトリガーを掃除（resume 経由でも自分自身でも常に再評価する）
   deleteTriggersByHandler_("resumeCleanupOhlcvDuplicates");
@@ -10529,43 +10544,64 @@ function cleanupOhlcvDuplicatesNow() {
     if (!lock.tryLock(30 * 1000)) {
       // 他処理（16:00 取得など）がロック中。1 分後に再試行
       ScriptApp.newTrigger("resumeCleanupOhlcvDuplicates").timeBased().after(60 * 1000).create();
-      writeProcessLog_("OHLCV", "手動重複削除: 別処理がロック中。1 分後に自動リトライします。", {});
+      writeProcessLog_("OHLCV", "全行重複削除: 別処理がロック中。1 分後に自動リトライします。", {});
       return { skipped: true, reason: "lock_busy" };
     }
 
     const startTime = Date.now();
-    const MAX_RUN_MS = 5 * 60 * 1000; // 5 分（6 分上限から 1 分バッファ）
 
     const app = getAppConfig_();
     const ss = SpreadsheetApp.openById(app.spreadsheetId);
     const sheet = ss.getSheetByName(CONFIG.OHLCV_SHEET);
     if (!sheet) throw new Error("ohlcv_4h not found");
 
-    const deadlineMs = startTime + MAX_RUN_MS;
-    const result = deleteDuplicateOhlcvRowsRecentFast_(sheet, OHLCV_FINAL_DEDUPE_SCAN_ROWS, deadlineMs);
-    const elapsedMs = Date.now() - startTime;
-
-    const summary = Object.assign({}, result, { elapsedMs: elapsedMs });
-    console.log("[cleanupOhlcvDuplicatesNow] " + JSON.stringify(summary));
-
-    if ((result.remainingDuplicateRows || 0) > 0) {
-      // 未完了 → 30 秒後に自動リトライ
-      ScriptApp.newTrigger("resumeCleanupOhlcvDuplicates").timeBased().after(30 * 1000).create();
-      writeProcessLog_(
-        "OHLCV",
-        `手動重複削除: ${result.deletedRows} 件削除、残り ${result.remainingDuplicateRows} 件は 30 秒後に自動リトライします。`,
-        summary
-      );
-    } else {
-      writeProcessLog_("OHLCV", "手動重複削除: 完了しました。", summary);
+    let state = loadFullDedupState_();
+    if (!state || !Number.isFinite(Number(state.cursor)) || state.cursor < 2) {
+      state = { cursor: 2, totalDeleted: 0, totalScanned: 0, chunks: 0, startedAt: new Date().toISOString() };
     }
 
+    let done = false;
+    while (Date.now() - startTime < OHLCV_FULL_DEDUP_MAX_RUN_MS) {
+      const lastRow = sheet.getLastRow();
+      if (lastRow < 2 || state.cursor > lastRow) { done = true; break; }
+
+      const r = dedupeOhlcvFullSheetChunk_(sheet, state.cursor, lastRow);
+      state.cursor = r.nextCursor;
+      state.totalDeleted += r.deletedRows;
+      state.totalScanned += r.processedRows;
+      state.chunks += 1;
+
+      if (r.reachedEnd) { done = true; break; }
+      saveFullDedupState_(state);
+    }
+
+    SpreadsheetApp.flush();
+    const elapsedMs = Date.now() - startTime;
+
+    if (done) {
+      clearFullDedupState_();
+      const summary = { done: true, totalDeleted: state.totalDeleted, totalScanned: state.totalScanned, chunks: state.chunks, elapsedMs: elapsedMs };
+      console.log("[cleanupOhlcvDuplicatesNow] " + JSON.stringify(summary));
+      writeProcessLog_("OHLCV", `全行重複削除: シート全体の重複排除が完了しました（削除 ${state.totalDeleted} 件）。`, summary);
+      return summary;
+    }
+
+    saveFullDedupState_(state);
+    // 未完了 → 30 秒後に自動リトライ
+    ScriptApp.newTrigger("resumeCleanupOhlcvDuplicates").timeBased().after(30 * 1000).create();
+    const summary = { done: false, cursor: state.cursor, totalDeleted: state.totalDeleted, totalScanned: state.totalScanned, chunks: state.chunks, elapsedMs: elapsedMs };
+    console.log("[cleanupOhlcvDuplicatesNow] " + JSON.stringify(summary));
+    writeProcessLog_(
+      "OHLCV",
+      `全行重複削除: 途中まで完了（cursor=${state.cursor}、削除 ${state.totalDeleted} 件）。30 秒後に続きを自動実行します。`,
+      summary
+    );
     return summary;
   } catch (e) {
     // 致命的エラー時も自動リカバリのためリトライ予約
     try {
       ScriptApp.newTrigger("resumeCleanupOhlcvDuplicates").timeBased().after(2 * 60 * 1000).create();
-      writeProcessLog_("OHLCV", "手動重複削除: エラー発生。2 分後に自動リトライします。", { error: String(e) });
+      writeProcessLog_("OHLCV", "全行重複削除: エラー発生。2 分後に自動リトライします。", { error: String(e) });
     } catch (scheduleErr) {
       // トリガー予約も失敗 → ユーザーに手動再実行を促す
     }
@@ -10573,6 +10609,107 @@ function cleanupOhlcvDuplicatesNow() {
   } finally {
     if (lock && lock.hasLock()) lock.releaseLock();
   }
+}
+
+// 1 チャンク分の全行重複削除。cursor から最大 OHLCV_FULL_DEDUP_CHUNK_ROWS 行を読み、
+// 同一 timestamp+symbol の重複を削除する。シート末尾未到達のチャンクでは、末尾で分断
+// されている可能性のある「最後の日付グループ」を処理対象から外して次回に持ち越す。
+function dedupeOhlcvFullSheetChunk_(sheet, cursor, lastRow) {
+  const count = Math.min(OHLCV_FULL_DEDUP_CHUNK_ROWS, lastRow - cursor + 1);
+  const values = sheet.getRange(cursor, 1, count, 8).getValues();
+  const reachedEnd = (cursor + count - 1) >= lastRow;
+
+  // 末尾未到達なら最後の日付グループを次回に持ち越す（同一日付の重複取りこぼし防止）。
+  // チャンク全体が単一日付の場合（CHUNK より大きい日）はフォールバックで全処理する。
+  let processCount = count;
+  if (!reachedEnd) {
+    const lastDate = ohlcvRowQuickDateKey_(values[count - 1][0]);
+    if (lastDate) {
+      let b = count;
+      while (b > 0 && ohlcvRowQuickDateKey_(values[b - 1][0]) === lastDate) b--;
+      if (b > 0) processCount = b;
+    }
+  }
+
+  const bestByKey = {};
+  const items = [];
+  for (let i = 0; i < processCount; i++) {
+    const ts = normalizeOhlcvTimestamp_(values[i][0]);
+    const symbol = String(values[i][2] || "").trim();
+    if (!ts || !symbol) continue;
+    const key = formatOhlcvTimestampTextForSheet_(ts) + "|" + symbol;
+    const sheetRow = cursor + i;
+    const item = { key: key, row: values[i], sheetRow: sheetRow };
+    items.push(item);
+    const current = bestByKey[key];
+    if (!current) { bestByKey[key] = item; continue; }
+    const cmp = compareOhlcvDuplicatePriority_(values[i], current.row);
+    if (cmp < 0 || (cmp === 0 && sheetRow > current.sheetRow)) bestByKey[key] = item;
+  }
+
+  const deleteRows = [];
+  for (let i = 0; i < items.length; i++) {
+    const best = bestByKey[items[i].key];
+    if (!best || items[i].sheetRow === best.sheetRow) continue;
+    deleteRows.push(items[i].sheetRow);
+  }
+
+  let deleted = 0;
+  if (deleteRows.length > 0) {
+    deleteRows.sort(function(a, b) { return b - a; });
+    let i = 0;
+    while (i < deleteRows.length) {
+      const groupStart = deleteRows[i];
+      let n = 1;
+      while (i + n < deleteRows.length && deleteRows[i + n] === groupStart - n) n++;
+      sheet.deleteRows(groupStart - n + 1, n);
+      deleted += n;
+      i += n;
+    }
+    SpreadsheetApp.flush();
+  }
+
+  // 削除した行はすべて [cursor, cursor+processCount-1] 内にあるため、次の未処理行は
+  // (cursor + processCount) から deleted 行ぶん前にシフトする。
+  const nextCursor = cursor + processCount - deleted;
+  return { nextCursor: nextCursor, deletedRows: deleted, processedRows: processCount, reachedEnd: reachedEnd };
+}
+
+// A 列の生値（Date / "yyyy/MM/dd ..." 文字列）から高速に yyyy-MM-dd を得る。
+// 高速パスで判定できない場合のみ normalizeOhlcvTimestamp_ にフォールバックする。
+function ohlcvRowQuickDateKey_(rawTs) {
+  if (rawTs instanceof Date) {
+    const d = new Date(rawTs.getTime() + 9 * 3600 * 1000);
+    return d.getUTCFullYear() + "-" + String(d.getUTCMonth() + 1).padStart(2, "0") + "-" + String(d.getUTCDate()).padStart(2, "0");
+  }
+  if (typeof rawTs === "string") {
+    const p = rawTs.substring(0, 10).replace(/\//g, "-");
+    if (p.length === 10 && p.charCodeAt(4) === 45) return p;
+  }
+  const ts = normalizeOhlcvTimestamp_(rawTs);
+  return ts ? formatYmd_(ts) : null;
+}
+
+function loadFullDedupState_() {
+  const raw = PropertiesService.getScriptProperties().getProperty(OHLCV_FULL_DEDUP_STATE_KEY);
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch (e) { return null; }
+}
+
+function saveFullDedupState_(state) {
+  PropertiesService.getScriptProperties().setProperty(OHLCV_FULL_DEDUP_STATE_KEY, JSON.stringify(state));
+}
+
+function clearFullDedupState_() {
+  PropertiesService.getScriptProperties().deleteProperty(OHLCV_FULL_DEDUP_STATE_KEY);
+}
+
+// 全行重複削除の進捗・自動リトライトリガーをリセットする（途中停止・やり直し用）。
+function resetCleanupOhlcvDuplicatesState() {
+  deleteTriggersByHandler_("resumeCleanupOhlcvDuplicates");
+  clearFullDedupState_();
+  writeProcessLog_("OHLCV", "全行重複削除の状態とトリガーをリセットしました。", {});
+  return { ok: true };
 }
 
 // 自動リトライトリガー用ハンドラ。CLAUDE.md 規約どおり自分自身のトリガーを冒頭で削除し
