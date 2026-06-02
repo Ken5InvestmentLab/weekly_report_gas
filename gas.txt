@@ -7844,11 +7844,11 @@ function getOhlcvRowPriority_(row) {
 
 function prepareOhlcvSheetForQuickRepairPause_(sheet, context, rowsAddedThisRun) {
   if (!sheet || (Number(rowsAddedThisRun) || 0) <= 0) return;
-  writeProcessLog_("ギャップ修復", "再開前提を壊さないため、追記済みOHLCVを重複排除してtimestamp昇順に戻します。", {
+  SpreadsheetApp.flush();
+  writeProcessLog_("GAP_REPAIR", "Quick repair appended rows and paused; post-repair cleanup will dedupe and sort after the append phase completes.", {
     context: context || "",
     rowsAddedThisRun: rowsAddedThisRun
   });
-  SpreadsheetApp.flush();
 }
 
 function scheduleQuickRepairResume_(delayMs) {
@@ -8833,6 +8833,7 @@ function quickRepairRecentGaps(options) {
     const state = loadQuickRepairResumeState_(props, STATE_VERSION, businessDateKey, daysBack, minSessions)
       || createQuickRepairState_(STATE_VERSION, businessDateKey, daysBack, minSessions);
     props.setProperty(QUICK_REPAIR_STATE_KEY, JSON.stringify(state));
+    const totalRowsAtRunStart = Number(state.totalRows || 0);
 
     const DEDUPE_GUARD_MS = 90 * 1000;
     const scanDeadlineMs = Math.min(
@@ -8945,7 +8946,7 @@ function quickRepairRecentGaps(options) {
         parseErrors: result.parseErrors || 0
       });
       if ((result.deferredDates || 0) > 0) {
-        prepareOhlcvSheetForQuickRepairPause_(ohlcvSh, "deferred_dates", state.totalRows);
+        prepareOhlcvSheetForQuickRepairPause_(ohlcvSh, "deferred_dates", Math.max(0, state.totalRows - totalRowsAtRunStart));
         scheduleQuickRepairResume_(QUICK_REPAIR_RESUME_AFTER_MS);
         return { ok: true, incomplete: true, reason: "deferred_dates", processedGroups: state.processedGroups, processedTasks: state.processedTasks, rows: state.totalRows, deferredDates: state.deferredDates };
       }
@@ -8954,10 +8955,15 @@ function quickRepairRecentGaps(options) {
     }
 
     if (groupIndex < groups.length) {
-      prepareOhlcvSheetForQuickRepairPause_(ohlcvSh, "time_guard_pause", state.totalRows);
+      const rowsAddedThisRun = Math.max(0, state.totalRows - totalRowsAtRunStart);
+      prepareOhlcvSheetForQuickRepairPause_(ohlcvSh, "time_guard_pause", rowsAddedThisRun);
       scheduleQuickRepairResume_(QUICK_REPAIR_RESUME_AFTER_MS);
       writeProcessLog_("ギャップ修復", `実行時間が近づいたため、${groupIndex}/${groups.length} 銘柄グループまで保存して再開します。`, {
-        rowsAddedThisRun: state.totalRows
+        rowsAddedThisRun: rowsAddedThisRun,
+        rowsAddedTotal: state.totalRows,
+        groupIndex: groupIndex,
+        totalGroups: groups.length,
+        lastProcessedSymbol: state.lastProcessedSymbol || ""
       });
       return { ok: true, incomplete: true, groupIndex: groupIndex, totalGroups: groups.length, rows: state.totalRows };
     }
