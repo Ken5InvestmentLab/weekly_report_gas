@@ -11827,6 +11827,8 @@ function cleanupOhlcvDuplicatesNow() {
 
     let state = loadFullDedupState_();
     if (!state || state.mode !== "sorted_row_cursor" || !Number.isFinite(Number(state.cursor)) || Number(state.cursor) < 2) {
+      const previousMode = state && state.mode ? String(state.mode) : "";
+      const dataRows = Math.max(0, sheet.getLastRow() - 1);
       state = {
         mode: "sorted_row_cursor",
         cursor: 2,
@@ -11836,15 +11838,14 @@ function cleanupOhlcvDuplicatesNow() {
         chunks: 0,
         startedAt: new Date().toISOString()
       };
-      const sortResult = sortOhlcvSheetByTimestampSafe_(sheet);
-      state.sortBeforeDedupe = sortResult;
-      if (sortResult.skipped) {
-        clearFullDedupState_();
-        deleteTriggersByHandler_(OHLCV_FULL_DEDUP_RESUME_HANDLER);
-        writeProcessLog_("OHLCV", "Sorted row-cursor duplicate cleanup stopped because OHLCV sort was skipped.", sortResult);
-        return { skipped: true, reason: "sort_skipped", sortResult: sortResult };
-      }
-      writeProcessLog_("OHLCV", "Sorted row-cursor duplicate cleanup initialized.", sortResult);
+      state.sortBeforeDedupe = { skipped: true, reason: "assumed_sorted_for_row_cursor", dataRows: dataRows };
+      writeProcessLog_("OHLCV", "Sorted row-cursor duplicate cleanup initialized.", {
+        mode: state.mode,
+        cursor: state.cursor,
+        dataRows: dataRows,
+        previousMode: previousMode,
+        sortBeforeDedupe: state.sortBeforeDedupe
+      });
       saveFullDedupState_(state);
     }
 
