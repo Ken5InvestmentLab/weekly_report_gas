@@ -1840,6 +1840,9 @@ const OHLCV_LAST_TS_SCAN_CHUNK_ROWS = 5000;
 const OHLCV_LAST_TS_SCAN_MAX_ROWS = 60000;
 const OHLCV_APPEND_INTEGRITY_SCAN_ROWS = 30000;
 const OHLCV_FINAL_DEDUPE_SCAN_ROWS = 60000;
+const OHLCV_APPEND_GUARD_MAX_RANGE_SCAN_ROWS = 30000;
+const OHLCV_APPEND_GUARD_MAX_DATE_BUCKET_ROWS = 20000;
+const OHLCV_APPEND_GUARD_FALLBACK_TAIL_ROWS = 30000;
 // 全行重複削除（cleanupOhlcvDuplicatesNow）の resume 用状態キーとチャンク設定。
 // 末尾N行に限定せずシート全体を前方カーソルで走査し、6分上限を跨いで完走する。
 const OHLCV_FULL_DEDUP_STATE_KEY = "OHLCV_FULL_DEDUP_STATE_V1";
@@ -2714,7 +2717,7 @@ function appendAndNormalizeMiddayOhlcvRows_(sheet, rows, context) {
     return 0;
   }
 
-  const appended = appendRowsToSheet_(sheet, prepared.rows);
+  const appended = appendRowsToSheet_(sheet, prepared.rows, context || "midday_append");
 
   if (appended > 0) {
     writeProcessLog_("OHLCV-AM", "13:30先行取得でOHLCVを追記しました。", {
@@ -2921,6 +2924,288 @@ function buildExistingOhlcvKeySetForCandidateRows_(sheet, rows, options) {
   stats.matchedKeys = Object.keys(keySet).length;
 
   return { keySet: keySet, stats: stats };
+}
+
+function addExistingOhlcvItemsFromRange_(sheet, startRow, numRows, targetKeys, itemMap, seenRows, stats, mode) {
+  if (!sheet || !targetKeys || !itemMap) return 0;
+  const safeStart = Math.max(2, Number(startRow) || 2);
+  const safeRows = Math.max(0, Number(numRows) || 0);
+  if (safeRows <= 0) return 0;
+
+  const values = sheet.getRange(safeStart, 1, safeRows, 8).getValues();
+  let matched = 0;
+  values.forEach((row, index) => {
+    const sheetRow = safeStart + index;
+    if (seenRows && seenRows[sheetRow]) return;
+    if (seenRows) seenRows[sheetRow] = true;
+    const key = makeOhlcvTimestampSymbolKey_(row);
+    if (!key || !targetKeys[key]) return;
+    const item = makeOhlcvDuplicateItem_([row[0], row[1], row[2]], row[7], sheetRow);
+    if (!item) return;
+    item.fullRow = row.slice(0, 8);
+    const current = itemMap[key];
+    if (!current || isBetterOhlcvDuplicateItem_(item, current)) itemMap[key] = item;
+    matched++;
+  });
+
+  if (stats) {
+    stats.scannedRows += safeRows;
+    stats.matchedRows += matched;
+    stats.rangeCount++;
+    if (!stats.modes[mode]) stats.modes[mode] = 0;
+    stats.modes[mode] += safeRows;
+  }
+  return matched;
+}
+
+function collectOhlcvCandidateKeyInfo_(rows) {
+  const info = {
+    targetKeys: {},
+    targetDates: {},
+    minDateKey: "",
+    maxDateKey: "",
+    keyCount: 0
+  };
+
+  (rows || []).forEach(row => {
+    const key = makeOhlcvTimestampSymbolKey_(row);
+    if (!key) return;
+    if (!info.targetKeys[key]) {
+      info.targetKeys[key] = true;
+      info.keyCount++;
+    }
+
+    const ts = normalizeOhlcvTimestamp_(row[0]);
+    if (!ts) return;
+    const dateKey = formatYmd_(ts);
+    info.targetDates[dateKey] = true;
+    if (!info.minDateKey || dateKey < info.minDateKey) info.minDateKey = dateKey;
+    if (!info.maxDateKey || dateKey > info.maxDateKey) info.maxDateKey = dateKey;
+  });
+
+  return info;
+}
+
+function getOhlcvDateRangeRows_(sheet, dateKey, lastRow, deadlineMs) {
+  const normalizedDate = normalizeBusinessDateKey_(dateKey);
+  const day = toJstDayKeyFromDateStr_(normalizedDate);
+  if (day === null || !sheet || lastRow < 2) return { startRow: 0, numRows: 0, incomplete: false };
+  const nextDate = new Date(new Date(String(normalizedDate) + "T00:00:00+09:00").getTime() + 24 * 60 * 60 * 1000);
+  const nextDateKey = formatYmd_(nextDate);
+  const nextDay = toJstDayKeyFromDateStr_(nextDateKey);
+  if (nextDay === null) return { startRow: 0, numRows: 0, incomplete: false };
+
+  const startInfo = findFirstOhlcvRowOnOrAfterDayKey_(sheet, day, lastRow, deadlineMs || null);
+  if (startInfo.incomplete) return { startRow: 0, numRows: 0, incomplete: true, stoppedBy: startInfo.stoppedBy };
+  const endInfo = findFirstOhlcvRowOnOrAfterDayKey_(sheet, nextDay, lastRow, deadlineMs || null);
+  if (endInfo.incomplete) return { startRow: 0, numRows: 0, incomplete: true, stoppedBy: endInfo.stoppedBy };
+  if (!startInfo.row || startInfo.row > lastRow) return { startRow: 0, numRows: 0, incomplete: false };
+  const endRow = Math.min(lastRow, (endInfo.row || (lastRow + 1)) - 1);
+  const numRows = Math.max(0, endRow - startInfo.row + 1);
+  return { startRow: startInfo.row, numRows: numRows, incomplete: false };
+}
+
+function buildExistingOhlcvItemMapForCandidateRows_(sheet, rows, options) {
+  const opts = options || {};
+  const itemMap = {};
+  const seenRows = {};
+  const keyInfo = collectOhlcvCandidateKeyInfo_(rows);
+  const lastRow = sheet ? sheet.getLastRow() : 0;
+  const stats = {
+    context: opts.context || "",
+    targetKeys: keyInfo.keyCount,
+    targetDates: Object.keys(keyInfo.targetDates).length,
+    scannedRows: 0,
+    matchedRows: 0,
+    rangeCount: 0,
+    skippedDateBuckets: 0,
+    modes: {}
+  };
+
+  if (!sheet || lastRow < 2 || keyInfo.keyCount === 0) return { itemMap: itemMap, stats: stats };
+
+  const maxRangeRows = Math.max(1000, Number(opts.maxRangeScanRows) || OHLCV_APPEND_GUARD_MAX_RANGE_SCAN_ROWS);
+  const maxDateBucketRows = Math.max(1000, Number(opts.maxDateBucketRows) || OHLCV_APPEND_GUARD_MAX_DATE_BUCKET_ROWS);
+  const fallbackTailRows = Math.max(0, Number(opts.fallbackTailRows) || OHLCV_APPEND_GUARD_FALLBACK_TAIL_ROWS);
+
+  let usedSingleSortedRange = false;
+  try {
+    const minDay = toJstDayKeyFromDateStr_(keyInfo.minDateKey);
+    const maxDate = new Date(String(keyInfo.maxDateKey || keyInfo.minDateKey) + "T00:00:00+09:00");
+    const afterMaxDateKey = formatYmd_(new Date(maxDate.getTime() + 24 * 60 * 60 * 1000));
+    const afterMaxDay = toJstDayKeyFromDateStr_(afterMaxDateKey);
+    if (minDay !== null && afterMaxDay !== null) {
+      const startInfo = findFirstOhlcvRowOnOrAfterDayKey_(sheet, minDay, lastRow, null);
+      const endInfo = findFirstOhlcvRowOnOrAfterDayKey_(sheet, afterMaxDay, lastRow, null);
+      if (!startInfo.incomplete && !endInfo.incomplete && startInfo.row <= lastRow) {
+        const endRow = Math.min(lastRow, (endInfo.row || (lastRow + 1)) - 1);
+        const candidateRows = Math.max(0, endRow - startInfo.row + 1);
+        if (candidateRows > 0 && candidateRows <= maxRangeRows) {
+          addExistingOhlcvItemsFromRange_(sheet, startInfo.row, candidateRows, keyInfo.targetKeys, itemMap, seenRows, stats, "sorted_range");
+          usedSingleSortedRange = true;
+        }
+      }
+    }
+  } catch (e) {
+    stats.sortedRangeError = String(e);
+  }
+
+  if (!usedSingleSortedRange) {
+    const dates = Object.keys(keyInfo.targetDates).sort();
+    dates.forEach(dateKey => {
+      try {
+        const range = getOhlcvDateRangeRows_(sheet, dateKey, lastRow, null);
+        if (range.incomplete || range.numRows <= 0) return;
+        if (range.numRows > maxDateBucketRows) {
+          stats.skippedDateBuckets++;
+          return;
+        }
+        addExistingOhlcvItemsFromRange_(sheet, range.startRow, range.numRows, keyInfo.targetKeys, itemMap, seenRows, stats, "date_bucket");
+      } catch (e) {
+        stats.skippedDateBuckets++;
+      }
+    });
+  }
+
+  if (fallbackTailRows > 0) {
+    const tailRows = Math.min(fallbackTailRows, Math.max(0, lastRow - 1));
+    if (tailRows > 0) {
+      const tailStart = lastRow - tailRows + 1;
+      addExistingOhlcvItemsFromRange_(sheet, tailStart, tailRows, keyInfo.targetKeys, itemMap, seenRows, stats, "tail_fallback");
+    }
+  }
+
+  stats.matchedKeys = Object.keys(itemMap).length;
+  return { itemMap: itemMap, stats: stats };
+}
+
+function ohlcvRowsEquivalentForGuard_(a, b) {
+  const ar = normalizeOhlcvRowForWrite_(a);
+  const br = normalizeOhlcvRowForWrite_(b);
+  if (!ar || !br) return false;
+  if (formatOhlcvTimestampTextForSheet_(ar[0]) !== formatOhlcvTimestampTextForSheet_(br[0])) return false;
+  if (String(ar[1] || "").trim() !== String(br[1] || "").trim()) return false;
+  if (String(ar[2] || "").trim() !== String(br[2] || "").trim()) return false;
+  for (let i = 3; i <= 7; i++) {
+    const av = ar[i];
+    const bv = br[i];
+    const an = Number(av);
+    const bn = Number(bv);
+    if (Number.isFinite(an) || Number.isFinite(bn)) {
+      if (Math.round(an * 1000000) !== Math.round(bn * 1000000)) return false;
+    } else if (String(av || "") !== String(bv || "")) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function shouldUpdateExistingOhlcvRowForGuard_(candidateRow, existingItem) {
+  if (!existingItem || !existingItem.fullRow) return false;
+  const existingMarker = String(existingItem.fullRow[1] || "").trim();
+  if (isProtectedMiddayOhlcvMarker_(existingMarker) || isPmLockedMarker_(existingMarker)) return false;
+
+  const cmp = compareOhlcvDuplicatePriority_(candidateRow, existingItem.fullRow);
+  if (cmp < 0) return true;
+  if (cmp > 0) return false;
+  return !ohlcvRowsEquivalentForGuard_(candidateRow, existingItem.fullRow);
+}
+
+function prepareOhlcvRowsForGuardedWrite_(sheet, rows, context) {
+  const deduped = dedupeOhlcvRowsForAppendByKey_(rows);
+  const contextText = String(context || "");
+  const isMiddayContext = /midday/i.test(contextText);
+  const existing = buildExistingOhlcvItemMapForCandidateRows_(sheet, deduped.rows, {
+    context: contextText || "append_guard",
+    maxRangeScanRows: isMiddayContext ? MIDDAY_APPEND_EXISTING_KEY_SCAN_MAX_ROWS : OHLCV_APPEND_GUARD_MAX_RANGE_SCAN_ROWS,
+    maxDateBucketRows: OHLCV_APPEND_GUARD_MAX_DATE_BUCKET_ROWS,
+    fallbackTailRows: isMiddayContext ? MIDDAY_APPEND_EXISTING_KEY_SCAN_MAX_ROWS : OHLCV_APPEND_GUARD_FALLBACK_TAIL_ROWS
+  });
+
+  const appendRows = [];
+  const updateItems = [];
+  const samples = [];
+  let skippedExistingRows = 0;
+
+  deduped.rows.forEach(row => {
+    const key = makeOhlcvTimestampSymbolKey_(row);
+    const existingItem = key ? existing.itemMap[key] : null;
+    if (!existingItem) {
+      appendRows.push(row);
+      return;
+    }
+
+    if (shouldUpdateExistingOhlcvRowForGuard_(row, existingItem)) {
+      updateItems.push({ sheetRow: existingItem.sheetRow, row: row, key: key, previousRow: existingItem.fullRow });
+      if (samples.length < 10) samples.push({ action: "update", row: existingItem.sheetRow, key: key, oldMarker: String(existingItem.fullRow[1] || ""), newMarker: String(row[1] || "") });
+      return;
+    }
+
+    skippedExistingRows++;
+    if (samples.length < 10) samples.push({ action: "skip", row: existingItem.sheetRow, key: key, marker: String(existingItem.fullRow[1] || "") });
+  });
+
+  return {
+    appendRows: appendRows,
+    updateItems: updateItems,
+    skippedDuplicateRows: deduped.skippedDuplicateRows || 0,
+    skippedExistingRows: skippedExistingRows,
+    existingStats: existing.stats,
+    samples: samples
+  };
+}
+
+function writeOhlcvRowUpdates_(sheet, updateItems, context) {
+  const stats = { updatedRows: 0, rangeCount: 0, samples: [] };
+  if (!sheet || !updateItems || updateItems.length === 0) return stats;
+
+  const sorted = updateItems
+    .filter(item => item && Number.isFinite(Number(item.sheetRow)) && item.sheetRow >= 2)
+    .sort((a, b) => Number(a.sheetRow) - Number(b.sheetRow));
+  if (sorted.length === 0) return stats;
+
+  let group = [];
+  const flushGroup = () => {
+    if (group.length === 0) return;
+    const startRow = Number(group[0].sheetRow);
+    const values = group.map(item => {
+      const normalized = normalizeOhlcvRowForWrite_(item.row);
+      return normalized || item.row;
+    });
+    sheet.getRange(startRow, 1, values.length, 1).setNumberFormat("yyyy/mm/dd hh:mm");
+    sheet.getRange(startRow, 1, values.length, 8).setValues(values);
+    stats.updatedRows += values.length;
+    stats.rangeCount++;
+    group.forEach(item => {
+      if (stats.samples.length < 10) stats.samples.push({ row: item.sheetRow, key: item.key });
+    });
+    group = [];
+  };
+
+  sorted.forEach(item => {
+    if (group.length === 0) {
+      group.push(item);
+      return;
+    }
+    const expectedNext = Number(group[group.length - 1].sheetRow) + 1;
+    if (Number(item.sheetRow) === expectedNext) {
+      group.push(item);
+    } else {
+      flushGroup();
+      group.push(item);
+    }
+  });
+  flushGroup();
+  SpreadsheetApp.flush();
+
+  writeProcessLog_("OHLCV", "OHLCV append guard updated existing rows instead of appending duplicates.", {
+    context: context || "",
+    updatedRows: stats.updatedRows,
+    rangeCount: stats.rangeCount,
+    samples: stats.samples
+  });
+
+  return stats;
 }
 
 function scheduleMiddayOhlcvPostprocess_(options) {
@@ -4822,8 +5107,8 @@ function buildOhlcvAppendPreWriteSamples_(rows, maxSamples) {
   return samples;
 }
 
-function appendRowsToSheet_(sheet, data) {
-  return appendOhlcvRowsToSheetDetailed_(sheet, data, "appendRowsToSheet_").rows;
+function appendRowsToSheet_(sheet, data, context) {
+  return appendOhlcvRowsToSheetDetailed_(sheet, data, context || "appendRowsToSheet_").rows;
 }
 
 function appendOhlcvRowsToSheetDetailed_(sheet, data, context) {
@@ -4832,11 +5117,16 @@ function appendOhlcvRowsToSheetDetailed_(sheet, data, context) {
     validRows: 0,
     skippedRows: 0,
     rows: 0,
+    appendedRows: 0,
+    updatedRows: 0,
+    skippedDuplicateRows: 0,
+    skippedExistingRows: 0,
     deletedRows: 0,
     repairSymbols: 0,
     persistedRows: [],
     appendFailed: false,
-    preWriteSamples: []
+    preWriteSamples: [],
+    existingKeyScan: null
   };
 
   if (!data || data.length === 0) return detail;
@@ -4859,27 +5149,60 @@ function appendOhlcvRowsToSheetDetailed_(sheet, data, context) {
     });
   }
   if (validData.length === 0) return detail;
+
+  const guarded = prepareOhlcvRowsForGuardedWrite_(sheet, validData, context || "appendOhlcvRowsToSheetDetailed_");
+  detail.skippedDuplicateRows = guarded.skippedDuplicateRows || 0;
+  detail.skippedExistingRows = guarded.skippedExistingRows || 0;
+  detail.existingKeyScan = guarded.existingStats || null;
+
+  if ((guarded.updateItems || []).length > 0) {
+    const updateStats = writeOhlcvRowUpdates_(sheet, guarded.updateItems, context || "appendOhlcvRowsToSheetDetailed_");
+    detail.updatedRows = updateStats.updatedRows || 0;
+    detail.persistedRows = detail.persistedRows.concat((guarded.updateItems || []).slice(0, detail.updatedRows).map(item => item.row));
+  }
+
+  if ((guarded.skippedDuplicateRows || 0) > 0 || (guarded.skippedExistingRows || 0) > 0 || (guarded.updateItems || []).length > 0) {
+    writeProcessLog_("OHLCV", "OHLCV append guard filtered rows before writing.", {
+      context: context || "",
+      requestedRows: data.length,
+      validRows: validData.length,
+      appendRows: guarded.appendRows.length,
+      updateRows: (guarded.updateItems || []).length,
+      skippedIncomingDuplicateRows: guarded.skippedDuplicateRows || 0,
+      skippedExistingRows: guarded.skippedExistingRows || 0,
+      existingKeyScan: guarded.existingStats || {},
+      samples: guarded.samples || []
+    });
+  }
+
+  if (guarded.appendRows.length === 0) {
+    detail.rows = detail.persistedRows.length;
+    return detail;
+  }
+
+  const appendData = guarded.appendRows;
   const startRow = sheet.getLastRow() + 1;
-  const preWriteSamples = buildOhlcvAppendPreWriteSamples_(validData, 5);
+  const preWriteSamples = buildOhlcvAppendPreWriteSamples_(appendData, 5);
   detail.preWriteSamples = preWriteSamples;
 
 // Write B:H first, then write A alone so timestamp write failures are isolated.
-sheet.getRange(startRow, 2, validData.length, 7).setValues(validData.map(row => row.slice(1, 8)));
+sheet.getRange(startRow, 2, appendData.length, 7).setValues(appendData.map(row => row.slice(1, 8)));
 
 // A列timestampはDate オブジェクトとして書き込み、日時表示形式を設定する
-const timestampDateValues = validData.map(row => [normalizeOhlcvTimestamp_(row[0]) || row[0]]);
-const timestampRange = sheet.getRange(startRow, 1, validData.length, 1);
+const timestampDateValues = appendData.map(row => [normalizeOhlcvTimestamp_(row[0]) || row[0]]);
+const timestampRange = sheet.getRange(startRow, 1, appendData.length, 1);
 
 timestampRange.setNumberFormat("yyyy/mm/dd hh:mm");
 timestampRange.setValues(timestampDateValues);
 
 SpreadsheetApp.flush();
-  const readback = purgeInvalidRecentlyAppendedOhlcvRows_(sheet, startRow, validData.length, context || "appendRowsToSheet_.readback", validData, preWriteSamples);
+  const readback = purgeInvalidRecentlyAppendedOhlcvRows_(sheet, startRow, appendData.length, context || "appendRowsToSheet_.readback", appendData, preWriteSamples);
   detail.deletedRows = readback.deletedRows || 0;
   detail.repairSymbols = readback.repairSymbols || 0;
-  detail.persistedRows = readback.persistedRows || [];
+  detail.appendedRows = (readback.persistedRows || []).length;
+  detail.persistedRows = detail.persistedRows.concat(readback.persistedRows || []);
   detail.rows = detail.persistedRows.length;
-  detail.appendFailed = validData.length > 0 && (detail.deletedRows > 0 || (readback.readRows || 0) < validData.length);
+  detail.appendFailed = appendData.length > 0 && (detail.deletedRows > 0 || (readback.readRows || 0) < appendData.length);
   return detail;
 }
 
@@ -11149,6 +11472,153 @@ function resetCleanupOhlcvDuplicatesState() {
   return { ok: true };
 }
 
+function jstDayKeyToDateKey_(dayKey) {
+  const n = Number(dayKey);
+  if (!Number.isFinite(n)) return "";
+  const d = new Date(n * 24 * 60 * 60 * 1000 - 9 * 60 * 60 * 1000);
+  return Utilities.formatDate(d, CONFIG.TIMEZONE, "yyyy-MM-dd");
+}
+
+function getOhlcvSheetDateBounds_(sheet) {
+  const lastRow = sheet ? sheet.getLastRow() : 0;
+  if (!sheet || lastRow < 2) return null;
+  const firstTs = normalizeOhlcvTimestamp_(sheet.getRange(2, 1).getValue());
+  const lastTs = normalizeOhlcvTimestamp_(sheet.getRange(lastRow, 1).getValue());
+  if (!firstTs || !lastTs) return null;
+  return {
+    startDay: toJstDayKeyFromDate_(firstTs),
+    endDay: toJstDayKeyFromDate_(lastTs),
+    startDate: formatYmd_(firstTs),
+    endDate: formatYmd_(lastTs),
+    lastRow: lastRow
+  };
+}
+
+function cleanupOhlcvDuplicatesNow() {
+  deleteTriggersByHandler_(OHLCV_FULL_DEDUP_RESUME_HANDLER);
+  scheduleCleanupOhlcvDuplicatesRetry_(OHLCV_FULL_DEDUP_SAFETY_AFTER_MS, { replace: false });
+
+  let lock = null;
+  try {
+    lock = LockService.getScriptLock();
+    if (!lock.tryLock(30 * 1000)) {
+      scheduleCleanupOhlcvDuplicatesRetry_(OHLCV_FULL_DEDUP_LOCK_RETRY_AFTER_MS);
+      writeProcessLog_("OHLCV", "Date-bucket duplicate cleanup lock busy; retry scheduled.", {});
+      return { skipped: true, reason: "lock_busy" };
+    }
+
+    const startTime = Date.now();
+    const app = getAppConfig_();
+    const ss = SpreadsheetApp.openById(app.spreadsheetId);
+    const sheet = ss.getSheetByName(CONFIG.OHLCV_SHEET);
+    if (!sheet) throw new Error("ohlcv_4h not found");
+
+    let state = loadFullDedupState_();
+    if (!state || state.mode !== "date_bucket") {
+      state = {
+        mode: "date_bucket",
+        cursorDay: null,
+        endDay: null,
+        totalDeleted: 0,
+        totalScanned: 0,
+        datesProcessed: 0,
+        startedAt: new Date().toISOString()
+      };
+      const sortResult = sortOhlcvSheetByTimestampSafe_(sheet);
+      state.sortBeforeDedupe = sortResult;
+      if (sortResult.skipped) {
+        clearFullDedupState_();
+        deleteTriggersByHandler_(OHLCV_FULL_DEDUP_RESUME_HANDLER);
+        writeProcessLog_("OHLCV", "Date-bucket duplicate cleanup stopped because OHLCV sort was skipped.", sortResult);
+        return { skipped: true, reason: "sort_skipped", sortResult: sortResult };
+      }
+      const bounds = getOhlcvSheetDateBounds_(sheet);
+      if (!bounds) {
+        clearFullDedupState_();
+        deleteTriggersByHandler_(OHLCV_FULL_DEDUP_RESUME_HANDLER);
+        return { done: true, totalDeleted: 0, totalScanned: 0, datesProcessed: 0 };
+      }
+      state.cursorDay = bounds.startDay;
+      state.endDay = bounds.endDay;
+      state.startDate = bounds.startDate;
+      state.endDate = bounds.endDate;
+      writeProcessLog_("OHLCV", "Date-bucket duplicate cleanup initialized.", {
+        startDate: state.startDate,
+        endDate: state.endDate,
+        sortResult: sortResult
+      });
+      saveFullDedupState_(state);
+    }
+
+    let done = false;
+    while (Date.now() - startTime < OHLCV_FULL_DEDUP_MAX_RUN_MS) {
+      if (OHLCV_FULL_DEDUP_MAX_RUN_MS - (Date.now() - startTime) < OHLCV_FULL_DEDUP_MIN_REMAINING_MS) break;
+      if (!Number.isFinite(Number(state.cursorDay)) || !Number.isFinite(Number(state.endDay)) || Number(state.cursorDay) > Number(state.endDay)) {
+        done = true;
+        break;
+      }
+
+      const dateKey = jstDayKeyToDateKey_(state.cursorDay);
+      if (!dateKey) {
+        state.cursorDay++;
+        saveFullDedupState_(state);
+        continue;
+      }
+
+      const r = dedupeOhlcvDateBucket_(sheet, dateKey, OHLCV_FULL_DEDUP_MAX_DELETE_ROWS_PER_CHUNK);
+      state.totalDeleted += r.deletedRows || 0;
+      state.totalScanned += r.scannedRows || 0;
+      if ((r.remainingDuplicateRows || 0) > 0) {
+        saveFullDedupState_(state);
+        break;
+      }
+      state.cursorDay++;
+      state.datesProcessed++;
+      saveFullDedupState_(state);
+    }
+
+    SpreadsheetApp.flush();
+    const elapsedMs = Date.now() - startTime;
+
+    if (done) {
+      clearFullDedupState_();
+      deleteTriggersByHandler_(OHLCV_FULL_DEDUP_RESUME_HANDLER);
+      const summary = {
+        done: true,
+        totalDeleted: state.totalDeleted,
+        totalScanned: state.totalScanned,
+        datesProcessed: state.datesProcessed,
+        elapsedMs: elapsedMs
+      };
+      console.log("[cleanupOhlcvDuplicatesNow] " + JSON.stringify(summary));
+      writeProcessLog_("OHLCV", "Date-bucket duplicate cleanup completed.", summary);
+      return summary;
+    }
+
+    scheduleCleanupOhlcvDuplicatesRetry_(OHLCV_FULL_DEDUP_RESUME_AFTER_MS);
+    const summary = {
+      done: false,
+      cursorDate: jstDayKeyToDateKey_(state.cursorDay),
+      endDate: jstDayKeyToDateKey_(state.endDay),
+      totalDeleted: state.totalDeleted,
+      totalScanned: state.totalScanned,
+      datesProcessed: state.datesProcessed,
+      elapsedMs: elapsedMs
+    };
+    console.log("[cleanupOhlcvDuplicatesNow] " + JSON.stringify(summary));
+    writeProcessLog_("OHLCV", "Date-bucket duplicate cleanup paused and will resume.", summary);
+    return summary;
+  } catch (e) {
+    try {
+      scheduleCleanupOhlcvDuplicatesRetry_(OHLCV_FULL_DEDUP_ERROR_RETRY_AFTER_MS);
+      writeProcessLog_("OHLCV", "Date-bucket duplicate cleanup error; retry scheduled.", { error: String(e) });
+    } catch (scheduleErr) {}
+    throw e;
+  } finally {
+    if (lock && lock.hasLock()) lock.releaseLock();
+  }
+}
+
 // 自動リトライトリガー用ハンドラ。CLAUDE.md 規約どおり自分自身のトリガーを冒頭で削除し
 // cleanupOhlcvDuplicatesNow に処理を委譲する。
 function resumeCleanupOhlcvDuplicates() {
@@ -11859,8 +12329,7 @@ function runOhlcvPostRepairCleanup_() {
         if (!Number.isFinite(Number(state.dateIndex))) state.dateIndex = 0;
         else state.dateIndex = Number(state.dateIndex);
         if (state.dateIndex >= state.targetDates.length) {
-          state.step = "EARLY_DEDUP";
-          state.earlyDedupComplete = false;
+          state.step = "SORT";
           state.cursor = Number(state.scanStartRow || 2) - 1;
           saveOhlcvPostRepairCleanupState_(state);
           continue;
@@ -12368,6 +12837,71 @@ function dedupeOhlcvDateBucket_(sheet, dateKey, maxDeleteRows) {
 
 // 削除対象行番号をPropertiesServiceに降順チャンク保存
 // 降順で保存することで「先頭から削除」→「後続の行番号が不変」を保証
+// New implementation: use the sorted timestamp index to read only one date bucket.
+function dedupeOhlcvDateBucket_(sheet, dateKey, maxDeleteRows) {
+  const normalizedDate = normalizeBusinessDateKey_(dateKey);
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) {
+    return { dateKey: normalizedDate, scannedRows: 0, duplicateRows: 0, deletedRows: 0, remainingDuplicateRows: 0 };
+  }
+
+  const range = getOhlcvDateRangeRows_(sheet, normalizedDate, lastRow, null);
+  if (range.incomplete || range.numRows <= 0) {
+    return { dateKey: normalizedDate, scannedRows: 0, duplicateRows: 0, deletedRows: 0, remainingDuplicateRows: 0 };
+  }
+
+  const values = sheet.getRange(range.startRow, 1, range.numRows, 8).getValues();
+  const bestByKey = {};
+  const items = [];
+  values.forEach((valueRow, index) => {
+    const ts = normalizeOhlcvTimestamp_(valueRow[0]);
+    if (!ts || formatYmd_(ts) !== normalizedDate) return;
+    const symbol = String(valueRow[2] || "").trim();
+    if (!symbol) return;
+    const sheetRow = range.startRow + index;
+    const key = formatOhlcvTimestampTextForSheet_(ts) + "|" + symbol;
+    const item = { key: key, row: valueRow, sheetRow: sheetRow };
+    items.push(item);
+    const current = bestByKey[key];
+    if (!current || isBetterOhlcvDuplicateItem_(item, current)) bestByKey[key] = item;
+  });
+
+  const deleteRows = [];
+  const samples = [];
+  items.forEach(item => {
+    const best = bestByKey[item.key];
+    if (!best || item.sheetRow === best.sheetRow) return;
+    deleteRows.push(item.sheetRow);
+    if (samples.length < 10) samples.push({ row: item.sheetRow, key: item.key, keptRow: best.sheetRow });
+  });
+
+  const maxRows = Math.max(1, Number(maxDeleteRows) || OHLCV_POST_REPAIR_MAX_DELETE_ROWS);
+  const limitedDeleteRows = deleteRows.slice(0, maxRows);
+  if (limitedDeleteRows.length > 0) {
+    deleteRowsByRowNums_(sheet, limitedDeleteRows);
+    SpreadsheetApp.flush();
+  }
+
+  const remaining = Math.max(0, deleteRows.length - limitedDeleteRows.length);
+  writeProcessLog_("OHLCV_POST_REPAIR", "Date-bucket duplicate cleanup finished one pass.", {
+    dateKey: normalizedDate,
+    startRow: range.startRow,
+    scannedRows: range.numRows,
+    duplicateRows: deleteRows.length,
+    deletedRows: limitedDeleteRows.length,
+    remainingDuplicateRows: remaining,
+    samples: samples
+  });
+
+  return {
+    dateKey: normalizedDate,
+    scannedRows: range.numRows,
+    duplicateRows: deleteRows.length,
+    deletedRows: limitedDeleteRows.length,
+    remainingDuplicateRows: remaining
+  };
+}
+
 function saveOhlcvDedupDeleteRows_(rowNums) {
   if (!rowNums || !rowNums.length) return;
   const sorted = rowNums.slice().sort((a, b) => b - a);
@@ -12941,6 +13475,106 @@ function dedupeOhlcvAllTargetDates_(sheet, targetDates, deadlineMs) {
   });
 
   return { timedOut: false, totalRows: numDataRows, scannedRows: readRows, duplicateRows: allDeleteRows.length, allDeleteRows: allDeleteRows };
+}
+
+// New implementation: scan sorted date buckets plus the append tail, not the whole sheet.
+function dedupeOhlcvAllTargetDates_(sheet, targetDates, deadlineMs) {
+  const empty = { timedOut: false, allDeleteRows: [], duplicateRows: 0, scannedRows: 0, totalRows: 0 };
+  const dateSet = {};
+  (targetDates || []).forEach(d => { try { dateSet[normalizeBusinessDateKey_(d)] = true; } catch (e) {} });
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return empty;
+  if (Object.keys(dateSet).length === 0) return empty;
+
+  if (deadlineMs && deadlineMs - Date.now() < OHLCV_POST_REPAIR_MIN_DEDUP_REMAINING_MS) {
+    writeProcessLog_("OHLCV_POST_REPAIR", "Multi-date dedup skipped: insufficient time budget.", { remaining: deadlineMs - Date.now() });
+    return { timedOut: true, allDeleteRows: [], duplicateRows: 0, scannedRows: 0, totalRows: 0 };
+  }
+
+  const numDataRows = lastRow - 1;
+  const t0 = Date.now();
+  const bestByKey = {};
+  const items = [];
+  const seenRows = {};
+  const scanRanges = [];
+  let scannedRows = 0;
+
+  const scanRange = (startRow, numRows, mode) => {
+    if (!numRows || numRows <= 0) return false;
+    if (deadlineMs && deadlineMs - Date.now() < OHLCV_POST_REPAIR_DEDUP_TAIL_MARGIN_MS) return true;
+    const values = sheet.getRange(startRow, 1, numRows, 8).getValues();
+    scanRanges.push({ mode: mode, startRow: startRow, rows: numRows });
+    for (let i = 0; i < values.length; i++) {
+      if ((i % OHLCV_POST_REPAIR_DEDUP_TIMECHECK_EVERY) === 0 && i > 0) {
+        if (deadlineMs && deadlineMs - Date.now() < OHLCV_POST_REPAIR_DEDUP_TAIL_MARGIN_MS) return true;
+      }
+
+      const sheetRow = startRow + i;
+      if (seenRows[sheetRow]) continue;
+      seenRows[sheetRow] = true;
+      scannedRows++;
+
+      const rawTs = values[i][0];
+      const quickDate = ohlcvRowQuickDateKey_(rawTs);
+      if (!quickDate || !dateSet[quickDate]) continue;
+      const ts = normalizeOhlcvTimestamp_(rawTs);
+      if (!ts || !dateSet[formatYmd_(ts)]) continue;
+      const symbol = String(values[i][2] || "").trim();
+      if (!symbol) continue;
+
+      const key = formatOhlcvTimestampTextForSheet_(ts) + "|" + symbol;
+      const item = { key: key, row: values[i], sheetRow: sheetRow };
+      items.push(item);
+      const current = bestByKey[key];
+      if (!current || isBetterOhlcvDuplicateItem_(item, current)) bestByKey[key] = item;
+    }
+    return false;
+  };
+
+  const dates = Object.keys(dateSet).sort();
+  for (let i = 0; i < dates.length; i++) {
+    if (deadlineMs && deadlineMs - Date.now() < OHLCV_POST_REPAIR_DEDUP_TAIL_MARGIN_MS) {
+      return { timedOut: true, allDeleteRows: [], duplicateRows: 0, scannedRows: scannedRows, totalRows: numDataRows };
+    }
+    const range = getOhlcvDateRangeRows_(sheet, dates[i], lastRow, deadlineMs);
+    if (range.incomplete) {
+      return { timedOut: true, allDeleteRows: [], duplicateRows: 0, scannedRows: scannedRows, totalRows: numDataRows };
+    }
+    if (scanRange(range.startRow, range.numRows, "date_bucket")) {
+      return { timedOut: true, allDeleteRows: [], duplicateRows: 0, scannedRows: scannedRows, totalRows: numDataRows };
+    }
+  }
+
+  const tailRows = Math.min(numDataRows, OHLCV_POST_REPAIR_DEDUP_READ_ROWS);
+  if (tailRows > 0) {
+    const tailStart = lastRow - tailRows + 1;
+    if (scanRange(tailStart, tailRows, "tail")) {
+      return { timedOut: true, allDeleteRows: [], duplicateRows: 0, scannedRows: scannedRows, totalRows: numDataRows };
+    }
+  }
+
+  const allDeleteRows = [];
+  const samples = [];
+  items.forEach(item => {
+    const best = bestByKey[item.key];
+    if (!best || item.sheetRow === best.sheetRow) return;
+    allDeleteRows.push(item.sheetRow);
+    if (samples.length < 10) samples.push({ row: item.sheetRow, key: item.key, keptRow: best.sheetRow });
+  });
+
+  writeProcessLog_("OHLCV_POST_REPAIR", "Multi-date dedup scan completed.", {
+    targetDates: dates.length,
+    totalRows: numDataRows,
+    scannedRows: scannedRows,
+    scanRanges: scanRanges.slice(0, 20),
+    matchedRows: items.length,
+    duplicateRows: allDeleteRows.length,
+    elapsedMs: Date.now() - t0,
+    samples: samples
+  });
+
+  return { timedOut: false, totalRows: numDataRows, scannedRows: scannedRows, duplicateRows: allDeleteRows.length, allDeleteRows: allDeleteRows };
 }
 
 // EARLY_DEDUPステップ専用。DEDUP_DATESの削除完了後に呼ぶ。

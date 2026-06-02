@@ -633,6 +633,7 @@ GASの実行上限は約6分。長時間処理は必ず再開可能にする。
 - 変更した行のみ個別または小バッチで `setValues()` する。
 - `ohlcv_4h` の先頭から連続削除する処理は `sheet.deleteRows(firstDataRow, N)` で行う。
 - `ohlcv_4h` に追記する場合は `appendRowsToSheet_` を通す。
+- OHLCV追記前の `timestamp + symbol` 重複ガードをバイパスしない。既存キーがある場合は保護マーカーを優先し、必要な差分は追記ではなく既存行更新で吸収する。
 - 追記前にtimestampを `Date` に正規化し、A列へ書く前から `yyyy/MM/dd 09:00` または `yyyy/MM/dd 13:00` のゼロ埋め文字列へ変換する。
 - 追記はB:Hを書いた後にA列 timestamp を単独で書き、直後にA列を読み返す。空・不正・09:00/13:00以外の行は即削除し、preWrite/postWriteのtimestampサンプルをログに残す。
 - A列 timestamp は文字列 `yyyy/MM/dd HH:mm` として書き、readbackでは `Date`、シリアル値、文字列のすべてを正規化して判定する。
