@@ -1846,7 +1846,7 @@ const OHLCV_APPEND_GUARD_FALLBACK_TAIL_ROWS = 30000;
 // 全行重複削除（cleanupOhlcvDuplicatesNow）の resume 用状態キーとチャンク設定。
 // 末尾N行に限定せずシート全体を前方カーソルで走査し、6分上限を跨いで完走する。
 const OHLCV_FULL_DEDUP_STATE_KEY = "OHLCV_FULL_DEDUP_STATE_V1";
-const OHLCV_FULL_DEDUP_CHUNK_ROWS = 3000;
+const OHLCV_FULL_DEDUP_CHUNK_ROWS = 10000;
 const OHLCV_FULL_DEDUP_MAX_RUN_MS = 150 * 1000;
 const OHLCV_FULL_DEDUP_MIN_REMAINING_MS = 45000;
 const OHLCV_FULL_DEDUP_DELETE_MARGIN_MS = 20000;
@@ -11620,7 +11620,304 @@ function cleanupOhlcvDuplicatesNow() {
 }
 
 // 自動リトライトリガー用ハンドラ。CLAUDE.md 規約どおり自分自身のトリガーを冒頭で削除し
+// Full-sheet duplicate cleanup uses a sorted row cursor to avoid per-date boundary probes.
+function makeOhlcvFullDedupCursorItem_(row, sheetRow) {
+  const ts = normalizeOhlcvTimestamp_(row && row.length ? row[0] : null);
+  const symbol = String(row && row.length > 2 ? row[2] || "" : "").trim();
+  if (!ts || !symbol) return null;
+  return {
+    key: formatOhlcvTimestampTextForSheet_(ts) + "|" + symbol,
+    row: row.slice(0, 8),
+    sheetRow: sheetRow
+  };
+}
+
+function makeOhlcvFullDedupCarryGroup_(item) {
+  if (!item) return null;
+  return {
+    key: item.key,
+    best: item,
+    deleteRows: []
+  };
+}
+
+function normalizeOhlcvFullDedupCarryGroup_(group) {
+  if (!group || !group.key || !group.best) return null;
+  const bestRow = Number(group.best.sheetRow);
+  if (!Number.isFinite(bestRow) || bestRow < 2) return null;
+  return {
+    key: String(group.key),
+    best: {
+      key: String(group.best.key || group.key),
+      row: Array.isArray(group.best.row) ? group.best.row.slice(0, 8) : [],
+      sheetRow: bestRow
+    },
+    deleteRows: (Array.isArray(group.deleteRows) ? group.deleteRows : [])
+      .map(function(row) { return Number(row); })
+      .filter(function(row) { return Number.isFinite(row) && row >= 2; })
+  };
+}
+
+function addOhlcvFullDedupCarryItem_(group, item) {
+  if (!group || !item) return group;
+  if (isBetterOhlcvDuplicateItem_(item, group.best)) {
+    group.deleteRows.push(group.best.sheetRow);
+    group.best = item;
+  } else {
+    group.deleteRows.push(item.sheetRow);
+  }
+  return group;
+}
+
+function finalizeOhlcvFullDedupCarryGroup_(group, deleteRows, stats) {
+  if (!group || !group.deleteRows || group.deleteRows.length === 0) return;
+  stats.duplicateKeys++;
+  group.deleteRows.forEach(function(rowNum) {
+    deleteRows.push(rowNum);
+    if (stats.samples.length < 10) {
+      stats.samples.push({ deletedRow: rowNum, keptRow: group.best.sheetRow, key: group.key });
+    }
+  });
+}
+
+function countSortedRowsBefore_(sortedRowsAsc, rowNum) {
+  let lo = 0;
+  let hi = sortedRowsAsc.length;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (sortedRowsAsc[mid] < rowNum) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+function adjustOhlcvFullDedupCarryGroupAfterDeletes_(group, sortedDeleteRowsAsc) {
+  if (!group || !sortedDeleteRowsAsc || sortedDeleteRowsAsc.length === 0) return group;
+  const adjusted = normalizeOhlcvFullDedupCarryGroup_(group);
+  if (!adjusted) return null;
+  adjusted.best.sheetRow -= countSortedRowsBefore_(sortedDeleteRowsAsc, adjusted.best.sheetRow);
+  adjusted.deleteRows = adjusted.deleteRows
+    .map(function(rowNum) { return rowNum - countSortedRowsBefore_(sortedDeleteRowsAsc, rowNum); })
+    .filter(function(rowNum) { return Number.isFinite(rowNum) && rowNum >= 2; });
+  return adjusted;
+}
+
+function dedupeOhlcvSortedRowCursorBatch_(sheet, state, options) {
+  const opts = options || {};
+  const deadlineMs = Number(opts.deadlineMs || 0);
+  const chunkRows = Math.max(1000, Number(opts.chunkRows) || OHLCV_FULL_DEDUP_CHUNK_ROWS);
+  const lastRow = sheet.getLastRow();
+  let cursor = Math.max(2, Number(state.cursor) || 2);
+  let carryGroup = normalizeOhlcvFullDedupCarryGroup_(state.carryGroup);
+  const deleteRows = [];
+  const stats = { duplicateKeys: 0, samples: [] };
+  let scannedRows = 0;
+  let chunks = 0;
+  let timedOut = false;
+
+  scanLoop:
+  while (cursor <= lastRow) {
+    if (deadlineMs && deadlineMs - Date.now() < OHLCV_FULL_DEDUP_DELETE_MARGIN_MS) {
+      timedOut = true;
+      break;
+    }
+
+    const count = Math.min(chunkRows, lastRow - cursor + 1);
+    const values = sheet.getRange(cursor, 1, count, 8).getValues();
+    chunks++;
+
+    for (let i = 0; i < count; i++) {
+      if (i > 0 && (i % 1000) === 0 && deadlineMs && deadlineMs - Date.now() < OHLCV_FULL_DEDUP_DELETE_MARGIN_MS) {
+        cursor += i;
+        timedOut = true;
+        break scanLoop;
+      }
+
+      const item = makeOhlcvFullDedupCursorItem_(values[i], cursor + i);
+      scannedRows++;
+      if (!item) {
+        finalizeOhlcvFullDedupCarryGroup_(carryGroup, deleteRows, stats);
+        carryGroup = null;
+        continue;
+      }
+
+      if (!carryGroup) {
+        carryGroup = makeOhlcvFullDedupCarryGroup_(item);
+        continue;
+      }
+
+      if (carryGroup.key === item.key) {
+        carryGroup = addOhlcvFullDedupCarryItem_(carryGroup, item);
+        continue;
+      }
+
+      finalizeOhlcvFullDedupCarryGroup_(carryGroup, deleteRows, stats);
+      carryGroup = makeOhlcvFullDedupCarryGroup_(item);
+    }
+
+    cursor += count;
+  }
+
+  const reachedEnd = !timedOut && cursor > lastRow;
+  if (reachedEnd) {
+    finalizeOhlcvFullDedupCarryGroup_(carryGroup, deleteRows, stats);
+    carryGroup = null;
+  }
+
+  const uniqueDeleteRows = Object.keys(deleteRows.reduce(function(map, rowNum) {
+    map[rowNum] = true;
+    return map;
+  }, {})).map(function(rowNum) { return Number(rowNum); });
+
+  if (uniqueDeleteRows.length > 0) {
+    deleteRowsByRowNums_(sheet, uniqueDeleteRows);
+    SpreadsheetApp.flush();
+  }
+
+  let nextCursor = cursor;
+  let nextCarryGroup = carryGroup;
+  if (!reachedEnd && uniqueDeleteRows.length > 0) {
+    const sortedAsc = uniqueDeleteRows.slice().sort(function(a, b) { return a - b; });
+    nextCursor = Math.max(2, cursor - countSortedRowsBefore_(sortedAsc, cursor));
+    nextCarryGroup = adjustOhlcvFullDedupCarryGroupAfterDeletes_(carryGroup, sortedAsc);
+  }
+
+  const result = {
+    reachedEnd: reachedEnd,
+    timedOut: timedOut,
+    nextCursor: nextCursor,
+    carryGroup: nextCarryGroup,
+    scannedRows: scannedRows,
+    chunks: chunks,
+    duplicateKeys: stats.duplicateKeys,
+    duplicateRows: uniqueDeleteRows.length,
+    deletedRows: uniqueDeleteRows.length,
+    pendingCarryDuplicateRows: nextCarryGroup && nextCarryGroup.deleteRows ? nextCarryGroup.deleteRows.length : 0,
+    lastRow: sheet.getLastRow(),
+    samples: stats.samples
+  };
+
+  writeProcessLog_("OHLCV", "Sorted row-cursor duplicate cleanup batch finished.", result);
+  return result;
+}
+
+function cleanupOhlcvDuplicatesNow() {
+  deleteTriggersByHandler_(OHLCV_FULL_DEDUP_RESUME_HANDLER);
+  scheduleCleanupOhlcvDuplicatesRetry_(OHLCV_FULL_DEDUP_SAFETY_AFTER_MS, { replace: false });
+
+  let lock = null;
+  try {
+    lock = LockService.getScriptLock();
+    if (!lock.tryLock(30 * 1000)) {
+      scheduleCleanupOhlcvDuplicatesRetry_(OHLCV_FULL_DEDUP_LOCK_RETRY_AFTER_MS);
+      writeProcessLog_("OHLCV", "Sorted row-cursor duplicate cleanup lock busy; retry scheduled.", {});
+      return { skipped: true, reason: "lock_busy" };
+    }
+
+    const startTime = Date.now();
+    const app = getAppConfig_();
+    const ss = SpreadsheetApp.openById(app.spreadsheetId);
+    const sheet = ss.getSheetByName(CONFIG.OHLCV_SHEET);
+    if (!sheet) throw new Error("ohlcv_4h not found");
+
+    let state = loadFullDedupState_();
+    if (!state || state.mode !== "sorted_row_cursor" || !Number.isFinite(Number(state.cursor)) || Number(state.cursor) < 2) {
+      state = {
+        mode: "sorted_row_cursor",
+        cursor: 2,
+        carryGroup: null,
+        totalDeleted: 0,
+        totalScanned: 0,
+        chunks: 0,
+        startedAt: new Date().toISOString()
+      };
+      const sortResult = sortOhlcvSheetByTimestampSafe_(sheet);
+      state.sortBeforeDedupe = sortResult;
+      if (sortResult.skipped) {
+        clearFullDedupState_();
+        deleteTriggersByHandler_(OHLCV_FULL_DEDUP_RESUME_HANDLER);
+        writeProcessLog_("OHLCV", "Sorted row-cursor duplicate cleanup stopped because OHLCV sort was skipped.", sortResult);
+        return { skipped: true, reason: "sort_skipped", sortResult: sortResult };
+      }
+      writeProcessLog_("OHLCV", "Sorted row-cursor duplicate cleanup initialized.", sortResult);
+      saveFullDedupState_(state);
+    }
+
+    let done = false;
+    while (Date.now() - startTime < OHLCV_FULL_DEDUP_MAX_RUN_MS) {
+      if (OHLCV_FULL_DEDUP_MAX_RUN_MS - (Date.now() - startTime) < OHLCV_FULL_DEDUP_MIN_REMAINING_MS) break;
+
+      const lastRow = sheet.getLastRow();
+      if (lastRow < 2 || Number(state.cursor) > lastRow) {
+        done = true;
+        break;
+      }
+
+      const r = dedupeOhlcvSortedRowCursorBatch_(sheet, state, {
+        deadlineMs: startTime + OHLCV_FULL_DEDUP_MAX_RUN_MS - OHLCV_FULL_DEDUP_DELETE_MARGIN_MS,
+        chunkRows: OHLCV_FULL_DEDUP_CHUNK_ROWS
+      });
+      state.cursor = r.nextCursor;
+      state.carryGroup = r.carryGroup || null;
+      state.totalDeleted = (Number(state.totalDeleted) || 0) + (r.deletedRows || 0);
+      state.totalScanned = (Number(state.totalScanned) || 0) + (r.scannedRows || 0);
+      state.chunks = (Number(state.chunks) || 0) + (r.chunks || 0);
+      state.updatedAt = new Date().toISOString();
+      saveFullDedupState_(state);
+
+      if (r.reachedEnd) {
+        done = true;
+        break;
+      }
+      if (r.timedOut || (r.scannedRows || 0) === 0) break;
+    }
+
+    SpreadsheetApp.flush();
+    const elapsedMs = Date.now() - startTime;
+
+    if (done) {
+      clearFullDedupState_();
+      deleteTriggersByHandler_(OHLCV_FULL_DEDUP_RESUME_HANDLER);
+      const summary = {
+        done: true,
+        mode: "sorted_row_cursor",
+        totalDeleted: state.totalDeleted,
+        totalScanned: state.totalScanned,
+        chunks: state.chunks,
+        elapsedMs: elapsedMs
+      };
+      console.log("[cleanupOhlcvDuplicatesNow] " + JSON.stringify(summary));
+      writeProcessLog_("OHLCV", "Sorted row-cursor duplicate cleanup completed.", summary);
+      return summary;
+    }
+
+    scheduleCleanupOhlcvDuplicatesRetry_(OHLCV_FULL_DEDUP_RESUME_AFTER_MS);
+    const summary = {
+      done: false,
+      mode: "sorted_row_cursor",
+      cursor: state.cursor,
+      totalDeleted: state.totalDeleted,
+      totalScanned: state.totalScanned,
+      chunks: state.chunks,
+      pendingCarryDuplicateRows: state.carryGroup && state.carryGroup.deleteRows ? state.carryGroup.deleteRows.length : 0,
+      elapsedMs: elapsedMs
+    };
+    console.log("[cleanupOhlcvDuplicatesNow] " + JSON.stringify(summary));
+    writeProcessLog_("OHLCV", "Sorted row-cursor duplicate cleanup paused and will resume.", summary);
+    return summary;
+  } catch (e) {
+    try {
+      scheduleCleanupOhlcvDuplicatesRetry_(OHLCV_FULL_DEDUP_ERROR_RETRY_AFTER_MS);
+      writeProcessLog_("OHLCV", "Sorted row-cursor duplicate cleanup error; retry scheduled.", { error: String(e) });
+    } catch (scheduleErr) {}
+    throw e;
+  } finally {
+    if (lock && lock.hasLock()) lock.releaseLock();
+  }
+}
+
 // cleanupOhlcvDuplicatesNow に処理を委譲する。
+// Resume handler for cleanupOhlcvDuplicatesNow.
 function resumeCleanupOhlcvDuplicates() {
   deleteTriggersByHandler_(OHLCV_FULL_DEDUP_RESUME_HANDLER);
   return cleanupOhlcvDuplicatesNow();
