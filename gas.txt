@@ -1843,11 +1843,14 @@ const OHLCV_FINAL_DEDUPE_SCAN_ROWS = 60000;
 // 全行重複削除（cleanupOhlcvDuplicatesNow）の resume 用状態キーとチャンク設定。
 // 末尾N行に限定せずシート全体を前方カーソルで走査し、6分上限を跨いで完走する。
 const OHLCV_FULL_DEDUP_STATE_KEY = "OHLCV_FULL_DEDUP_STATE_V1";
-const OHLCV_FULL_DEDUP_CHUNK_ROWS = 20000;
-const OHLCV_FULL_DEDUP_MAX_RUN_MS = 4 * 60 * 1000;
+const OHLCV_FULL_DEDUP_CHUNK_ROWS = 3000;
+const OHLCV_FULL_DEDUP_MAX_RUN_MS = 150 * 1000;
+const OHLCV_FULL_DEDUP_MIN_REMAINING_MS = 45000;
+const OHLCV_FULL_DEDUP_DELETE_MARGIN_MS = 20000;
+const OHLCV_FULL_DEDUP_MAX_DELETE_ROWS_PER_CHUNK = 400;
 const OHLCV_FULL_DEDUP_RESUME_HANDLER = "resumeCleanupOhlcvDuplicates";
-const OHLCV_FULL_DEDUP_SAFETY_AFTER_MS = 7 * 60 * 1000;
-const OHLCV_FULL_DEDUP_RESUME_AFTER_MS = 30 * 1000;
+const OHLCV_FULL_DEDUP_SAFETY_AFTER_MS = 5 * 60 * 1000;
+const OHLCV_FULL_DEDUP_RESUME_AFTER_MS = 20 * 1000;
 const OHLCV_FULL_DEDUP_LOCK_RETRY_AFTER_MS = 60 * 1000;
 const OHLCV_FULL_DEDUP_ERROR_RETRY_AFTER_MS = 2 * 60 * 1000;
 const OHLCV_SAFE_SORT_MAX_ROWS = 300000;
@@ -10956,15 +10959,26 @@ function cleanupOhlcvDuplicatesNow() {
 
     let done = false;
     while (Date.now() - startTime < OHLCV_FULL_DEDUP_MAX_RUN_MS) {
+      if (OHLCV_FULL_DEDUP_MAX_RUN_MS - (Date.now() - startTime) < OHLCV_FULL_DEDUP_MIN_REMAINING_MS) {
+        break;
+      }
+
       const lastRow = sheet.getLastRow();
       if (lastRow < 2 || state.cursor > lastRow) { done = true; break; }
 
-      const r = dedupeOhlcvFullSheetChunk_(sheet, state.cursor, lastRow);
+      const r = dedupeOhlcvFullSheetChunk_(sheet, state.cursor, lastRow, {
+        deadlineMs: startTime + OHLCV_FULL_DEDUP_MAX_RUN_MS - OHLCV_FULL_DEDUP_DELETE_MARGIN_MS,
+        maxDeleteRows: OHLCV_FULL_DEDUP_MAX_DELETE_ROWS_PER_CHUNK
+      });
       state.cursor = r.nextCursor;
       state.totalDeleted += r.deletedRows;
       state.totalScanned += r.processedRows;
       state.chunks += 1;
 
+      if (r.partialDelete) {
+        saveFullDedupState_(state);
+        break;
+      }
       if (r.reachedEnd) { done = true; break; }
       saveFullDedupState_(state);
     }
@@ -11009,7 +11023,10 @@ function cleanupOhlcvDuplicatesNow() {
 // 1 チャンク分の全行重複削除。cursor から最大 OHLCV_FULL_DEDUP_CHUNK_ROWS 行を読み、
 // 同一 timestamp+symbol の重複を削除する。シート末尾未到達のチャンクでは、末尾で分断
 // されている可能性のある「最後の日付グループ」を処理対象から外して次回に持ち越す。
-function dedupeOhlcvFullSheetChunk_(sheet, cursor, lastRow) {
+function dedupeOhlcvFullSheetChunk_(sheet, cursor, lastRow, options) {
+  const opts = options || {};
+  const deadlineMs = Number(opts.deadlineMs || 0);
+  const maxDeleteRows = Math.max(1, Number(opts.maxDeleteRows) || OHLCV_FULL_DEDUP_MAX_DELETE_ROWS_PER_CHUNK);
   const count = Math.min(OHLCV_FULL_DEDUP_CHUNK_ROWS, lastRow - cursor + 1);
   const values = sheet.getRange(cursor, 1, count, 8).getValues();
   const reachedEnd = (cursor + count - 1) >= lastRow;
@@ -11050,15 +11067,32 @@ function dedupeOhlcvFullSheetChunk_(sheet, cursor, lastRow) {
   }
 
   let deleted = 0;
+  let partialDelete = false;
   if (deleteRows.length > 0) {
     deleteRows.sort(function(a, b) { return b - a; });
     let i = 0;
     while (i < deleteRows.length) {
+      if (deadlineMs && Date.now() > deadlineMs) {
+        partialDelete = true;
+        break;
+      }
+
       const groupStart = deleteRows[i];
       let n = 1;
       while (i + n < deleteRows.length && deleteRows[i + n] === groupStart - n) n++;
-      sheet.deleteRows(groupStart - n + 1, n);
-      deleted += n;
+
+      const remainingDeleteCapacity = maxDeleteRows - deleted;
+      if (remainingDeleteCapacity <= 0) {
+        partialDelete = true;
+        break;
+      }
+
+      const deleteCount = Math.min(n, remainingDeleteCapacity);
+      if (deleteCount < n) partialDelete = true;
+
+      sheet.deleteRows(groupStart - deleteCount + 1, deleteCount);
+      deleted += deleteCount;
+      if (partialDelete) break;
       i += n;
     }
     SpreadsheetApp.flush();
@@ -11066,8 +11100,16 @@ function dedupeOhlcvFullSheetChunk_(sheet, cursor, lastRow) {
 
   // 削除した行はすべて [cursor, cursor+processCount-1] 内にあるため、次の未処理行は
   // (cursor + processCount) から deleted 行ぶん前にシフトする。
-  const nextCursor = cursor + processCount - deleted;
-  return { nextCursor: nextCursor, deletedRows: deleted, processedRows: processCount, reachedEnd: reachedEnd };
+  const nextCursor = partialDelete ? cursor : cursor + processCount - deleted;
+  return {
+    nextCursor: nextCursor,
+    deletedRows: deleted,
+    processedRows: partialDelete ? 0 : processCount,
+    scannedRows: processCount,
+    duplicateRows: deleteRows.length,
+    partialDelete: partialDelete,
+    reachedEnd: reachedEnd && !partialDelete
+  };
 }
 
 // A 列の生値（Date / "yyyy/MM/dd ..." 文字列）から高速に yyyy-MM-dd を得る。

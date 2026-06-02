@@ -638,6 +638,7 @@ GASの実行上限は約6分。長時間処理は必ず再開可能にする。
 - A列 timestamp は文字列 `yyyy/MM/dd HH:mm` として書き、readbackでは `Date`、シリアル値、文字列のすべてを正規化して判定する。
 - GAP修復では、readbackで実際に保存確認できたOHLCV行だけを補填成功として数える。A列timestamp保存失敗が出た場合は再開トリガーを増やさず停止する。
 - 日次チェーンの追記後はGAP修復前に `dedupeAndSortOhlcv_()` を呼ばず、timestamp readback検証と軽量ガードに留める。最終整理はGAP修復完了後の `resumeOhlcvPostRepairCleanup` で小分けに行う。
+- `cleanupOhlcvDuplicatesNow()` は6分上限に近づけない。小チャンク・短時間実行・削除数上限で分割し、未完了分は `resumeCleanupOhlcvDuplicates` に自動継続させる。
 - GAP修復・監査はA列 timestamp 昇順を前提に末尾から直近分だけを読む。
 - `getRange(2, 1, lastRow - 1, ...)` の全行読みをGAP系に追加しない。
 - 株式分割調整で `ohlcv_4h` を更新する場合は、C列 `symbol` を `TextFinder` などで絞って対象銘柄の行だけ処理する。
