@@ -11915,6 +11915,7 @@ function cleanupOhlcvDuplicatesNow() {
     if (done) {
       clearFullDedupState_();
       PropertiesService.getScriptProperties().setProperty(OHLCV_FULL_DEDUP_DONE_KEY, new Date().toISOString());
+      deleteTriggersByHandler_(OHLCV_FULL_DEDUP_RESUME_HANDLER);
       const summary = {
         done: true,
         mode: "sorted_row_cursor",
@@ -11958,8 +11959,9 @@ function cleanupOhlcvDuplicatesNow() {
 function resumeCleanupOhlcvDuplicates() {
   const doneAt = PropertiesService.getScriptProperties().getProperty(OHLCV_FULL_DEDUP_DONE_KEY);
   if (doneAt) {
-    writeProcessLog_("OHLCV", "Sorted row-cursor duplicate cleanup stale resume skipped because cleanup is already done.", { doneAt: doneAt });
-    return { skipped: true, reason: "stale_resume_already_done", doneAt: doneAt };
+    deleteTriggersByHandler_(OHLCV_FULL_DEDUP_RESUME_HANDLER);
+    writeProcessLog_("OHLCV", "Sorted row-cursor duplicate cleanup stale resume skipped; cleanup is already done and stale triggers were removed.", { doneAt: doneAt });
+    return { skipped: true, reason: "stale_resume_already_done", doneAt: doneAt, staleTriggersRemoved: true };
   }
   return cleanupOhlcvDuplicatesNow();
 }
