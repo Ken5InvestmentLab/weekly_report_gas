@@ -1845,6 +1845,11 @@ const OHLCV_FINAL_DEDUPE_SCAN_ROWS = 60000;
 const OHLCV_FULL_DEDUP_STATE_KEY = "OHLCV_FULL_DEDUP_STATE_V1";
 const OHLCV_FULL_DEDUP_CHUNK_ROWS = 20000;
 const OHLCV_FULL_DEDUP_MAX_RUN_MS = 4 * 60 * 1000;
+const OHLCV_FULL_DEDUP_RESUME_HANDLER = "resumeCleanupOhlcvDuplicates";
+const OHLCV_FULL_DEDUP_SAFETY_AFTER_MS = 7 * 60 * 1000;
+const OHLCV_FULL_DEDUP_RESUME_AFTER_MS = 30 * 1000;
+const OHLCV_FULL_DEDUP_LOCK_RETRY_AFTER_MS = 60 * 1000;
+const OHLCV_FULL_DEDUP_ERROR_RETRY_AFTER_MS = 2 * 60 * 1000;
 const OHLCV_SAFE_SORT_MAX_ROWS = 300000;
 const OHLCV_ADJACENT_DEDUP_CHUNK_ROWS = 10000;
 const PHASE3_SPLIT_ROW_CHUNK_SIZE = 1000;
@@ -10907,16 +10912,29 @@ function runOhlcvDuplicateCleanupOnlyNow() {
   return cleanupOhlcvDuplicatesNow();
 }
 
+function scheduleCleanupOhlcvDuplicatesRetry_(delayMs, options) {
+  const opts = options || {};
+  if (opts.replace !== false) {
+    deleteTriggersByHandler_(OHLCV_FULL_DEDUP_RESUME_HANDLER);
+  }
+  ScriptApp.newTrigger(OHLCV_FULL_DEDUP_RESUME_HANDLER).timeBased().after(delayMs).create();
+  return {
+    handlerName: OHLCV_FULL_DEDUP_RESUME_HANDLER,
+    delayMs: delayMs
+  };
+}
+
 function cleanupOhlcvDuplicatesNow() {
   // 入口で既存リトライトリガーを掃除（resume 経由でも自分自身でも常に再評価する）
-  deleteTriggersByHandler_("resumeCleanupOhlcvDuplicates");
+  deleteTriggersByHandler_(OHLCV_FULL_DEDUP_RESUME_HANDLER);
+  scheduleCleanupOhlcvDuplicatesRetry_(OHLCV_FULL_DEDUP_SAFETY_AFTER_MS, { replace: false });
 
   let lock = null;
   try {
     lock = LockService.getScriptLock();
     if (!lock.tryLock(30 * 1000)) {
       // 他処理（16:00 取得など）がロック中。1 分後に再試行
-      ScriptApp.newTrigger("resumeCleanupOhlcvDuplicates").timeBased().after(60 * 1000).create();
+      scheduleCleanupOhlcvDuplicatesRetry_(OHLCV_FULL_DEDUP_LOCK_RETRY_AFTER_MS);
       writeProcessLog_("OHLCV", "全行重複削除: 別処理がロック中。1 分後に自動リトライします。", {});
       return { skipped: true, reason: "lock_busy" };
     }
@@ -10956,6 +10974,7 @@ function cleanupOhlcvDuplicatesNow() {
 
     if (done) {
       clearFullDedupState_();
+      deleteTriggersByHandler_(OHLCV_FULL_DEDUP_RESUME_HANDLER);
       const summary = { done: true, totalDeleted: state.totalDeleted, totalScanned: state.totalScanned, chunks: state.chunks, elapsedMs: elapsedMs };
       console.log("[cleanupOhlcvDuplicatesNow] " + JSON.stringify(summary));
       writeProcessLog_("OHLCV", `全行重複削除: シート全体の重複排除が完了しました（削除 ${state.totalDeleted} 件）。`, summary);
@@ -10964,7 +10983,7 @@ function cleanupOhlcvDuplicatesNow() {
 
     saveFullDedupState_(state);
     // 未完了 → 30 秒後に自動リトライ
-    ScriptApp.newTrigger("resumeCleanupOhlcvDuplicates").timeBased().after(30 * 1000).create();
+    scheduleCleanupOhlcvDuplicatesRetry_(OHLCV_FULL_DEDUP_RESUME_AFTER_MS);
     const summary = { done: false, cursor: state.cursor, totalDeleted: state.totalDeleted, totalScanned: state.totalScanned, chunks: state.chunks, elapsedMs: elapsedMs };
     console.log("[cleanupOhlcvDuplicatesNow] " + JSON.stringify(summary));
     writeProcessLog_(
@@ -10976,7 +10995,7 @@ function cleanupOhlcvDuplicatesNow() {
   } catch (e) {
     // 致命的エラー時も自動リカバリのためリトライ予約
     try {
-      ScriptApp.newTrigger("resumeCleanupOhlcvDuplicates").timeBased().after(2 * 60 * 1000).create();
+      scheduleCleanupOhlcvDuplicatesRetry_(OHLCV_FULL_DEDUP_ERROR_RETRY_AFTER_MS);
       writeProcessLog_("OHLCV", "全行重複削除: エラー発生。2 分後に自動リトライします。", { error: String(e) });
     } catch (scheduleErr) {
       // トリガー予約も失敗 → ユーザーに手動再実行を促す
@@ -11082,7 +11101,7 @@ function clearFullDedupState_() {
 
 // 全行重複削除の進捗・自動リトライトリガーをリセットする（途中停止・やり直し用）。
 function resetCleanupOhlcvDuplicatesState() {
-  deleteTriggersByHandler_("resumeCleanupOhlcvDuplicates");
+  deleteTriggersByHandler_(OHLCV_FULL_DEDUP_RESUME_HANDLER);
   clearFullDedupState_();
   writeProcessLog_("OHLCV", "全行重複削除の状態とトリガーをリセットしました。", {});
   return { ok: true };
@@ -11091,7 +11110,7 @@ function resetCleanupOhlcvDuplicatesState() {
 // 自動リトライトリガー用ハンドラ。CLAUDE.md 規約どおり自分自身のトリガーを冒頭で削除し
 // cleanupOhlcvDuplicatesNow に処理を委譲する。
 function resumeCleanupOhlcvDuplicates() {
-  deleteTriggersByHandler_("resumeCleanupOhlcvDuplicates");
+  deleteTriggersByHandler_(OHLCV_FULL_DEDUP_RESUME_HANDLER);
   return cleanupOhlcvDuplicatesNow();
 }
 
