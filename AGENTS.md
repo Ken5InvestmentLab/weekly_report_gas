@@ -199,6 +199,8 @@ OVERLAP_DAYS = 3
 ## デプロイ・実行方法
 
 - GASプロジェクトは Google Apps Script エディタ上で管理する。
+- ユーザーがGAS/コード変更を指示した通常作業では、ローカル `gas.txt` の変更だけで終えず、既定の反映手順でGAS本体も更新する。
+- Codex automation実行中、特にプレミアム通知workerの実行・検証・投稿作業中は、ユーザーがその場で明示しない限りGAS本体を編集・反映しない。
 - ローカルに clasp を使う場合:
   - `clasp push` でデプロイ
   - `clasp pull` で取得
