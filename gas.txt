@@ -1870,6 +1870,7 @@ const MIDDAY_POSTPROCESS_RESUME_AFTER_MS = 5 * 1000;
 const MIDDAY_DEDUPE_GUARD_MS = 120 * 1000;
 const MIDDAY_FULL_BACKFILL_SYMBOLS_KEY = "OHLCV_MIDDAY_FULL_BACKFILL_SYMBOLS";
 const MIDDAY_HISTORY_COVERAGE_SCAN_MAX_ROWS = 250000;
+const MIDDAY_APPEND_EXISTING_KEY_SCAN_MAX_ROWS = 5000;
 const MIDDAY_HISTORY_GRACE_DAYS = 10;
 const MIDDAY_ROLLBACK_STATE_KEY = "OHLCV_MIDDAY_ROLLBACK_STATE_V1";
 const MIDDAY_ROLLBACK_SYMBOLS_KEY = "OHLCV_MIDDAY_ROLLBACK_SYMBOLS_V1";
@@ -2777,7 +2778,7 @@ function prepareMiddayOhlcvRowsForAppend_(sheet, rows, context) {
   }
 
   const existing = buildExistingOhlcvKeySetForCandidateRows_(sheet, deduped.rows, {
-    maxScanRows: MIDDAY_HISTORY_COVERAGE_SCAN_MAX_ROWS,
+    maxScanRows: MIDDAY_APPEND_EXISTING_KEY_SCAN_MAX_ROWS,
     context: context || "midday_append"
   });
 
@@ -2866,8 +2867,7 @@ function buildExistingOhlcvKeySetForCandidateRows_(sheet, rows, options) {
     scannedRows: 0,
     matchedKeys: 0,
     scanStartRow: 0,
-    scanRows: 0,
-    tailScannedRows: 0
+    scanRows: 0
   };
 
   if (!sheet || lastRow < 2 || targetKeyCount === 0) return { keySet: keySet, stats: stats };
@@ -2900,23 +2900,14 @@ function buildExistingOhlcvKeySetForCandidateRows_(sheet, rows, options) {
   }
 
   if (!scanStartRow || scanRows <= 0) {
-    scanRows = Math.min(maxScanRows, lastRow - 1);
-    scanStartRow = lastRow - scanRows + 1;
-    mode = "tail";
+    stats.mode = mode || "skipped_no_sorted_range";
+    return { keySet: keySet, stats: stats };
   }
 
   addExistingOhlcvKeysFromRange_(sheet, scanStartRow, scanRows, targetKeys, keySet);
 
-  const tailRows = Math.min(OHLCV_APPEND_INTEGRITY_SCAN_ROWS, lastRow - 1);
-  const tailStartRow = lastRow - tailRows + 1;
-  const scanEndRow = scanStartRow + scanRows - 1;
-  if (tailRows > 0 && (tailStartRow < scanStartRow || tailStartRow > scanEndRow)) {
-    addExistingOhlcvKeysFromRange_(sheet, tailStartRow, tailRows, targetKeys, keySet);
-    stats.tailScannedRows = tailRows;
-  }
-
   stats.mode = mode;
-  stats.scannedRows = scanRows + (stats.tailScannedRows || 0);
+  stats.scannedRows = scanRows;
   stats.scanStartRow = scanStartRow;
   stats.scanRows = scanRows;
   stats.matchedKeys = Object.keys(keySet).length;

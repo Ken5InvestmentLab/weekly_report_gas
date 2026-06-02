@@ -400,7 +400,7 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 - fetch終端は当日AM分まで。
 - 当日PM行や14:00以降のYahoo足、15:30終値スナップショットは保存しない。
 - 追記後はtimestamp readback検証と軽量な不正timestamp掃除を行うが、GAP修復前の重複整理はしない。
-- MIDDAY追記時は、既存の `timestamp + symbol` と同じ行を書き込まない。既知の `lastTs` 以下の取得結果を捨て、追記直前にも既存キーを確認してから `appendRowsToSheet_` へ渡す。
+- MIDDAY追記時は、既存の `timestamp + symbol` と同じ行を書き込まない。既知の `lastTs` 以下の取得結果を捨て、追記直前の既存キー確認はA列ソート前提の日付範囲だけを軽く読む。ソート崩れで漏れた重複は後段の重複削除に任せる。
 - 13:30で `alerts_raw` から出来高を転記したAM行は `MIDDAY_LOCKED_yyyy-mm-dd` として保存し、後続処理では保護する。
 - 13:30再開時は毎回末尾12,000行の不正timestamp掃除を走らせない。初回入口の軽量掃除と `appendRowsToSheet_` 直後の読み返し削除で吸収する。
 - 13:30完了後の広めのtimestamp後処理は `postprocessMiddayOhlcv` に分離し、`OHLCV_MIDDAY_POSTPROCESS_STATE_V1` で末尾から小分け再開する。一括30,000行スキャンへ戻さない。
