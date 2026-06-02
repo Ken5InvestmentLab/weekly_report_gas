@@ -1846,6 +1846,7 @@ const OHLCV_FULL_DEDUP_STATE_KEY = "OHLCV_FULL_DEDUP_STATE_V1";
 const OHLCV_FULL_DEDUP_CHUNK_ROWS = 20000;
 const OHLCV_FULL_DEDUP_MAX_RUN_MS = 4 * 60 * 1000;
 const OHLCV_SAFE_SORT_MAX_ROWS = 300000;
+const OHLCV_ADJACENT_DEDUP_CHUNK_ROWS = 10000;
 const PHASE3_SPLIT_ROW_CHUNK_SIZE = 1000;
 const OHLCV_TRACE_PROP_KEY = "OHLCV_TRACE_LAST";
 const OHLCV_MANUAL_BUSINESS_DATE_KEY = "OHLCV_MANUAL_BUSINESS_DATE";
@@ -7760,15 +7761,20 @@ function dedupeAndSortOhlcv_(sheet) {
   const afterCleanup = { deletedRows: 0, convertedRows: 0 };
 
   const sortResult = sortOhlcvSheetByTimestampSafe_(sheet);
+  const adjacentCleanup = sortResult.skipped
+    ? { deletedRows: 0, skipped: true, reason: sortResult.reason || "sort_skipped" }
+    : deleteAdjacentOhlcvDuplicatesInSortedSheet_(sheet, { context: "dedupeAndSortOhlcv_" });
 
   return {
     invalidDeletedRows: invalidCleanup.deletedRows || 0,
     invalidConvertedRows: invalidCleanup.convertedRows || 0,
     duplicateDeletedRows: duplicateCleanup.deletedRows || 0,
+    adjacentDuplicateDeletedRows: adjacentCleanup.deletedRows || 0,
     afterInvalidDeletedRows: afterCleanup.deletedRows || 0,
     afterInvalidConvertedRows: afterCleanup.convertedRows || 0,
     sortedRows: sortResult.sortedRows || 0,
-    sortSkipped: sortResult.skipped || false
+    sortSkipped: sortResult.skipped || false,
+    adjacentDedupeSkipped: adjacentCleanup.skipped || false
   };
 }
 
@@ -7794,6 +7800,108 @@ function sortOhlcvSheetByTimestampSafe_(sheet) {
   SpreadsheetApp.flush();
 
   return { sortedRows: dataRows, skipped: false };
+}
+
+function makeOhlcvDuplicateItem_(keyRow, volumeValue, sheetRow) {
+  const ts = normalizeOhlcvTimestamp_(keyRow && keyRow.length ? keyRow[0] : null);
+  const symbol = String(keyRow && keyRow.length > 2 ? keyRow[2] || "" : "").trim();
+  if (!ts || !symbol) return null;
+
+  return {
+    key: formatOhlcvTimestampTextForSheet_(ts) + "|" + symbol,
+    row: [
+      keyRow[0],
+      keyRow.length > 1 ? keyRow[1] : "",
+      symbol,
+      null,
+      null,
+      null,
+      null,
+      volumeValue
+    ],
+    sheetRow: sheetRow
+  };
+}
+
+function isBetterOhlcvDuplicateItem_(candidate, current) {
+  const cmp = compareOhlcvDuplicatePriority_(candidate.row, current.row);
+  return cmp < 0 || (cmp === 0 && candidate.sheetRow > current.sheetRow);
+}
+
+function deleteAdjacentOhlcvDuplicatesInSortedSheet_(sheet, options) {
+  if (!sheet) return { deletedRows: 0, skipped: true, reason: "missing_sheet" };
+
+  const opts = options || {};
+  const lastRow = sheet.getLastRow();
+  if (lastRow <= 2) return { deletedRows: 0, scannedRows: Math.max(0, lastRow - 1), duplicateRows: 0 };
+
+  const chunkRows = Math.max(1000, Number(opts.chunkRows) || OHLCV_ADJACENT_DEDUP_CHUNK_ROWS);
+  const deadlineMs = Number(opts.deadlineMs) || 0;
+  const deleteRows = [];
+  const duplicateKeyMap = {};
+  const samples = [];
+  let previous = null;
+  let scannedRows = 0;
+  let timedOut = false;
+
+  for (let row = 2; row <= lastRow; row += chunkRows) {
+    if (deadlineMs && Date.now() > deadlineMs - 10000) {
+      timedOut = true;
+      break;
+    }
+
+    const numRows = Math.min(chunkRows, lastRow - row + 1);
+    const keyRows = sheet.getRange(row, 1, numRows, 3).getValues();
+    const volumeRows = sheet.getRange(row, 8, numRows, 1).getValues();
+
+    for (let i = 0; i < numRows; i++) {
+      const sheetRow = row + i;
+      const item = makeOhlcvDuplicateItem_(keyRows[i], volumeRows[i][0], sheetRow);
+      scannedRows++;
+
+      if (!item) {
+        previous = null;
+        continue;
+      }
+
+      if (previous && previous.key === item.key) {
+        duplicateKeyMap[item.key] = true;
+
+        if (isBetterOhlcvDuplicateItem_(item, previous)) {
+          deleteRows.push(previous.sheetRow);
+          if (samples.length < 10) samples.push({ deletedRow: previous.sheetRow, keptRow: item.sheetRow, key: item.key });
+          previous = item;
+        } else {
+          deleteRows.push(item.sheetRow);
+          if (samples.length < 10) samples.push({ deletedRow: item.sheetRow, keptRow: previous.sheetRow, key: item.key });
+        }
+        continue;
+      }
+
+      previous = item;
+    }
+  }
+
+  if (deleteRows.length > 0) {
+    deleteRowsByRowNums_(sheet, deleteRows);
+    SpreadsheetApp.flush();
+  }
+
+  const result = {
+    context: opts.context || "",
+    scannedRows: scannedRows,
+    duplicateKeys: Object.keys(duplicateKeyMap).length,
+    duplicateRows: deleteRows.length,
+    deletedRows: deleteRows.length,
+    timedOut: timedOut,
+    samples: samples
+  };
+
+  if (deleteRows.length > 0 || timedOut) {
+    writeProcessLog_("OHLCV", "Sorted OHLCV adjacent duplicate cleanup finished.", result);
+  }
+
+  return result;
 }
 
 function compareOhlcvDuplicatePriority_(a, b) {
@@ -10564,6 +10672,9 @@ function cleanupOhlcvDuplicatesNow() {
     let state = loadFullDedupState_();
     if (!state || !Number.isFinite(Number(state.cursor)) || state.cursor < 2) {
       state = { cursor: 2, totalDeleted: 0, totalScanned: 0, chunks: 0, startedAt: new Date().toISOString() };
+      const sortResult = sortOhlcvSheetByTimestampSafe_(sheet);
+      state.sortBeforeDedupe = sortResult;
+      writeProcessLog_("OHLCV", "Full OHLCV duplicate cleanup sorted the sheet before cursor scan.", sortResult);
     }
 
     let done = false;
@@ -11560,6 +11671,9 @@ function runOhlcvPostRepairCleanup_() {
         state.totals.sortAttempted = !!r.attempted;
         state.totals.sortSkipped = !!r.skipped;
         state.totals.sortResult = r;
+        if (r.adjacentDuplicateCleanup) {
+          state.totals.duplicateDeletedRows += r.adjacentDuplicateCleanup.deletedRows || 0;
+        }
         state.step = "DONE";
         state.updatedAt = new Date().toISOString();
         saveOhlcvPostRepairCleanupState_(state);
@@ -12734,6 +12848,11 @@ function tryOhlcvPostRepairSortOnce_(sheet) {
 
   const result = sortOhlcvSheetByTimestampSafe_(sheet);
   result.attempted = true;
+  if (!result.skipped) {
+    result.adjacentDuplicateCleanup = deleteAdjacentOhlcvDuplicatesInSortedSheet_(sheet, {
+      context: "tryOhlcvPostRepairSortOnce_"
+    });
+  }
   return result;
 }
 
