@@ -11243,7 +11243,7 @@ function runOhlcvDuplicateCleanupOnlyNow() {
 
 function scheduleCleanupOhlcvDuplicatesRetry_(delayMs, options) {
   const opts = options || {};
-  if (opts.replace === true) {
+  if (opts.replace !== false) {
     deleteTriggersByHandler_(OHLCV_FULL_DEDUP_RESUME_HANDLER);
   }
   ScriptApp.newTrigger(OHLCV_FULL_DEDUP_RESUME_HANDLER).timeBased().after(delayMs).create();
@@ -11256,7 +11256,7 @@ function scheduleCleanupOhlcvDuplicatesRetry_(delayMs, options) {
 function cleanupOhlcvDuplicatesNow() {
   // 入口で既存リトライトリガーを掃除（resume 経由でも自分自身でも常に再評価する）
   deleteTriggersByHandler_(OHLCV_FULL_DEDUP_RESUME_HANDLER);
-  scheduleCleanupOhlcvDuplicatesRetry_(OHLCV_FULL_DEDUP_SAFETY_AFTER_MS, { replace: false });
+  scheduleCleanupOhlcvDuplicatesRetry_(OHLCV_FULL_DEDUP_SAFETY_AFTER_MS);
 
   let lock = null;
   try {
@@ -11476,6 +11476,14 @@ function resetCleanupOhlcvDuplicatesState() {
   return { ok: true };
 }
 
+function cleanupOhlcvDuplicateResumeTriggersOnly() {
+  deleteTriggersByHandler_(OHLCV_FULL_DEDUP_RESUME_HANDLER);
+  writeProcessLog_("OHLCV", "全行重複削除の再開トリガーだけを削除しました。状態は保持しています。", {
+    handlerName: OHLCV_FULL_DEDUP_RESUME_HANDLER
+  });
+  return { ok: true, handlerName: OHLCV_FULL_DEDUP_RESUME_HANDLER };
+}
+
 function jstDayKeyToDateKey_(dayKey) {
   const n = Number(dayKey);
   if (!Number.isFinite(n)) return "";
@@ -11500,7 +11508,7 @@ function getOhlcvSheetDateBounds_(sheet) {
 
 function cleanupOhlcvDuplicatesNow() {
   deleteTriggersByHandler_(OHLCV_FULL_DEDUP_RESUME_HANDLER);
-  scheduleCleanupOhlcvDuplicatesRetry_(OHLCV_FULL_DEDUP_SAFETY_AFTER_MS, { replace: false });
+  scheduleCleanupOhlcvDuplicatesRetry_(OHLCV_FULL_DEDUP_SAFETY_AFTER_MS);
 
   let lock = null;
   try {
@@ -11840,7 +11848,7 @@ function cleanupOhlcvDuplicatesNow() {
       return { skipped: true, reason: "lock_busy", waitMs: lockBusySummary.waitMs, retryAfterMs: lockBusySummary.retryAfterMs };
     }
 
-    scheduleCleanupOhlcvDuplicatesRetry_(OHLCV_FULL_DEDUP_SAFETY_AFTER_MS, { replace: false });
+    scheduleCleanupOhlcvDuplicatesRetry_(OHLCV_FULL_DEDUP_SAFETY_AFTER_MS);
 
     const startTime = Date.now();
     const app = getAppConfig_();
