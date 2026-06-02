@@ -2457,14 +2457,16 @@ return {
   try {
     const intraRes = responses[meta.intraIdx];
 
+const knownLastTs = meta.fullBackfill ? null : (lastTsMap[meta.symbol] || null);
 const result = parseIntraResponse_(meta.symbol, intraRes, null, null, {
   todayKeyForMaxAmVolume: todayKey
 });
 const validRows = applyPhase1ResultRows_(meta.symbol, result, refreshId, lastTsMap);
 const filteredRows = filterMiddayOhlcvRows_(validRows, todayKey);
+const newRows = filterMiddayRowsAfterKnownLastTs_(meta.symbol, filteredRows, knownLastTs, "fetchOHLCVForNewAlertsMidday");
 
 // alerts_raw J列 volume で、該当シグナル足のvolumeだけ上書きする
-const rawVolumeApplied = applyRawAlertVolumesToOhlcvRows_(filteredRows, rawAlertVolumeMap);
+const rawVolumeApplied = applyRawAlertVolumesToOhlcvRows_(newRows, rawAlertVolumeMap);
 const finalRows = rawVolumeApplied.rows;
 
 if (rawVolumeApplied.overridden > 0) {
@@ -2645,19 +2647,281 @@ function filterMiddayOhlcvRows_(rows, todayKey) {
   return out;
 }
 
+function filterMiddayRowsAfterKnownLastTs_(symbol, rows, knownLastTs, context) {
+  if (!rows || rows.length === 0) return [];
+
+  const cutoff = Number(knownLastTs || 0);
+  if (!Number.isFinite(cutoff) || cutoff <= 0) return rows;
+
+  const out = [];
+  const samples = [];
+  let skipped = 0;
+
+  rows.forEach((row, index) => {
+    const ts = normalizeOhlcvTimestamp_(row && row.length ? row[0] : null);
+    if (!ts || ts.getTime() <= cutoff) {
+      skipped++;
+      if (samples.length < 5) {
+        samples.push({
+          index: index,
+          timestamp: ts ? Utilities.formatDate(ts, CONFIG.TIMEZONE, "yyyy/MM/dd HH:mm") : "",
+          symbol: String(symbol || "")
+        });
+      }
+      return;
+    }
+    out.push(row);
+  });
+
+  if (skipped > 0) {
+    writeProcessLog_("OHLCV-AM", "MIDDAY append skipped rows at or before known last timestamp.", {
+      context: context || "",
+      symbol: String(symbol || ""),
+      knownLastTimestamp: Utilities.formatDate(new Date(cutoff), CONFIG.TIMEZONE, "yyyy/MM/dd HH:mm"),
+      inputRows: rows.length,
+      skippedRows: skipped,
+      outputRows: out.length,
+      samples: samples
+    });
+  }
+
+  return out;
+}
+
 function appendAndNormalizeMiddayOhlcvRows_(sheet, rows, context) {
   if (!rows || rows.length === 0) return 0;
 
-  const appended = appendRowsToSheet_(sheet, rows);
+  const prepared = prepareMiddayOhlcvRowsForAppend_(sheet, rows, context);
+  if (prepared.rows.length === 0) {
+    if (prepared.skippedExistingRows > 0 || prepared.skippedDuplicateRows > 0) {
+      writeProcessLog_("OHLCV-AM", "13:30 MIDDAY append skipped because all fetched rows already exist.", {
+        context: context || "",
+        requestedRows: rows.length,
+        skippedExistingRows: prepared.skippedExistingRows,
+        skippedDuplicateRows: prepared.skippedDuplicateRows,
+        existingKeyScan: prepared.existingKeyScan
+      });
+    }
+    return 0;
+  }
+
+  const appended = appendRowsToSheet_(sheet, prepared.rows);
 
   if (appended > 0) {
     writeProcessLog_("OHLCV-AM", "13:30先行取得でOHLCVを追記しました。", {
       context: context || "",
-      appendedRows: appended
+      requestedRows: rows.length,
+      appendedRows: appended,
+      skippedExistingRows: prepared.skippedExistingRows,
+      skippedDuplicateRows: prepared.skippedDuplicateRows,
+      existingKeyScan: prepared.existingKeyScan
     });
   }
 
   return appended;
+}
+
+function makeOhlcvTimestampSymbolKey_(row) {
+  const ts = normalizeOhlcvTimestamp_(row && row.length ? row[0] : null);
+  const symbol = String(row && row.length > 2 ? row[2] || "" : "").trim();
+  if (!ts || !symbol) return "";
+  return formatOhlcvTimestampTextForSheet_(ts) + "|" + symbol;
+}
+
+function dedupeOhlcvRowsForAppendByKey_(rows) {
+  const bestByKey = {};
+  const order = [];
+  let skippedDuplicateRows = 0;
+
+  (rows || []).forEach((row, index) => {
+    const normalized = normalizeOhlcvRowForWrite_(row);
+    if (!normalized) return;
+    const key = makeOhlcvTimestampSymbolKey_(normalized);
+    if (!key) return;
+
+    const item = makeOhlcvDuplicateItem_(
+      [normalized[0], normalized[1], normalized[2]],
+      normalized[7],
+      index + 2
+    );
+    item.fullRow = normalized;
+
+    const current = bestByKey[key];
+    if (!current) {
+      bestByKey[key] = item;
+      order.push(key);
+      return;
+    }
+
+    skippedDuplicateRows++;
+    if (isBetterOhlcvDuplicateItem_(item, current)) {
+      bestByKey[key] = item;
+    }
+  });
+
+  return {
+    rows: order.map(key => bestByKey[key].fullRow),
+    skippedDuplicateRows: skippedDuplicateRows
+  };
+}
+
+function prepareMiddayOhlcvRowsForAppend_(sheet, rows, context) {
+  const deduped = dedupeOhlcvRowsForAppendByKey_(rows);
+  if (deduped.rows.length === 0) {
+    return {
+      rows: [],
+      skippedDuplicateRows: deduped.skippedDuplicateRows,
+      skippedExistingRows: 0,
+      existingKeyScan: { scannedRows: 0 }
+    };
+  }
+
+  const existing = buildExistingOhlcvKeySetForCandidateRows_(sheet, deduped.rows, {
+    maxScanRows: MIDDAY_HISTORY_COVERAGE_SCAN_MAX_ROWS,
+    context: context || "midday_append"
+  });
+
+  const out = [];
+  const samples = [];
+  let skippedExistingRows = 0;
+
+  deduped.rows.forEach(row => {
+    const key = makeOhlcvTimestampSymbolKey_(row);
+    if (key && existing.keySet[key]) {
+      skippedExistingRows++;
+      if (samples.length < 10) {
+        samples.push({ key: key, marker: String(row[1] || ""), volume: row[7] });
+      }
+      return;
+    }
+    out.push(row);
+  });
+
+  if (deduped.skippedDuplicateRows > 0 || skippedExistingRows > 0) {
+    writeProcessLog_("OHLCV-AM", "MIDDAY append duplicate guard filtered rows before writing.", {
+      context: context || "",
+      requestedRows: rows.length,
+      inputValidRows: deduped.rows.length,
+      outputRows: out.length,
+      skippedIncomingDuplicateRows: deduped.skippedDuplicateRows,
+      skippedExistingRows: skippedExistingRows,
+      existingKeyScan: existing.stats,
+      samples: samples
+    });
+  }
+
+  return {
+    rows: out,
+    skippedDuplicateRows: deduped.skippedDuplicateRows,
+    skippedExistingRows: skippedExistingRows,
+    existingKeyScan: existing.stats
+  };
+}
+
+function addExistingOhlcvKeysFromRange_(sheet, startRow, numRows, targetKeys, keySet) {
+  if (!sheet || !targetKeys || !keySet) return 0;
+  const safeStart = Math.max(2, Number(startRow) || 2);
+  const safeRows = Math.max(0, Number(numRows) || 0);
+  if (safeRows <= 0) return 0;
+
+  let matched = 0;
+  const values = sheet.getRange(safeStart, 1, safeRows, 3).getValues();
+  values.forEach(row => {
+    const key = makeOhlcvTimestampSymbolKey_(row);
+    if (!key || !targetKeys[key] || keySet[key]) return;
+    keySet[key] = true;
+    matched++;
+  });
+  return matched;
+}
+
+function buildExistingOhlcvKeySetForCandidateRows_(sheet, rows, options) {
+  const opts = options || {};
+  const keySet = {};
+  const targetKeys = {};
+  const targetDates = {};
+  let minDateKey = "";
+  let maxDateKey = "";
+
+  (rows || []).forEach(row => {
+    const key = makeOhlcvTimestampSymbolKey_(row);
+    if (!key) return;
+    targetKeys[key] = true;
+
+    const ts = normalizeOhlcvTimestamp_(row[0]);
+    if (!ts) return;
+    const dateKey = formatYmd_(ts);
+    targetDates[dateKey] = true;
+    if (!minDateKey || dateKey < minDateKey) minDateKey = dateKey;
+    if (!maxDateKey || dateKey > maxDateKey) maxDateKey = dateKey;
+  });
+
+  const targetKeyCount = Object.keys(targetKeys).length;
+  const lastRow = sheet ? sheet.getLastRow() : 0;
+  const stats = {
+    context: opts.context || "",
+    mode: "none",
+    targetKeys: targetKeyCount,
+    targetDates: Object.keys(targetDates).length,
+    scannedRows: 0,
+    matchedKeys: 0,
+    scanStartRow: 0,
+    scanRows: 0,
+    tailScannedRows: 0
+  };
+
+  if (!sheet || lastRow < 2 || targetKeyCount === 0) return { keySet: keySet, stats: stats };
+
+  const maxScanRows = Math.max(1000, Number(opts.maxScanRows) || MIDDAY_HISTORY_COVERAGE_SCAN_MAX_ROWS);
+  let scanStartRow = 0;
+  let scanRows = 0;
+  let mode = "";
+
+  try {
+    const minDay = toJstDayKeyFromDateStr_(minDateKey);
+    const maxDate = new Date(String(maxDateKey || minDateKey) + "T00:00:00+09:00");
+    const afterMaxDateKey = formatYmd_(new Date(maxDate.getTime() + 24 * 60 * 60 * 1000));
+    const afterMaxDay = toJstDayKeyFromDateStr_(afterMaxDateKey);
+    if (minDay !== null && afterMaxDay !== null) {
+      const startInfo = findFirstOhlcvRowOnOrAfterDayKey_(sheet, minDay, lastRow, null);
+      const endInfo = findFirstOhlcvRowOnOrAfterDayKey_(sheet, afterMaxDay, lastRow, null);
+      if (!startInfo.incomplete && !endInfo.incomplete && startInfo.row <= lastRow) {
+        const endRow = Math.min(lastRow, (endInfo.row || (lastRow + 1)) - 1);
+        const candidateRows = Math.max(0, endRow - startInfo.row + 1);
+        if (candidateRows > 0 && candidateRows <= maxScanRows) {
+          scanStartRow = startInfo.row;
+          scanRows = candidateRows;
+          mode = "sorted_date_range";
+        }
+      }
+    }
+  } catch (e) {
+    mode = "";
+  }
+
+  if (!scanStartRow || scanRows <= 0) {
+    scanRows = Math.min(maxScanRows, lastRow - 1);
+    scanStartRow = lastRow - scanRows + 1;
+    mode = "tail";
+  }
+
+  addExistingOhlcvKeysFromRange_(sheet, scanStartRow, scanRows, targetKeys, keySet);
+
+  const tailRows = Math.min(OHLCV_APPEND_INTEGRITY_SCAN_ROWS, lastRow - 1);
+  const tailStartRow = lastRow - tailRows + 1;
+  const scanEndRow = scanStartRow + scanRows - 1;
+  if (tailRows > 0 && (tailStartRow < scanStartRow || tailStartRow > scanEndRow)) {
+    addExistingOhlcvKeysFromRange_(sheet, tailStartRow, tailRows, targetKeys, keySet);
+    stats.tailScannedRows = tailRows;
+  }
+
+  stats.mode = mode;
+  stats.scannedRows = scanRows + (stats.tailScannedRows || 0);
+  stats.scanStartRow = scanStartRow;
+  stats.scanRows = scanRows;
+  stats.matchedKeys = Object.keys(keySet).length;
+
+  return { keySet: keySet, stats: stats };
 }
 
 function scheduleMiddayOhlcvPostprocess_(options) {
@@ -10648,6 +10912,10 @@ function deleteDuplicateOhlcvRowsRecentFast_(sheet, maxRows, deadlineMs) {
 // シートは A 列 timestamp 昇順前提なので、ある日付の行は必ず連続する。チャンク末尾で
 // 日付グループが分断される場合はその日付ぶんを次回チャンクに持ち越し、同一日付の重複を
 // 取りこぼさないようにする。削除のみ行いソート順は変えない。
+function runOhlcvDuplicateCleanupOnlyNow() {
+  return cleanupOhlcvDuplicatesNow();
+}
+
 function cleanupOhlcvDuplicatesNow() {
   // 入口で既存リトライトリガーを掃除（resume 経由でも自分自身でも常に再評価する）
   deleteTriggersByHandler_("resumeCleanupOhlcvDuplicates");
