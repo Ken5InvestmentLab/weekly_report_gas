@@ -1846,10 +1846,11 @@ const OHLCV_APPEND_GUARD_FALLBACK_TAIL_ROWS = 30000;
 // 全行重複削除（cleanupOhlcvDuplicatesNow）の resume 用状態キーとチャンク設定。
 // 末尾N行に限定せずシート全体を前方カーソルで走査し、6分上限を跨いで完走する。
 const OHLCV_FULL_DEDUP_STATE_KEY = "OHLCV_FULL_DEDUP_STATE_V1";
-const OHLCV_FULL_DEDUP_CHUNK_ROWS = 10000;
-const OHLCV_FULL_DEDUP_MAX_RUN_MS = 150 * 1000;
-const OHLCV_FULL_DEDUP_MIN_REMAINING_MS = 45000;
-const OHLCV_FULL_DEDUP_DELETE_MARGIN_MS = 20000;
+const OHLCV_FULL_DEDUP_DONE_KEY = "OHLCV_FULL_DEDUP_DONE_V1";
+const OHLCV_FULL_DEDUP_CHUNK_ROWS = 1000;
+const OHLCV_FULL_DEDUP_MAX_RUN_MS = 45 * 1000;
+const OHLCV_FULL_DEDUP_MIN_REMAINING_MS = 15000;
+const OHLCV_FULL_DEDUP_DELETE_MARGIN_MS = 10000;
 const OHLCV_FULL_DEDUP_MAX_DELETE_ROWS_PER_CHUNK = 400;
 const OHLCV_FULL_DEDUP_RESUME_HANDLER = "resumeCleanupOhlcvDuplicates";
 const OHLCV_FULL_DEDUP_SAFETY_AFTER_MS = 5 * 60 * 1000;
@@ -11236,12 +11237,13 @@ function deleteDuplicateOhlcvRowsRecentFast_(sheet, maxRows, deadlineMs) {
 // 日付グループが分断される場合はその日付ぶんを次回チャンクに持ち越し、同一日付の重複を
 // 取りこぼさないようにする。削除のみ行いソート順は変えない。
 function runOhlcvDuplicateCleanupOnlyNow() {
+  PropertiesService.getScriptProperties().deleteProperty(OHLCV_FULL_DEDUP_DONE_KEY);
   return cleanupOhlcvDuplicatesNow();
 }
 
 function scheduleCleanupOhlcvDuplicatesRetry_(delayMs, options) {
   const opts = options || {};
-  if (opts.replace !== false) {
+  if (opts.replace === true) {
     deleteTriggersByHandler_(OHLCV_FULL_DEDUP_RESUME_HANDLER);
   }
   ScriptApp.newTrigger(OHLCV_FULL_DEDUP_RESUME_HANDLER).timeBased().after(delayMs).create();
@@ -11469,6 +11471,7 @@ function clearFullDedupState_() {
 function resetCleanupOhlcvDuplicatesState() {
   deleteTriggersByHandler_(OHLCV_FULL_DEDUP_RESUME_HANDLER);
   clearFullDedupState_();
+  PropertiesService.getScriptProperties().deleteProperty(OHLCV_FULL_DEDUP_DONE_KEY);
   writeProcessLog_("OHLCV", "全行重複削除の状態とトリガーをリセットしました。", {});
   return { ok: true };
 }
@@ -11816,7 +11819,6 @@ function cleanupOhlcvDuplicatesNow() {
       return { skipped: true, reason: "lock_busy", waitMs: lockBusySummary.waitMs, retryAfterMs: lockBusySummary.retryAfterMs };
     }
 
-    deleteTriggersByHandler_(OHLCV_FULL_DEDUP_RESUME_HANDLER);
     scheduleCleanupOhlcvDuplicatesRetry_(OHLCV_FULL_DEDUP_SAFETY_AFTER_MS, { replace: false });
 
     const startTime = Date.now();
@@ -11827,6 +11829,7 @@ function cleanupOhlcvDuplicatesNow() {
 
     let state = loadFullDedupState_();
     if (!state || state.mode !== "sorted_row_cursor" || !Number.isFinite(Number(state.cursor)) || Number(state.cursor) < 2) {
+      PropertiesService.getScriptProperties().deleteProperty(OHLCV_FULL_DEDUP_DONE_KEY);
       const previousMode = state && state.mode ? String(state.mode) : "";
       const dataRows = Math.max(0, sheet.getLastRow() - 1);
       state = {
@@ -11859,6 +11862,12 @@ function cleanupOhlcvDuplicatesNow() {
         break;
       }
 
+      writeProcessLog_("OHLCV", "Sorted row-cursor duplicate cleanup batch starting.", {
+        cursor: state.cursor,
+        lastRow: lastRow,
+        chunkRows: OHLCV_FULL_DEDUP_CHUNK_ROWS,
+        remainingMs: OHLCV_FULL_DEDUP_MAX_RUN_MS - (Date.now() - startTime)
+      });
       const r = dedupeOhlcvSortedRowCursorBatch_(sheet, state, {
         deadlineMs: startTime + OHLCV_FULL_DEDUP_MAX_RUN_MS - OHLCV_FULL_DEDUP_DELETE_MARGIN_MS,
         chunkRows: OHLCV_FULL_DEDUP_CHUNK_ROWS
@@ -11883,7 +11892,7 @@ function cleanupOhlcvDuplicatesNow() {
 
     if (done) {
       clearFullDedupState_();
-      deleteTriggersByHandler_(OHLCV_FULL_DEDUP_RESUME_HANDLER);
+      PropertiesService.getScriptProperties().setProperty(OHLCV_FULL_DEDUP_DONE_KEY, new Date().toISOString());
       const summary = {
         done: true,
         mode: "sorted_row_cursor",
@@ -11925,6 +11934,11 @@ function cleanupOhlcvDuplicatesNow() {
 // cleanupOhlcvDuplicatesNow に処理を委譲する。
 // Resume handler for cleanupOhlcvDuplicatesNow.
 function resumeCleanupOhlcvDuplicates() {
+  const doneAt = PropertiesService.getScriptProperties().getProperty(OHLCV_FULL_DEDUP_DONE_KEY);
+  if (doneAt) {
+    writeProcessLog_("OHLCV", "Sorted row-cursor duplicate cleanup stale resume skipped because cleanup is already done.", { doneAt: doneAt });
+    return { skipped: true, reason: "stale_resume_already_done", doneAt: doneAt };
+  }
   return cleanupOhlcvDuplicatesNow();
 }
 
