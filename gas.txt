@@ -1854,7 +1854,8 @@ const OHLCV_FULL_DEDUP_MAX_DELETE_ROWS_PER_CHUNK = 400;
 const OHLCV_FULL_DEDUP_RESUME_HANDLER = "resumeCleanupOhlcvDuplicates";
 const OHLCV_FULL_DEDUP_SAFETY_AFTER_MS = 5 * 60 * 1000;
 const OHLCV_FULL_DEDUP_RESUME_AFTER_MS = 20 * 1000;
-const OHLCV_FULL_DEDUP_LOCK_RETRY_AFTER_MS = 60 * 1000;
+const OHLCV_FULL_DEDUP_LOCK_WAIT_MS = 5 * 1000;
+const OHLCV_FULL_DEDUP_LOCK_RETRY_AFTER_MS = 2 * 60 * 1000;
 const OHLCV_FULL_DEDUP_ERROR_RETRY_AFTER_MS = 2 * 60 * 1000;
 const OHLCV_SAFE_SORT_MAX_ROWS = 300000;
 const OHLCV_ADJACENT_DEDUP_CHUNK_ROWS = 10000;
@@ -11802,17 +11803,21 @@ function dedupeOhlcvSortedRowCursorBatch_(sheet, state, options) {
 }
 
 function cleanupOhlcvDuplicatesNow() {
-  deleteTriggersByHandler_(OHLCV_FULL_DEDUP_RESUME_HANDLER);
-  scheduleCleanupOhlcvDuplicatesRetry_(OHLCV_FULL_DEDUP_SAFETY_AFTER_MS, { replace: false });
-
   let lock = null;
   try {
     lock = LockService.getScriptLock();
-    if (!lock.tryLock(30 * 1000)) {
+    if (!lock.tryLock(OHLCV_FULL_DEDUP_LOCK_WAIT_MS)) {
       scheduleCleanupOhlcvDuplicatesRetry_(OHLCV_FULL_DEDUP_LOCK_RETRY_AFTER_MS);
-      writeProcessLog_("OHLCV", "Sorted row-cursor duplicate cleanup lock busy; retry scheduled.", {});
-      return { skipped: true, reason: "lock_busy" };
+      const lockBusySummary = {
+        waitMs: OHLCV_FULL_DEDUP_LOCK_WAIT_MS,
+        retryAfterMs: OHLCV_FULL_DEDUP_LOCK_RETRY_AFTER_MS
+      };
+      writeProcessLog_("OHLCV", "Sorted row-cursor duplicate cleanup lock busy; retry scheduled.", lockBusySummary);
+      return { skipped: true, reason: "lock_busy", waitMs: lockBusySummary.waitMs, retryAfterMs: lockBusySummary.retryAfterMs };
     }
+
+    deleteTriggersByHandler_(OHLCV_FULL_DEDUP_RESUME_HANDLER);
+    scheduleCleanupOhlcvDuplicatesRetry_(OHLCV_FULL_DEDUP_SAFETY_AFTER_MS, { replace: false });
 
     const startTime = Date.now();
     const app = getAppConfig_();
@@ -11919,7 +11924,6 @@ function cleanupOhlcvDuplicatesNow() {
 // cleanupOhlcvDuplicatesNow に処理を委譲する。
 // Resume handler for cleanupOhlcvDuplicatesNow.
 function resumeCleanupOhlcvDuplicates() {
-  deleteTriggersByHandler_(OHLCV_FULL_DEDUP_RESUME_HANDLER);
   return cleanupOhlcvDuplicatesNow();
 }
 
