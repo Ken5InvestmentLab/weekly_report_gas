@@ -1825,16 +1825,16 @@ const SYMBOL_LIST_KEY = "OHLCV_SYMBOL_LIST";
 const NEW_ALERT_COUNT_KEY = "OHLCV_NEW_ALERT_COUNT";
 const MAIN_FULL_BACKFILL_SYMBOLS_KEY = "OHLCV_FULL_BACKFILL_SYMBOLS";
 const SYNC_INDEX_KEY = "SYNC_ENTRY_PRICE_INDEX";
-const OHLCV_BATCH_SIZE = 10;
+const OHLCV_BATCH_SIZE = 5;
 const OHLCV_BATCH_SLEEP_MS = 300;
-const MIDDAY_OHLCV_BATCH_SIZE = 25;
+const MIDDAY_OHLCV_BATCH_SIZE = 5;
 const MIDDAY_OHLCV_BATCH_SLEEP_MS = 300;
 const PHASE2_ROW_CHUNK_SIZE = 120;
 const PHASE2_SPLIT_BATCH_SIZE = 10;
 const PHASE2_SPLIT_BATCH_SLEEP_MS = 800;
 const FETCH_GUARD_MS = 90000;
 const OHLCV_LOCK_WAIT_MS = 15000;
-const OHLCV_SAFETY_RESUME_AFTER_MS = 3.5 * 60 * 1000;
+const OHLCV_SAFETY_RESUME_AFTER_MS = 6.5 * 60 * 1000;
 const OHLCV_DEFAULT_LOOKBACK_DAYS = 120;
 const OHLCV_LAST_TS_SCAN_CHUNK_ROWS = 5000;
 const OHLCV_LAST_TS_SCAN_MAX_ROWS = 60000;
@@ -1862,6 +1862,7 @@ const OHLCV_SAFE_SORT_MAX_ROWS = 300000;
 const OHLCV_ADJACENT_DEDUP_CHUNK_ROWS = 10000;
 const PHASE3_SPLIT_ROW_CHUNK_SIZE = 1000;
 const OHLCV_TRACE_PROP_KEY = "OHLCV_TRACE_LAST";
+const OHLCV_REPAIR_SYMBOLS_PRESERVE_KEY = "OHLCV_REPAIR_SYMBOLS_PRESERVE_V1";
 const OHLCV_MANUAL_BUSINESS_DATE_KEY = "OHLCV_MANUAL_BUSINESS_DATE";
 const OHLCV_MANUAL_BUSINESS_EXPIRES_KEY = "OHLCV_MANUAL_BUSINESS_EXPIRES_AT";
 const OHLCV_MANUAL_BUSINESS_TTL_MS = 16 * 60 * 60 * 1000;
@@ -1871,6 +1872,10 @@ const MIDDAY_NEW_ALERT_COUNT_KEY = "OHLCV_MIDDAY_NEW_ALERT_COUNT";
 const MIDDAY_LAST_TS_MAP_KEY = "OHLCV_MIDDAY_LAST_TS_MAP";
 const MIDDAY_REFRESH_ID_KEY = "OHLCV_MIDDAY_REFRESH_ID";
 const MIDDAY_RESUME_HANDLER = "resumeOHLCVFetchMidday";
+const MIDDAY_FETCH_INFLIGHT_KEY = "OHLCV_MIDDAY_FETCH_INFLIGHT_V1";
+const MAIN_PHASE1_FETCH_INFLIGHT_KEY = "OHLCV_PHASE1_FETCH_INFLIGHT_V1";
+const OHLCV_FETCH_RETRY_SHRINK_FACTOR = 5;
+const OHLCV_FETCH_SINGLE_SYMBOL_SKIP_ATTEMPTS = 2;
 const MIDDAY_POSTPROCESS_HANDLER = "postprocessMiddayOhlcv";
 const MIDDAY_POSTPROCESS_PENDING_KEY = "OHLCV_MIDDAY_POSTPROCESS_PENDING";
 const MIDDAY_POSTPROCESS_STATE_KEY = "OHLCV_MIDDAY_POSTPROCESS_STATE_V1";
@@ -1916,6 +1921,87 @@ function traceOhlcv_(event, extra) {
 
   try { PropertiesService.getScriptProperties().setProperty(OHLCV_TRACE_PROP_KEY, JSON.stringify(data).slice(0, 8000)); } catch (e) {}
   try { console.log(text); } catch (e) {}
+}
+
+function loadOhlcvFetchInflight_(props, key) {
+  try {
+    const raw = props.getProperty(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    props.deleteProperty(key);
+    return null;
+  }
+}
+
+function planOhlcvFetchBatch_(props, key, cursor, baseBatchSize, symbols, context) {
+  const safeCursor = Math.max(0, Number(cursor) || 0);
+  const safeBase = Math.max(1, Number(baseBatchSize) || 1);
+  const previous = loadOhlcvFetchInflight_(props, key);
+  let attempts = 1;
+  let batchSize = safeBase;
+  let previousTimedOut = false;
+
+  if (previous && Number(previous.cursor) === safeCursor) {
+    previousTimedOut = true;
+    attempts = Math.max(1, Number(previous.attempts) || 1) + 1;
+    const previousBatchSize = Math.max(1, Number(previous.batchSize) || safeBase);
+
+    if (previousBatchSize <= 1 && attempts > OHLCV_FETCH_SINGLE_SYMBOL_SKIP_ATTEMPTS) {
+      return {
+        skip: true,
+        cursor: safeCursor,
+        symbol: symbols && symbols.length > safeCursor ? String(symbols[safeCursor] || "") : "",
+        attempts: attempts,
+        previousBatchSize: previousBatchSize,
+        previousStartedAt: previous.startedAt || "",
+        context: context || ""
+      };
+    }
+
+    batchSize = Math.max(1, Math.ceil(previousBatchSize / OHLCV_FETCH_RETRY_SHRINK_FACTOR));
+  }
+
+  return {
+    skip: false,
+    cursor: safeCursor,
+    batchSize: batchSize,
+    attempts: attempts,
+    previousTimedOut: previousTimedOut,
+    previousStartedAt: previous && previous.startedAt ? previous.startedAt : "",
+    context: context || ""
+  };
+}
+
+function markOhlcvFetchInflight_(props, key, plan, batch, context) {
+  props.setProperty(key, JSON.stringify({
+    cursor: plan.cursor,
+    batchSize: batch.length,
+    attempts: plan.attempts,
+    startedAt: new Date().toISOString(),
+    context: context || "",
+    symbols: (batch || []).map(sym => String(sym || "")).slice(0, 10)
+  }));
+}
+
+function clearOhlcvFetchInflight_(props, key) {
+  props.deleteProperty(key);
+}
+
+function handleOhlcvFetchStuckSymbol_(props, key, stateKey, symbols, cursor, context) {
+  const symbol = symbols && symbols.length > cursor ? String(symbols[cursor] || "").trim() : "";
+  if (symbol) {
+    setOhlcvRepairSymbols_([symbol]);
+    props.setProperty(OHLCV_REPAIR_SYMBOLS_PRESERVE_KEY, "true");
+  }
+  props.setProperty(stateKey, String(cursor + 1));
+  clearOhlcvFetchInflight_(props, key);
+  writeProcessLog_("OHLCV", "OHLCV fetch skipped a repeatedly stuck symbol and moved it to the repair queue.", {
+    context: context || "",
+    cursor: cursor,
+    nextCursor: cursor + 1,
+    symbol: symbol
+  });
+  return symbol;
 }
 
 function logOhlcvRuntime_(event, extra) {
@@ -2348,7 +2434,7 @@ if (symbols.length === 0) {
     });
   }
 
-  for (let i = startIndex; i < symbols.length; i += MIDDAY_OHLCV_BATCH_SIZE) {
+  for (let i = startIndex; i < symbols.length;) {
     const elapsedBeforeBatch = Date.now() - startTime;
 
     if (shouldStopMiddayOhlcvResume_()) {
@@ -2387,8 +2473,25 @@ if (symbols.length === 0) {
       return { ok: true, incomplete: true, nextIndex: i, appendedRows: appendedRowsThisRun };
     }
 
+    const batchPlan = planOhlcvFetchBatch_(props, MIDDAY_FETCH_INFLIGHT_KEY, i, MIDDAY_OHLCV_BATCH_SIZE, symbols, "midday");
+    if (batchPlan.skip) {
+      const skippedSymbol = handleOhlcvFetchStuckSymbol_(props, MIDDAY_FETCH_INFLIGHT_KEY, MIDDAY_STATE_KEY, symbols, i, "midday");
+      props.setProperty(MIDDAY_NEW_ALERT_COUNT_KEY, newAlertCount.toString());
+      props.setProperty(MIDDAY_LAST_TS_MAP_KEY, JSON.stringify(lastTsMap));
+      props.setProperty(MIDDAY_FULL_BACKFILL_SYMBOLS_KEY, JSON.stringify(Array.from(fullBackfillSet)));
+      writeProcessLog_("OHLCV-AM", "13:30先行取得で繰り返し詰まった銘柄をスキップして再開します。", {
+        cursor: i,
+        skippedSymbol: skippedSymbol,
+        attempts: batchPlan.attempts,
+        previousStartedAt: batchPlan.previousStartedAt
+      });
+      scheduleMiddayOhlcvResumeIfAllowed_(10 * 1000);
+      return { ok: true, incomplete: true, reason: "stuck_symbol_skipped", nextIndex: i + 1, skippedSymbol: skippedSymbol };
+    }
+
     const batchStart = Date.now();
-    const batch = symbols.slice(i, Math.min(i + MIDDAY_OHLCV_BATCH_SIZE, symbols.length));
+    const batch = symbols.slice(i, Math.min(i + batchPlan.batchSize, symbols.length));
+    markOhlcvFetchInflight_(props, MIDDAY_FETCH_INFLIGHT_KEY, batchPlan, batch, "midday");
     const requests = [];
     const reqMeta = [];
 
@@ -2430,6 +2533,7 @@ try {
   responses = requests.length > 0 ? UrlFetchApp.fetchAll(requests) : [];
 } catch (e) {
   const message = e && e.message ? String(e.message) : String(e);
+  clearOhlcvFetchInflight_(props, MIDDAY_FETCH_INFLIGHT_KEY);
 
   props.setProperty(MIDDAY_STATE_KEY, i.toString());
   props.setProperty(MIDDAY_NEW_ALERT_COUNT_KEY, newAlertCount.toString());
@@ -2530,14 +2634,19 @@ if (finalRows.length > 0) {
     appendedRowsThisRun += appendedRowsInBatch;
     allFetchedData = [];
 
-    const nextIndex = Math.min(i + MIDDAY_OHLCV_BATCH_SIZE, symbols.length);
+    const nextIndex = Math.min(i + batch.length, symbols.length);
     props.setProperty(MIDDAY_STATE_KEY, String(nextIndex));
     props.setProperty(MIDDAY_NEW_ALERT_COUNT_KEY, newAlertCount.toString());
+    clearOhlcvFetchInflight_(props, MIDDAY_FETCH_INFLIGHT_KEY);
 
     debugLogToSheet_("ohlcv.midday.batch", {
       batchNo: batchNo,
       startIndex: i,
       nextIndex: nextIndex,
+      batchSize: batch.length,
+      plannedBatchSize: batchPlan.batchSize,
+      attempts: batchPlan.attempts,
+      previousTimedOut: batchPlan.previousTimedOut,
       symbolsInBatch: batch.length,
       requestCount: requests.length,
       fetchedRows: fetchedRowsInBatch,
@@ -2550,6 +2659,7 @@ if (finalRows.length > 0) {
     });
 
     Utilities.sleep(MIDDAY_OHLCV_BATCH_SLEEP_MS);
+    i = nextIndex;
   }
 
 const appended = appendedRowsThisRun + appendAndNormalizeMiddayOhlcvRows_(ohlcvSheet, allFetchedData, "complete");
@@ -3448,7 +3558,7 @@ function scheduleMiddayOhlcvResumeIfAllowed_(delayMs) {
 
 function shouldStopMiddayOhlcvResume_() {
   const dateKey = getOhlcvBusinessDateKey_();
-  const stopAt = new Date(`${dateKey}T15:55:00+09:00`).getTime();
+  const stopAt = new Date(`${dateKey}T15:50:00+09:00`).getTime();
   return Date.now() >= stopAt;
 }
 
@@ -4163,6 +4273,7 @@ function clearMiddayOhlcvState_(options) {
   props.deleteProperty(MIDDAY_LAST_TS_MAP_KEY);
   props.deleteProperty(MIDDAY_REFRESH_ID_KEY);
   props.deleteProperty(MIDDAY_FULL_BACKFILL_SYMBOLS_KEY);
+  props.deleteProperty(MIDDAY_FETCH_INFLIGHT_KEY);
 
   if (opts.keepTrigger !== true) deleteTriggersByHandler_(MIDDAY_RESUME_HANDLER);
 }
@@ -4335,7 +4446,7 @@ let allFetchedData = [];
 let phase1AppendedRows = 0;
 let batchNo = 0;
 
-for (let i = startIndex; i < symbols.length; i += OHLCV_BATCH_SIZE) {
+for (let i = startIndex; i < symbols.length;) {
   const elapsedBeforeBatch = Date.now() - startTime;
   if (elapsedBeforeBatch > LIMIT_MS || (LIMIT_MS - elapsedBeforeBatch) < FETCH_GUARD_MS) {
     const appendedOnPause = allFetchedData.length > 0 ? appendRowsToSheet_(ohlcvSheet, allFetchedData, "phase1_pause") : 0;
@@ -4363,8 +4474,25 @@ for (let i = startIndex; i < symbols.length; i += OHLCV_BATCH_SIZE) {
     return;
   }
 
+      const batchPlan = planOhlcvFetchBatch_(props, MAIN_PHASE1_FETCH_INFLIGHT_KEY, i, OHLCV_BATCH_SIZE, symbols, "main_phase1");
+      if (batchPlan.skip) {
+        const skippedSymbol = handleOhlcvFetchStuckSymbol_(props, MAIN_PHASE1_FETCH_INFLIGHT_KEY, STATE_KEY, symbols, i, "main_phase1");
+        props.setProperty(NEW_ALERT_COUNT_KEY, newAlertCount.toString());
+        props.setProperty("LAST_TS_MAP", JSON.stringify(lastTsMap));
+        props.setProperty(MAIN_FULL_BACKFILL_SYMBOLS_KEY, JSON.stringify(Array.from(fullBackfillSet)));
+        writeProcessLog_("OHLCV", "PHASE1: repeated stuck symbol was skipped and queued for repair.", {
+          cursor: i,
+          skippedSymbol: skippedSymbol,
+          attempts: batchPlan.attempts,
+          previousStartedAt: batchPlan.previousStartedAt
+        });
+        setupResumeTrigger_("resumeOHLCVFetch");
+        return;
+      }
+
       const batchStart = Date.now();
-      const batch = symbols.slice(i, Math.min(i + OHLCV_BATCH_SIZE, symbols.length));
+      const batch = symbols.slice(i, Math.min(i + batchPlan.batchSize, symbols.length));
+      markOhlcvFetchInflight_(props, MAIN_PHASE1_FETCH_INFLIGHT_KEY, batchPlan, batch, "main_phase1");
       const requests = [];
       const reqMeta = [];
       batch.forEach(sym => {
@@ -4413,6 +4541,7 @@ reqMeta.push({
           const appendedOnQuota = allFetchedData.length > 0 ? appendRowsToSheet_(ohlcvSheet, allFetchedData, "phase1_quota_pause") : 0;
           phase1AppendedRows += appendedOnQuota;
           allFetchedData = [];
+          clearOhlcvFetchInflight_(props, MAIN_PHASE1_FETCH_INFLIGHT_KEY);
           props.setProperty(STATE_KEY, i.toString());
           props.setProperty(NEW_ALERT_COUNT_KEY, newAlertCount.toString());
           props.setProperty("LAST_TS_MAP", JSON.stringify(lastTsMap));
@@ -4475,14 +4604,19 @@ if (validRows.length > 0) {
       phase1AppendedRows += appendedRowsInBatch;
       allFetchedData = [];
 
-      const nextIndex = Math.min(i + OHLCV_BATCH_SIZE, symbols.length);
+      const nextIndex = Math.min(i + batch.length, symbols.length);
       props.setProperty(STATE_KEY, String(nextIndex));
       props.setProperty(NEW_ALERT_COUNT_KEY, newAlertCount.toString());
+      clearOhlcvFetchInflight_(props, MAIN_PHASE1_FETCH_INFLIGHT_KEY);
 
       debugLogToSheet_("ohlcv.phase1.batch", {
         batchNo: batchNo,
         startIndex: i,
         nextIndex: nextIndex,
+        batchSize: batch.length,
+        plannedBatchSize: batchPlan.batchSize,
+        attempts: batchPlan.attempts,
+        previousTimedOut: batchPlan.previousTimedOut,
         symbolsInBatch: batch.length,
         requestCount: requests.length,
         fetchedRows: fetchedRowsInBatch,
@@ -4497,6 +4631,7 @@ if (validRows.length > 0) {
         elapsedMs: Date.now() - batchStart
       });
       Utilities.sleep(OHLCV_BATCH_SLEEP_MS);
+      i = nextIndex;
     }
 
     const appendedAtComplete = allFetchedData.length > 0 ? appendRowsToSheet_(ohlcvSheet, allFetchedData, "phase1_complete") : 0;
@@ -5026,6 +5161,7 @@ function resetProcessProperties_() {
   props.deleteProperty(SYMBOL_LIST_KEY);
   props.deleteProperty(NEW_ALERT_COUNT_KEY);
   props.deleteProperty(MAIN_FULL_BACKFILL_SYMBOLS_KEY);
+  props.deleteProperty(MAIN_PHASE1_FETCH_INFLIGHT_KEY);
   props.deleteProperty("LAST_TS_MAP");
   props.deleteProperty("CURRENT_REFRESH_ID");
   props.deleteProperty("SPLIT_QUEUE");
@@ -5033,8 +5169,11 @@ function resetProcessProperties_() {
   props.deleteProperty("OHLCV_SPLIT_CACHE");
   props.deleteProperty(OHLCV_COMPLETION_NOTICE_PENDING_KEY);
 
-  // 修復対象銘柄は、全PHASEが正常終了してリセットされるタイミングで消す
-  props.deleteProperty("OHLCV_REPAIR_SYMBOLS");
+  // 修復対象銘柄は、全PHASEが正常終了してリセットされるタイミングで消す。
+  // ただし、実行中に繰り返し詰まった銘柄は次回の120日修復対象として残す。
+  const preserveRepairSymbols = props.getProperty(OHLCV_REPAIR_SYMBOLS_PRESERVE_KEY) === "true";
+  if (!preserveRepairSymbols) props.deleteProperty("OHLCV_REPAIR_SYMBOLS");
+  props.deleteProperty(OHLCV_REPAIR_SYMBOLS_PRESERVE_KEY);
 
   deleteTriggersByHandler_("resumeOHLCVFetch");
   clearMiddayOhlcvState_();
