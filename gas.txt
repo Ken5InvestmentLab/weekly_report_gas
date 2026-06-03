@@ -6916,7 +6916,9 @@ const OHLCV_POST_REPAIR_EARLY_DEDUP_LIMIT_MS = 300 * 1000;
 // earlyDedupEarlyCursor で再開できるため1チャンク分の余裕は不要。10sあれば必ず開始できる
 const OHLCV_POST_REPAIR_EARLY_SCAN_MIN_REMAINING_MS = 10 * 1000;
 const OHLCV_POST_REPAIR_RESUME_AFTER_MS = 10 * 1000;
-const OHLCV_POST_REPAIR_SORT_MAX_ROWS = OHLCV_SAFE_SORT_MAX_ROWS;
+// Full-sheet sort is too slow around 240k rows in post-repair cleanup.
+// Large sheets use unsorted-safe scans and skip this final sort.
+const OHLCV_POST_REPAIR_SORT_MAX_ROWS = 200000;
 const OHLCV_POST_REPAIR_MIN_DEDUP_REMAINING_MS = 60000;
 const OHLCV_POST_REPAIR_SAFETY_AFTER_MS = 7 * 60 * 1000;
 // tailスキャン行数。シートが365日未満の間はtailだけでは不足するため、early行スキャンを併用する
@@ -13255,6 +13257,11 @@ function runOhlcvPostRepairCleanup_() {
       }
 
       if (state.step === "SORT") {
+        writeProcessLog_("OHLCV_POST_REPAIR", "SORT step starting.", {
+          lastRow: sh.getLastRow(),
+          maxRows: OHLCV_POST_REPAIR_SORT_MAX_ROWS,
+          elapsedMs: Date.now() - startedAt
+        });
         const r = tryOhlcvPostRepairSortOnce_(sh);
         state.totals.sortAttempted = !!r.attempted;
         state.totals.sortSkipped = !!r.skipped;
