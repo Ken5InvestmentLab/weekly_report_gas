@@ -2324,6 +2324,7 @@ if (symbols.length === 0) {
   if (!Number.isFinite(startIndex) || startIndex < 0) startIndex = 0;
 
   let allFetchedData = [];
+  let appendedRowsThisRun = 0;
   let batchNo = 0;
 
   writeProcessLog_("OHLCV-AM", `13:30先行取得を ${startIndex}/${symbols.length} 銘柄目から再開します。`, {
@@ -2350,8 +2351,25 @@ if (symbols.length === 0) {
   for (let i = startIndex; i < symbols.length; i += MIDDAY_OHLCV_BATCH_SIZE) {
     const elapsedBeforeBatch = Date.now() - startTime;
 
+    if (shouldStopMiddayOhlcvResume_()) {
+      const appended = appendAndNormalizeMiddayOhlcvRows_(ohlcvSheet, allFetchedData, "handoff_to_main");
+      appendedRowsThisRun += appended;
+      allFetchedData = [];
+      writeProcessLog_("OHLCV-AM", "16:00本番処理の時間帯に入ったため、13:30先行取得を途中終了して本番側へ引き継ぎます。", {
+        cursor: i,
+        totalSymbols: symbols.length,
+        appendedRows: appended,
+        appendedRowsThisRun: appendedRowsThisRun,
+        elapsedMs: elapsedBeforeBatch
+      });
+      finalizeMiddayOhlcvBeforeMainRun_();
+      return { ok: true, stopped: true, reason: "main_run_window", nextIndex: i, appendedRows: appendedRowsThisRun };
+    }
+
     if (elapsedBeforeBatch > LIMIT_MS || (LIMIT_MS - elapsedBeforeBatch) < MIDDAY_FETCH_MIN_REMAINING_MS) {
       const appended = appendAndNormalizeMiddayOhlcvRows_(ohlcvSheet, allFetchedData, "pause");
+      appendedRowsThisRun += appended;
+      allFetchedData = [];
 
       props.setProperty(MIDDAY_STATE_KEY, i.toString());
       props.setProperty(MIDDAY_NEW_ALERT_COUNT_KEY, newAlertCount.toString());
@@ -2366,7 +2384,7 @@ if (symbols.length === 0) {
       });
 
       scheduleMiddayOhlcvResumeIfAllowed_(10 * 1000);
-      return { ok: true, incomplete: true, nextIndex: i, appendedRows: appended };
+      return { ok: true, incomplete: true, nextIndex: i, appendedRows: appendedRowsThisRun };
     }
 
     const batchStart = Date.now();
@@ -2508,12 +2526,23 @@ if (finalRows.length > 0) {
       }
     });
 
+    const appendedRowsInBatch = appendAndNormalizeMiddayOhlcvRows_(ohlcvSheet, allFetchedData, "batch");
+    appendedRowsThisRun += appendedRowsInBatch;
+    allFetchedData = [];
+
+    const nextIndex = Math.min(i + MIDDAY_OHLCV_BATCH_SIZE, symbols.length);
+    props.setProperty(MIDDAY_STATE_KEY, String(nextIndex));
+    props.setProperty(MIDDAY_NEW_ALERT_COUNT_KEY, newAlertCount.toString());
+
     debugLogToSheet_("ohlcv.midday.batch", {
       batchNo: batchNo,
       startIndex: i,
+      nextIndex: nextIndex,
       symbolsInBatch: batch.length,
       requestCount: requests.length,
       fetchedRows: fetchedRowsInBatch,
+      appendedRows: appendedRowsInBatch,
+      appendedRowsThisRun: appendedRowsThisRun,
       symbolsWithRows: fetchedSymbolsInBatch,
       fullBackfillSymbols: fullBackfillInBatch,
       parseErrCount: parseErrCount,
@@ -2523,7 +2552,7 @@ if (finalRows.length > 0) {
     Utilities.sleep(MIDDAY_OHLCV_BATCH_SLEEP_MS);
   }
 
-const appended = appendAndNormalizeMiddayOhlcvRows_(ohlcvSheet, allFetchedData, "complete");
+const appended = appendedRowsThisRun + appendAndNormalizeMiddayOhlcvRows_(ohlcvSheet, allFetchedData, "complete");
 
 // 重要：重い後処理より先に、13:30取得状態と再開トリガーを消す。
 // これを先にやらないと、タイムアウト時に同じカーソルから再取得される。
@@ -4303,12 +4332,15 @@ newAlertCount = todaySet.size;
 
     let startIndex = safeParseInt_(props.getProperty(STATE_KEY), 0);
 let allFetchedData = [];
+let phase1AppendedRows = 0;
 let batchNo = 0;
 
 for (let i = startIndex; i < symbols.length; i += OHLCV_BATCH_SIZE) {
   const elapsedBeforeBatch = Date.now() - startTime;
   if (elapsedBeforeBatch > LIMIT_MS || (LIMIT_MS - elapsedBeforeBatch) < FETCH_GUARD_MS) {
-    if (allFetchedData.length > 0) appendRowsToSheet_(ohlcvSheet, allFetchedData);
+    const appendedOnPause = allFetchedData.length > 0 ? appendRowsToSheet_(ohlcvSheet, allFetchedData, "phase1_pause") : 0;
+    phase1AppendedRows += appendedOnPause;
+    allFetchedData = [];
     props.setProperty(STATE_KEY, i.toString());
     props.setProperty(NEW_ALERT_COUNT_KEY, newAlertCount.toString());
     props.setProperty("LAST_TS_MAP", JSON.stringify(lastTsMap));
@@ -4316,6 +4348,8 @@ for (let i = startIndex; i < symbols.length; i += OHLCV_BATCH_SIZE) {
     writeProcessLog_("OHLCV", `PHASE1: 実行時間が近づいたため、${i}/${symbols.length} 銘柄までの進捗を保存して再開します。`, {
       cursor: i,
       totalSymbols: symbols.length,
+      appendedRows: appendedOnPause,
+      appendedRowsThisRun: phase1AppendedRows,
       elapsedMs: elapsedBeforeBatch
     });
     debugLogToSheet_("ohlcv.phase.summary", {
@@ -4376,7 +4410,9 @@ reqMeta.push({
         if (isQuotaExhausted_(e)) {
           writeProcessLog_("OHLCV", `PHASE1: Google側の実行制限に当たったため、バッチ ${batchNo} から4時間後に再開します。`, { batchNo: batchNo, message: e.message });
           debugLogToSheet_("ohlcv.phase.error", { phase: "PHASE1", stage: "quota_exhausted", batchNo: batchNo, message: e.message });
-          if (allFetchedData.length > 0) appendRowsToSheet_(ohlcvSheet, allFetchedData);
+          const appendedOnQuota = allFetchedData.length > 0 ? appendRowsToSheet_(ohlcvSheet, allFetchedData, "phase1_quota_pause") : 0;
+          phase1AppendedRows += appendedOnQuota;
+          allFetchedData = [];
           props.setProperty(STATE_KEY, i.toString());
           props.setProperty(NEW_ALERT_COUNT_KEY, newAlertCount.toString());
           props.setProperty("LAST_TS_MAP", JSON.stringify(lastTsMap));
@@ -4435,12 +4471,23 @@ if (validRows.length > 0) {
           }
         });
       }
+      const appendedRowsInBatch = allFetchedData.length > 0 ? appendRowsToSheet_(ohlcvSheet, allFetchedData, "phase1_batch") : 0;
+      phase1AppendedRows += appendedRowsInBatch;
+      allFetchedData = [];
+
+      const nextIndex = Math.min(i + OHLCV_BATCH_SIZE, symbols.length);
+      props.setProperty(STATE_KEY, String(nextIndex));
+      props.setProperty(NEW_ALERT_COUNT_KEY, newAlertCount.toString());
+
       debugLogToSheet_("ohlcv.phase1.batch", {
         batchNo: batchNo,
         startIndex: i,
+        nextIndex: nextIndex,
         symbolsInBatch: batch.length,
         requestCount: requests.length,
         fetchedRows: fetchedRowsInBatch,
+        appendedRows: appendedRowsInBatch,
+        appendedRowsThisRun: phase1AppendedRows,
         symbolsWithRows: fetchedSymbolsInBatch,
         symbolsWithoutRows: reqMeta.length - fetchedSymbolsInBatch,
         noRowsSamples: noRowsSymbols,
@@ -4452,19 +4499,21 @@ if (validRows.length > 0) {
       Utilities.sleep(OHLCV_BATCH_SLEEP_MS);
     }
 
-    if (allFetchedData.length > 0) appendRowsToSheet_(ohlcvSheet, allFetchedData);
+    const appendedAtComplete = allFetchedData.length > 0 ? appendRowsToSheet_(ohlcvSheet, allFetchedData, "phase1_complete") : 0;
+    phase1AppendedRows += appendedAtComplete;
+    allFetchedData = [];
 
     props.setProperties({ [PHASE_KEY]: "PHASE2", [STATE_KEY]: "5", [NEW_ALERT_COUNT_KEY]: newAlertCount.toString(), "LAST_TS_MAP": JSON.stringify(lastTsMap), [MAIN_FULL_BACKFILL_SYMBOLS_KEY]: JSON.stringify(Array.from(fullBackfillSet)) });
     writeProcessLog_("OHLCV", "PHASE1: OHLCV取得が完了しました。次は株式分割チェック（PHASE2）へ進みます。", {
       totalSymbols: symbols.length,
-      fetchedRows: allFetchedData.length,
+      fetchedRows: phase1AppendedRows,
       newAlertCount: newAlertCount
     });
     debugLogToSheet_("ohlcv.phase.summary", {
       event: "phase_complete",
       phase: "PHASE1",
       totalSymbols: symbols.length,
-      fetchedRows: allFetchedData.length,
+      fetchedRows: phase1AppendedRows,
       newAlertCount: newAlertCount,
       elapsedMs: Date.now() - startTime
     });

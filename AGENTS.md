@@ -408,6 +408,7 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 - 13:30完了後の広めのtimestamp後処理は `postprocessMiddayOhlcv` に分離し、`OHLCV_MIDDAY_POSTPROCESS_STATE_V1` で末尾から小分け再開する。一括30,000行スキャンへ戻さない。
 - 13:30取得本体では、完了直後の広めのtimestamp後処理をインライン実行しない。GASの6分上限に近づく前に取得を区切り、後処理は `postprocessMiddayOhlcv` の別トリガーへ逃がす。
 - 13:30取得の安全再開トリガーは、通常の自前pause/resumeと重なってロック待ちを増やさないよう、fetch本体の自前実行上限より十分後ろに置く。
+- 13:30取得結果は実行末尾までメモリに溜めず、Yahoo取得バッチごとに `ohlcv_4h` へ追記してカーソルを進める。タイムアウトや16:00引き継ぎ時に、未永続化の取得済み行を失わないようにする。
 - 日次メンテナンス、GitHub Actions、GAP修復には進まない。
 - 完了通知のみ送る。
 
@@ -432,6 +433,7 @@ fetchOHLCVForNewAlerts
 - 残っている `resumeOHLCVFetchMidday` を削除。
 - 13:30専用プロパティをクリア。
 - 13:30で書き込まれたOHLCV行はシート上の成果として引き継ぐ。
+- 13:30から16:00へ引き継がれるのは、`ohlcv_4h` に永続化済みの行だけ。13:30側で未追記のメモリ上データを前提にしない。
 - 16:00側で通常どおり再取得し、重複整理はGAP修復後の最終処理へ回す。
 - 16:00本番で同じ日付・銘柄のAM行を再取得できた場合、通常の `MIDDAY_yyyy-mm-dd` のAM行は削除対象にできるが、`MIDDAY_LOCKED_yyyy-mm-dd` は保護する。
 - 16:00本番の当日PM出来高は、保護AM出来高があればそれを優先して `日足出来高 - AM出来高` で補正する。AM行自体は上書きしない。
@@ -443,6 +445,7 @@ fetchOHLCVForNewAlerts
   - `lastTs` が直近5日以内: `lastTs` の3日前から現在まで `period1/period2` で取得
   - `lastTs` が6日〜120日以内: `lastTs` の3日前から現在まで
   - `lastTs` が120日より古い: 直近120日分
+- 16:00 PHASE1の取得結果も実行末尾までメモリに溜めず、Yahoo取得バッチごとに追記してカーソルを進める。
 
 ### OHLCV取得フェーズ
 
