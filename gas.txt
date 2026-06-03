@@ -4414,11 +4414,17 @@ if (phase === "PHASE1") {
     }
   });
 
-  // 修復対象銘柄も、今回の取得対象に必ず含める
-repairSymsSet.forEach(sym => {
-  const s = String(sym || "").trim();
-  if (s) uniqueSymbols.add(s);
-});
+  const bottomSymbolSet = new Set(uniqueSymbols);
+  let droppedRepairSymbols = 0;
+  repairSymsSet.forEach(sym => {
+    const s = String(sym || "").trim();
+    if (!s) return;
+    if (bottomSymbolSet.has(s)) {
+      uniqueSymbols.add(s);
+    } else {
+      droppedRepairSymbols++;
+    }
+  });
 
 symbols = Array.from(uniqueSymbols).sort();
 
@@ -4447,6 +4453,7 @@ writeProcessLog_("OHLCV", "PHASE1: OHLCV取得対象を差分取得型にしま�
   totalSymbols: symbols.length,
   trueNewFullBackfillSymbols: trueNewFullBackfillSymbols.length,
   repairDeltaSymbols: repairDeltaSymbols.length,
+  droppedNonBottomRepairSymbols: droppedRepairSymbols,
   existingDeltaSymbols: symbols.length - trueNewFullBackfillSymbols.length,
   todaySignalSymbols: todaySet.size
 });

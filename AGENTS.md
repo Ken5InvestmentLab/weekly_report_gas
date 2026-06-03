@@ -393,7 +393,7 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 
 - 当日が休場日の場合はスキップ。
 - 16:00本番処理が近い場合は再開せず終了。
-- 対象銘柄は `alerts_raw` に登場する全銘柄。
+- 対象銘柄は `alerts_raw` に登場する `BOTTOM` シグナルの銘柄。`TOP` シグナルだけの銘柄は取得対象にしない。
 - 今日シグナルが出た銘柄数はメタ情報として `OHLCV_MIDDAY_NEW_ALERT_COUNT` に保持。
 - OHLCV未取得銘柄だけ120日分取得。
 - 既存OHLCVがある銘柄は、最終timestampに応じて以下の取得窓を使う。
@@ -440,9 +440,9 @@ fetchOHLCVForNewAlerts
 - 16:00本番で同じ日付・銘柄のAM行を再取得できた場合、通常の `MIDDAY_yyyy-mm-dd` のAM行は削除対象にできるが、`MIDDAY_LOCKED_yyyy-mm-dd` は保護する。
 - 16:00本番の当日PM出来高は、保護AM出来高があればそれを優先して `日足出来高 - AM出来高` で補正する。AM行自体は上書きしない。
 - 当日が休場日の場合はスキップ。
-- 対象銘柄は `alerts_raw` に登場する全銘柄 + `OHLCV_REPAIR_SYMBOLS`。
+- 対象銘柄は `alerts_raw` に登場する `BOTTOM` シグナルの銘柄。`OHLCV_REPAIR_SYMBOLS` も、その `BOTTOM` 銘柄集合に含まれるものだけ取得対象にする。
 - OHLCV未取得銘柄は120日分取得。
-- `OHLCV_REPAIR_SYMBOLS` の銘柄は120日分強制再取得。
+- 既存OHLCVがある `OHLCV_REPAIR_SYMBOLS` の銘柄は、`BOTTOM` 銘柄に該当する場合だけ通常の差分窓で取得する。
 - 既存OHLCVがある銘柄は、最終timestampに応じて以下の取得窓を使う。
   - `lastTs` が直近5日以内: `lastTs` の3日前から現在まで `period1/period2` で取得
   - `lastTs` が6日〜120日以内: `lastTs` の3日前から現在まで
