@@ -1078,6 +1078,15 @@ function clearDailyMaintenanceState_() {
 // =====================================
 // トリガー
 // =====================================
+const OHLCV_MIDDAY_TRIGGER_HANDLER = "fetchOHLCVForNewAlertsMidday";
+const OHLCV_MAIN_TRIGGER_HANDLER = "fetchOHLCVForNewAlerts";
+const OHLCV_MIDDAY_TRIGGER_HOUR = 13;
+const OHLCV_MIDDAY_TRIGGER_MINUTE = 21;
+const OHLCV_MAIN_TRIGGER_HOUR = 15;
+const OHLCV_MAIN_TRIGGER_MINUTE = 51;
+const OHLCV_MIDDAY_RESUME_STOP_HOUR = 15;
+const OHLCV_MIDDAY_RESUME_STOP_MINUTE = 41;
+
 function setupAllTriggers() {
   ScriptApp.getProjectTriggers().forEach(t => ScriptApp.deleteTrigger(t));
   const tz = CONFIG.TIMEZONE;
@@ -1100,23 +1109,8 @@ function setupAllTriggers() {
     .inTimezone(tz)
     .create();
 
-  // 3. OHLCV先行取得（毎日 13:30、AM分のみ）
-  ScriptApp.newTrigger("fetchOHLCVForNewAlertsMidday")
-    .timeBased()
-    .everyDays(1)
-    .atHour(13)
-    .nearMinute(30)
-    .inTimezone(tz)
-    .create();
-
-  // 4. OHLCV本番取得（毎日 16:00）
-  ScriptApp.newTrigger("fetchOHLCVForNewAlerts")
-    .timeBased()
-    .everyDays(1)
-    .atHour(16)
-    .nearMinute(0)
-    .inTimezone(tz)
-    .create();
+  // 3-4. OHLCV取得
+  scheduleFixedOhlcvFetchTriggers_(tz);
 
   // 5. 古いOHLCVデータ削除（毎日 2:00）
   ScriptApp.newTrigger("purgeOldOhlcvDataDaily")
@@ -1127,7 +1121,7 @@ function setupAllTriggers() {
     .inTimezone(tz)
     .create();
 
-    // 6. 古いアーカイブデータ削除（毎日 2:10）
+  // 6. 古いアーカイブデータ削除（毎日 2:10）
   ScriptApp.newTrigger("purgeOldSignalArchiveRowsDaily")
     .timeBased()
     .everyDays(1)
@@ -1137,6 +1131,41 @@ function setupAllTriggers() {
     .create();
 
   console.log("すべてのトリガーをリセットし、必要なトリガーのみ再登録しました。");
+}
+
+function scheduleFixedOhlcvFetchTriggers_(tz) {
+  // OHLCV先行取得（毎日 13:21、AM分のみ）
+  ScriptApp.newTrigger(OHLCV_MIDDAY_TRIGGER_HANDLER)
+    .timeBased()
+    .everyDays(1)
+    .atHour(OHLCV_MIDDAY_TRIGGER_HOUR)
+    .nearMinute(OHLCV_MIDDAY_TRIGGER_MINUTE)
+    .inTimezone(tz)
+    .create();
+
+  // OHLCV本番取得（毎日 15:51）
+  ScriptApp.newTrigger(OHLCV_MAIN_TRIGGER_HANDLER)
+    .timeBased()
+    .everyDays(1)
+    .atHour(OHLCV_MAIN_TRIGGER_HOUR)
+    .nearMinute(OHLCV_MAIN_TRIGGER_MINUTE)
+    .inTimezone(tz)
+    .create();
+}
+
+function resetOhlcvFetchTriggersOnly() {
+  const tz = CONFIG.TIMEZONE;
+  deleteTriggersByHandler_(OHLCV_MIDDAY_TRIGGER_HANDLER);
+  deleteTriggersByHandler_(OHLCV_MAIN_TRIGGER_HANDLER);
+  scheduleFixedOhlcvFetchTriggers_(tz);
+  const result = {
+    ok: true,
+    timezone: tz,
+    midday: `${pad2_(OHLCV_MIDDAY_TRIGGER_HOUR)}:${pad2_(OHLCV_MIDDAY_TRIGGER_MINUTE)}`,
+    main: `${pad2_(OHLCV_MAIN_TRIGGER_HOUR)}:${pad2_(OHLCV_MAIN_TRIGGER_MINUTE)}`
+  };
+  console.log("OHLCV固定トリガーを再設定しました: " + JSON.stringify(result));
+  return result;
 }
 
 // =====================================
@@ -2259,20 +2288,20 @@ function fetchOHLCVForNewAlertsMidday() {
   const entryTime = Date.now();
   let lock = null;
   const todayKey = getOhlcvBusinessDateKey_();
-  writeProcessLog_("OHLCV-AM", "13:30のOHLCV先行取得を開始しました。AM分だけを取得し、16:00本番チェーンには進みません。", {
+  writeProcessLog_("OHLCV-AM", "13:21のOHLCV先行取得を開始しました。AM分だけを取得し、15:51本番チェーンには進みません。", {
     businessDate: todayKey,
     fetchEnd: getMiddayOhlcvFetchEndIso_(todayKey)
   });
   try {
     if (shouldStopMiddayOhlcvResume_()) {
       finalizeMiddayOhlcvBeforeMainRun_();
-      writeProcessLog_("OHLCV-AM", "16:00本番処理の時間が近いため、13:30先行取得は再開せず終了します。", { businessDate: todayKey });
+      writeProcessLog_("OHLCV-AM", "15:51本番処理の時間が近いため、13:21先行取得は再開せず終了します。", { businessDate: todayKey });
       return { ok: true, skipped: true, reason: "main_run_window" };
     }
     scheduleMiddayOhlcvResumeIfAllowed_(MIDDAY_FETCH_SAFETY_RESUME_AFTER_MS);
     lock = LockService.getScriptLock();
     if (!lock.tryLock(OHLCV_LOCK_WAIT_MS)) {
-      writeProcessLog_("OHLCV-AM", "別の処理が実行中のため、13:30先行取得を1分後に再試行します。", { waitMs: OHLCV_LOCK_WAIT_MS });
+      writeProcessLog_("OHLCV-AM", "別の処理が実行中のため、13:21先行取得を1分後に再試行します。", { waitMs: OHLCV_LOCK_WAIT_MS });
       scheduleMiddayOhlcvResumeIfAllowed_(60 * 1000);
       return { ok: false, skipped: true, reason: "lock_busy" };
     }
@@ -2307,7 +2336,7 @@ function fetchOHLCVForNewAlertsMidday() {
     throw e;
   } finally {
     if (lock && lock.hasLock()) lock.releaseLock();
-    writeProcessLog_("OHLCV-AM", "13:30先行取得の今回実行分を終了しました。未完了の場合は専用再開トリガーが続きます。", { elapsedMs: Date.now() - entryTime });
+    writeProcessLog_("OHLCV-AM", "13:21先行取得の今回実行分を終了しました。未完了の場合は専用再開トリガーが続きます。", { elapsedMs: Date.now() - entryTime });
   }
 }
 
@@ -2315,7 +2344,7 @@ function resumeOHLCVFetchMidday() {
   deleteTriggersByHandler_(MIDDAY_RESUME_HANDLER);
   if (shouldStopMiddayOhlcvResume_()) {
     finalizeMiddayOhlcvBeforeMainRun_();
-    writeProcessLog_("OHLCV-AM", "16:00本番処理の時間帯に入ったため、13:30先行取得の再開を停止しました。", {
+    writeProcessLog_("OHLCV-AM", "15:51本番処理の時間帯に入ったため、13:21先行取得の再開を停止しました。", {
       businessDate: getOhlcvBusinessDateKey_()
     });
     return { ok: true, stopped: true, reason: "main_run_window" };
@@ -2328,7 +2357,7 @@ function fetchOHLCVForNewAlertsMiddayInternal_(outerStartedAt) {
   const todayKey = formatYmd_(today);
 
   if (isMarketHolidayJst_(today, getMarketHolidaySet_())) {
-    writeProcessLog_("OHLCV-AM", `基準日 ${todayKey} は休場日のため、13:30先行取得をスキップします。`, { businessDate: todayKey });
+    writeProcessLog_("OHLCV-AM", `基準日 ${todayKey} は休場日のため、13:21先行取得をスキップします。`, { businessDate: todayKey });
     clearMiddayOhlcvState_();
     return { ok: true, skipped: true, reason: "market_holiday" };
   }
@@ -2357,7 +2386,7 @@ const refreshId = props.getProperty(MIDDAY_REFRESH_ID_KEY) || expectedRefreshId;
 const rawAlertVolumeMapData = buildRawAlertVolumeMapForBusinessDate_(rawSheet, todayKey);
 const rawAlertVolumeMap = rawAlertVolumeMapData.volumeMap;
 
-writeProcessLog_("OHLCV-AM", "alerts_raw のvolumeを13:30先行取得の出来高上書き用に読み込みました。", rawAlertVolumeMapData.stats);
+writeProcessLog_("OHLCV-AM", "alerts_raw のvolumeを13:21先行取得の出来高上書き用に読み込みました。", rawAlertVolumeMapData.stats);
 // ★追加ここまで
 
   let symbols = JSON.parse(props.getProperty(MIDDAY_SYMBOL_LIST_KEY) || "[]");
@@ -2381,7 +2410,7 @@ if (symbols.length === 0) {
 
   // alerts_raw に銘柄が1つも無い場合だけスキップ
   if (symbols.length === 0) {
-    writeProcessLog_("OHLCV-AM", "13:30先行取得の対象銘柄がないためスキップします。", {
+    writeProcessLog_("OHLCV-AM", "13:21先行取得の対象銘柄がないためスキップします。", {
       businessDate: todayKey,
       todaySymbols: todaySymbols.length
     });
@@ -2402,7 +2431,7 @@ if (symbols.length === 0) {
 
   newAlertCount = todaySymbols.length;
 
-  writeProcessLog_("OHLCV-AM", "13:30先行取得の対象銘柄を差分取得型に初期化しました。OHLCV未取得銘柄だけ120日分、既存OHLCV銘柄はlastTs以降を取得します。", {
+  writeProcessLog_("OHLCV-AM", "13:21先行取得の対象銘柄を差分取得型に初期化しました。OHLCV未取得銘柄だけ120日分、既存OHLCV銘柄はlastTs以降を取得します。", {
     totalFetchSymbols: symbols.length,
     trueNewFullBackfillSymbols: fullBackfillSymbols.length,
     existingDeltaSymbols: symbols.length - fullBackfillSymbols.length,
@@ -2427,7 +2456,7 @@ if (symbols.length === 0) {
   let appendedRowsThisRun = 0;
   let batchNo = 0;
 
-  writeProcessLog_("OHLCV-AM", `13:30先行取得を ${startIndex}/${symbols.length} 銘柄目から再開します。`, {
+  writeProcessLog_("OHLCV-AM", `13:21先行取得を ${startIndex}/${symbols.length} 銘柄目から再開します。`, {
     businessDate: todayKey,
     fetchEnd: getMiddayOhlcvFetchEndIso_(todayKey),
     refreshId: refreshId,
@@ -2442,7 +2471,7 @@ if (symbols.length === 0) {
       todayKey
     );
   } else {
-    writeProcessLog_("OHLCV-AM", "13:30先行取得の再開実行では、広範囲の不正timestamp掃除をスキップします。", {
+    writeProcessLog_("OHLCV-AM", "13:21先行取得の再開実行では、広範囲の不正timestamp掃除をスキップします。", {
       cursor: startIndex,
       cleanupRows: 0
     });
@@ -2455,7 +2484,7 @@ if (symbols.length === 0) {
       const appended = appendAndNormalizeMiddayOhlcvRows_(ohlcvSheet, allFetchedData, "handoff_to_main");
       appendedRowsThisRun += appended;
       allFetchedData = [];
-      writeProcessLog_("OHLCV-AM", "16:00本番処理の時間帯に入ったため、13:30先行取得を途中終了して本番側へ引き継ぎます。", {
+      writeProcessLog_("OHLCV-AM", "15:51本番処理の時間帯に入ったため、13:21先行取得を途中終了して本番側へ引き継ぎます。", {
         cursor: i,
         totalSymbols: symbols.length,
         appendedRows: appended,
@@ -2493,7 +2522,7 @@ if (symbols.length === 0) {
       props.setProperty(MIDDAY_NEW_ALERT_COUNT_KEY, newAlertCount.toString());
       props.setProperty(MIDDAY_LAST_TS_MAP_KEY, JSON.stringify(lastTsMap));
       props.setProperty(MIDDAY_FULL_BACKFILL_SYMBOLS_KEY, JSON.stringify(Array.from(fullBackfillSet)));
-      writeProcessLog_("OHLCV-AM", "13:30先行取得で繰り返し詰まった銘柄をスキップして再開します。", {
+      writeProcessLog_("OHLCV-AM", "13:21先行取得で繰り返し詰まった銘柄をスキップして再開します。", {
         cursor: i,
         skippedSymbol: skippedSymbol,
         attempts: batchPlan.attempts,
@@ -2563,7 +2592,7 @@ if (appendedOnError > 0) {
 if (isUrlFetchDailyLimitError_(e)) {
   deleteTriggersByHandler_(MIDDAY_RESUME_HANDLER);
 
-  writeProcessLog_("OHLCV-AM", "UrlFetch日次上限に到達したため、本日の13:30先行取得の再開を停止しました。", {
+  writeProcessLog_("OHLCV-AM", "UrlFetch日次上限に到達したため、本日の13:21先行取得の再開を停止しました。", {
     batchNo: batchNo,
     cursor: i,
     totalSymbols: symbols.length,
@@ -2678,7 +2707,7 @@ if (finalRows.length > 0) {
 
 const appended = appendedRowsThisRun + appendAndNormalizeMiddayOhlcvRows_(ohlcvSheet, allFetchedData, "complete");
 
-// 重要：重い後処理より先に、13:30取得状態と再開トリガーを消す。
+// 重要：重い後処理より先に、13:21取得状態と再開トリガーを消す。
 // これを先にやらないと、タイムアウト時に同じカーソルから再取得される。
 clearMiddayOhlcvState_();
 
@@ -2702,7 +2731,7 @@ if (appended > 0) {
       const result = runMiddayOhlcvPostprocessChunks_(ohlcvSheet, state, spoofedStartedAt);
       if (result.complete) {
         clearMiddayOhlcvPostprocessState_();
-        writeProcessLog_("OHLCV-AM", "13:30先行取得が完了し、後処理もインラインで完了しました。", {
+        writeProcessLog_("OHLCV-AM", "13:21先行取得が完了し、後処理もインラインで完了しました。", {
           fetchedSymbols: newAlertCount,
           appendedRows: appended,
           refreshId: refreshId,
@@ -2712,7 +2741,7 @@ if (appended > 0) {
       } else {
         saveMiddayOhlcvPostprocessState_(result.state);
         scheduleMiddayOhlcvPostprocess_({ keepState: true });
-        writeProcessLog_("OHLCV-AM", "13:30先行取得が完了。インライン後処理は途中までで時間切れのため、続きを別トリガーで実行します。", {
+        writeProcessLog_("OHLCV-AM", "13:21先行取得が完了。インライン後処理は途中までで時間切れのため、続きを別トリガーで実行します。", {
           fetchedSymbols: newAlertCount,
           appendedRows: appended,
           refreshId: refreshId,
@@ -2728,7 +2757,7 @@ if (appended > 0) {
     }
   } else {
     scheduleMiddayOhlcvPostprocess_();
-    writeProcessLog_("OHLCV-AM", "13:30先行取得が完了しました。時間余裕がないため後処理は別トリガーで実行します。", {
+    writeProcessLog_("OHLCV-AM", "13:21先行取得が完了しました。時間余裕がないため後処理は別トリガーで実行します。", {
       fetchedSymbols: newAlertCount,
       appendedRows: appended,
       refreshId: refreshId,
@@ -2736,7 +2765,7 @@ if (appended > 0) {
     });
   }
 } else {
-  writeProcessLog_("OHLCV-AM", "13:30先行取得が完了しました（追記行なし）。", {
+  writeProcessLog_("OHLCV-AM", "13:21先行取得が完了しました（追記行なし）。", {
     fetchedSymbols: newAlertCount,
     appendedRows: appended,
     refreshId: refreshId
@@ -2864,7 +2893,7 @@ function appendAndNormalizeMiddayOhlcvRows_(sheet, rows, context) {
   const prepared = prepareMiddayOhlcvRowsForAppend_(sheet, rows, context);
   if (prepared.rows.length === 0) {
     if (prepared.skippedExistingRows > 0 || prepared.skippedDuplicateRows > 0) {
-      writeProcessLog_("OHLCV-AM", "13:30 MIDDAY append skipped because all fetched rows already exist.", {
+      writeProcessLog_("OHLCV-AM", "13:21 MIDDAY append skipped because all fetched rows already exist.", {
         context: context || "",
         requestedRows: rows.length,
         skippedExistingRows: prepared.skippedExistingRows,
@@ -2878,7 +2907,7 @@ function appendAndNormalizeMiddayOhlcvRows_(sheet, rows, context) {
   const appended = appendRowsToSheet_(sheet, prepared.rows, context || "midday_append");
 
   if (appended > 0) {
-    writeProcessLog_("OHLCV-AM", "13:30先行取得でOHLCVを追記しました。", {
+    writeProcessLog_("OHLCV-AM", "13:21先行取得でOHLCVを追記しました。", {
       context: context || "",
       requestedRows: rows.length,
       appendedRows: appended,
@@ -3388,7 +3417,7 @@ function scheduleMiddayOhlcvPostprocess_(options) {
     .after(MIDDAY_POSTPROCESS_RESUME_AFTER_MS)
     .create();
 
-  writeProcessLog_("OHLCV-AM", "13:30先行取得の後処理を別トリガーに分離して予約しました。", {
+  writeProcessLog_("OHLCV-AM", "13:21先行取得の後処理を別トリガーに分離して予約しました。", {
     handlerName: MIDDAY_POSTPROCESS_HANDLER,
     delayMs: MIDDAY_POSTPROCESS_RESUME_AFTER_MS
   });
@@ -3523,7 +3552,7 @@ function postprocessMiddayOhlcv() {
     const sh = ss.getSheetByName(CONFIG.OHLCV_SHEET);
     if (!sh) throw new Error("ohlcv_4h シートが見つかりません");
 
-    writeProcessLog_("OHLCV-AM", "13:30先行取得の後処理を開始します。", {});
+    writeProcessLog_("OHLCV-AM", "13:21先行取得の後処理を開始します。", {});
 
     const state = loadMiddayOhlcvPostprocessState_(sh);
     const result = runMiddayOhlcvPostprocessChunks_(sh, state, startedAt);
@@ -3550,14 +3579,14 @@ function postprocessMiddayOhlcv() {
       elapsedMs: result.elapsedMs
     });
 
-    writeProcessLog_("OHLCV-AM", "13:30先行取得の後処理が完了しました。", {});
+    writeProcessLog_("OHLCV-AM", "13:21先行取得の後処理が完了しました。", {});
 
     return { ok: true, complete: true, scanRows: result.state.scanRows, totals: result.state.totals };
 
   } catch (e) {
     const message = e && e.message ? String(e.message) : String(e);
 
-    writeProcessLog_("OHLCV-AM", "13:30先行取得の後処理でエラーが発生しました。再試行します。", {
+    writeProcessLog_("OHLCV-AM", "13:21先行取得の後処理でエラーが発生しました。再試行します。", {
       message: message
     });
 
@@ -3581,7 +3610,7 @@ function scheduleMiddayOhlcvResumeIfAllowed_(delayMs) {
 
 function shouldStopMiddayOhlcvResume_() {
   const dateKey = getOhlcvBusinessDateKey_();
-  const stopAt = new Date(`${dateKey}T15:50:00+09:00`).getTime();
+  const stopAt = new Date(`${dateKey}T${pad2_(OHLCV_MIDDAY_RESUME_STOP_HOUR)}:${pad2_(OHLCV_MIDDAY_RESUME_STOP_MINUTE)}:00+09:00`).getTime();
   return Date.now() >= stopAt;
 }
 
@@ -4314,10 +4343,10 @@ function hasMiddayOhlcvState_() {
 function finalizeMiddayOhlcvBeforeMainRun_() {
   deleteTriggersByHandler_(MIDDAY_RESUME_HANDLER);
 
-  // 13:30 先行取得時に構築した rawAlertVolumeMap キャッシュは、当日 PM の BOTTOM
-  // シグナルがまだ alerts_raw に書かれていない時点のスナップショット。これを 16:00
+  // 13:21 先行取得時に構築した rawAlertVolumeMap キャッシュは、当日 PM の BOTTOM
+  // シグナルがまだ alerts_raw に書かれていない時点のスナップショット。これを 15:51
   // PHASE1 で再利用すると PM 出来高 0 件の古い map を見て fastUseProtectedPmVol=false と
-  // なり、当日 PM の PM_LOCKED 化が全件スキップされる。16:00 への移行時に必ず破棄して
+  // なり、当日 PM の PM_LOCKED 化が全件スキップされる。15:51 への移行時に必ず破棄して
   // PHASE1 で最新の alerts_raw から作り直させる。
   try {
     CacheService.getScriptCache().remove(RAW_ALERT_VOLUME_MAP_CACHE_KEY);
@@ -4333,12 +4362,12 @@ function finalizeMiddayOhlcvBeforeMainRun_() {
       SpreadsheetApp.flush();
     }
   } catch (e) {
-    writeProcessLog_("OHLCV", "16:00本番開始前の13:30先行取得整理でエラーが発生しました。状態だけクリアして本番処理を続行します。", {
+    writeProcessLog_("OHLCV", "15:51本番開始前の13:21先行取得整理でエラーが発生しました。状態だけクリアして本番処理を続行します。", {
       message: e && e.message ? e.message : String(e)
     });
   }
   clearMiddayOhlcvState_();
-  writeProcessLog_("OHLCV", "16:00本番開始前に13:30先行取得の再開状態をクリアしました。", {});
+  writeProcessLog_("OHLCV", "15:51本番開始前に13:21先行取得の再開状態をクリアしました。", {});
 }
 
 // 変更後
@@ -4369,7 +4398,7 @@ if (phase === "PHASE1") {
   const rawAlertVolumeMapData = buildRawAlertVolumeMapForBusinessDate_(rawSheet, todayKey);
   const rawAlertVolumeMap = rawAlertVolumeMapData.volumeMap;
 
-  writeProcessLog_("OHLCV", "alerts_raw のvolumeを16:00本番取得の出来高上書き用に読み込みました。", rawAlertVolumeMapData.stats);
+  writeProcessLog_("OHLCV", "alerts_raw のvolumeを15:51本番取得の出来高上書き用に読み込みました。", rawAlertVolumeMapData.stats);
 
   // 以降、今までのPHASE1処理
     let symbols = JSON.parse(props.getProperty(SYMBOL_LIST_KEY) || "[]");
@@ -4589,7 +4618,7 @@ const intraRes = responses[meta.intraIdx];
 
 const dailyMap = buildDailyOhlcvMapFromYahooResponse_(dailyRes);
 
-// 16:00本番では、今日分だけ parseIntraResponse_ 内の日足補正を外す。
+// 15:51本番では、今日分だけ parseIntraResponse_ 内の日足補正を外す。
 // 今日分のAM/PM補正は、既存AM行の有無を見て後段で制御する。
 const dailyMapForParse = Object.assign({}, dailyMap);
 delete dailyMapForParse[todayKey];
@@ -4982,7 +5011,7 @@ function prepareMainRunRowsFastPmVolume_(symbol, rows, dailyMap, todayKey, rawAl
         });
       }
       // PMをalerts_rawの出来高で上書きした分、AM側で吸収して AM+PM のトータルを fetched 合計に維持する。
-      // MIDDAY_LOCKED（13:30のAM保護）が付いているAM行は触らない（同日AM+PM両シグナルは発生しない想定）。
+      // MIDDAY_LOCKED（13:21のAM保護）が付いているAM行は触らない（同日AM+PM両シグナルは発生しない想定）。
       if (fastAmRow && !isProtectedMiddayOhlcvMarker_(fastAmRow[1])) {
         const fastFetchedAm = toSafeVolumeNumber_(fastAmRow[7]);
         const fastAmRawAdjusted = fastFetchedAm + fastPmBefore - fastRawPmVolRounded;
@@ -6030,7 +6059,7 @@ function parseIntraResponse_(tvSymbol, intraRes, factorMap, dailyMap, options) {
       p.high = round(Math.max(p.high, high));
       p.low = round(Math.min(p.low, low));
       p.close = round(close);
-            // 13:30暫定実行の今日AMだけは、Yahoo 1h出来高が累積っぽく返る銘柄対策として
+            // 13:21暫定実行の今日AMだけは、Yahoo 1h出来高が累積っぽく返る銘柄対策として
       // 単純合算せず、最大値を採用する。
       if (
         todayKeyForMaxAmVolume &&
@@ -7400,7 +7429,7 @@ function buildHistoricalVolumeRepairChunkContext_(sheet, rowStart, rowEnd, symbo
     const symbol = String(values[i][2] || "").trim();
     if (!symbolSet[symbol] || !isHistoricalVolumeRepairSessionTs_(ts)) continue;
 
-    // alerts_raw 由来の保護行（13:30 AM保護 / 16:00 PM保護）は出来高上書きから除外する
+    // alerts_raw 由来の保護行（13:21 AM保護 / 15:51 PM保護）は出来高上書きから除外する
     const marker = String(values[i][1] || "").trim();
     if (isProtectedMiddayOhlcvMarker_(marker) || isPmLockedMarker_(marker)) continue;
 
@@ -8572,7 +8601,7 @@ function purgeSupersededMiddayAmRows_(sheet, businessDateKey, maxRows) {
   if (deleteRows.length === 0) return { deletedRows: 0 };
 
   deleteRowsByRowNums_(sheet, deleteRows);
-  writeProcessLog_("OHLCV", "16:00本番行で置き換えられる13:30先行AM行を削除しました。", {
+  writeProcessLog_("OHLCV", "15:51本番行で置き換えられる13:21先行AM行を削除しました。", {
     businessDate: dateKey,
     scannedRows: scanRows,
     deletedRows: deleteRows.length,
@@ -8761,7 +8790,7 @@ function getOhlcvRowPriority_(row) {
   if (isProtectedMiddayOhlcvMarker_(marker)) return 0;
   if (isPmLockedMarker_(marker)) return 0;
 
-  // 2位: 16:00本番取得の refresh ID 系（PHASE1 で B 列に書かれる "new_session" /
+  // 2位: 15:51本番取得の refresh ID 系（PHASE1 で B 列に書かれる "new_session" /
   //      yyyyMMdd_HHmmss / manual_phase4_* 等の本番取得ID）
   if (marker
       && !marker.match(/^MIDDAY_/)
@@ -8775,7 +8804,7 @@ function getOhlcvRowPriority_(row) {
   // GAP_REPAIR は本番取得より下
   if (marker === "GAP_REPAIR") return 2;
 
-  // 13:30暫定行（LOCKED以外のMIDDAY_*）は本番より下
+  // 13:21暫定行（LOCKED以外のMIDDAY_*）は本番より下
   if (marker.match(/^MIDDAY_/)) return 3;
 
   // 何もない通常行
@@ -10936,10 +10965,10 @@ function isUrlFetchDailyLimitError_(err) {
 }
 
 // 当日の rawAlertVolumeMap を CacheService にキャッシュするキー。
-// 13:30 と 16:00 で同じ営業日のマップを 2 回計算する無駄を避けるため。
+// 13:21 と 15:51 で同じ営業日のマップを 2 回計算する無駄を避けるため。
 // businessDate が変わったら自動的にミスする（payload 内の businessDate と照合）。
 const RAW_ALERT_VOLUME_MAP_CACHE_KEY = "RAW_ALERT_VOLUME_MAP_V1";
-const RAW_ALERT_VOLUME_MAP_CACHE_TTL_SEC = 6 * 60 * 60; // 6 時間。13:30→16:00 の再利用に十分
+const RAW_ALERT_VOLUME_MAP_CACHE_TTL_SEC = 6 * 60 * 60; // 6 時間。13:21→15:51 の再利用に十分
 const RAW_ALERT_VOLUME_MAP_CACHE_MAX_BYTES = 90 * 1024; // CacheService の 100KB 上限から安全マージン
 
 function loadCachedRawAlertVolumeMap_(businessDateKey) {
@@ -11323,7 +11352,7 @@ function finishOhlcvPhase4UltraLight_(ohlcvSheet, todayKey, startTime) {
   // 後段の resumeOhlcvPostRepairCleanup は OHLCV_POST_REPAIR_DEDUP_READ_ROWS=5000 行しか
   // スキャンしないため、それより前にある MIDDAY_yyyy-mm-dd / GAP_REPAIR 系の重複が
   // 取りこぼされる。PHASE4 で広い範囲を一気に掃除しておく。
-  // GAS 6 分上限を超えないよう PHASE4 残時間内で打ち切り、未完了分は次回の 16:00
+  // GAS 6 分上限を超えないよう PHASE4 残時間内で打ち切り、未完了分は次回の 15:51
   // または手動 cleanupOhlcvDuplicatesNow() に委譲する。
   try {
     const phase4DeadlineMs = startTime + 5 * 60 * 1000; // 5 分（6 分上限から 1 分バッファ）
@@ -11511,7 +11540,7 @@ function cleanupOhlcvDuplicatesNow() {
   try {
     lock = LockService.getScriptLock();
     if (!lock.tryLock(30 * 1000)) {
-      // 他処理（16:00 取得など）がロック中。1 分後に再試行
+      // 他処理（15:51 取得など）がロック中。1 分後に再試行
       scheduleCleanupOhlcvDuplicatesRetry_(OHLCV_FULL_DEDUP_LOCK_RETRY_AFTER_MS);
       writeProcessLog_("OHLCV", "全行重複削除: 別処理がロック中。1 分後に自動リトライします。", {});
       return { skipped: true, reason: "lock_busy" };

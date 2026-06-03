@@ -56,13 +56,13 @@ OVERLAP_DAYS = 3
 | `lastTs` なし | 直近120日分を `period1/period2` で取得 |
 | `OHLCV_REPAIR_SYMBOLS` 対象 | 直近120日分を強制再取得 |
 | `lastTs` が取得終了時刻以上 | 異常値対策として直近範囲を `period1/period2` で取得 |
-| `lastTs` が直近5日以内 | 13:30/16:00本体では `period1/period2` を強制し、`lastTs - 3日` から取得終了時刻まで取得 |
+| `lastTs` が直近5日以内 | 13:21/15:51本体では `period1/period2` を強制し、`lastTs - 3日` から取得終了時刻まで取得 |
 | `lastTs` が6日〜120日以内 | `lastTs` の3日前から現在まで `period1/period2` で取得 |
 | `lastTs` が120日より古い | 直近120日分を `period1/period2` で取得 |
 
 重要。
 
-- 13:30/16:00本体では `range=5d` を使わない。`range=5d` は取得終了時刻を明示できず、当日足のキャッシュ差異でAM集約が壊れるため、直近取得でも `period1/period2` を使う。
+- 13:21/15:51本体では `range=5d` を使わない。`range=5d` は取得終了時刻を明示できず、当日足のキャッシュ差異でAM集約が壊れるため、直近取得でも `period1/period2` を使う。
 - `lastTs` が40日前など中途半端に古い場合に `range=5d` を使うと、40日前〜直近5営業日前までの空白期間が生まれる。
 - そのため、6日〜120日以内の既存銘柄は `lastTs - 3日` から取得する。
 - 3日の重ね取りは、Yahoo側の欠損、祝日、前回途中終了、AM/PM合成境界のズレを吸収するため。
@@ -209,9 +209,11 @@ OVERLAP_DAYS = 3
   - 本番反映時は `clasp pull` でmanifestとファイル名を確認し、`gas.txt` を `.clasp-src/株価記録&週報作成.js` へ反映してから `clasp push -f` する。
 - トリガー再設定:
   - `setupAllTriggers()` を手動実行
+  - OHLCV固定トリガーだけを再設定する場合は `resetOhlcvFetchTriggersOnly()` を手動実行
 - 旧スキーマ移行:
   - `migrateCurrentSchemaToMidtermTracking_()` を手動実行
 - `setupAllTriggers()` は既存プロジェクトトリガーを全削除して固定トリガーだけ再登録する。動的な再開トリガー実行中に不用意に実行しない。
+- `resetOhlcvFetchTriggersOnly()` は `fetchOHLCVForNewAlertsMidday` / `fetchOHLCVForNewAlerts` の固定トリガーだけを削除・再登録し、動的再開トリガーは触らない。
 
 ## 固定トリガー一覧
 
@@ -221,8 +223,8 @@ OVERLAP_DAYS = 3
 |---|---:|---|
 | `buildAndSendWeeklyReport` | 土曜 9:05 JST | 週次レポート送信 |
 | `syncMarketHolidays` | 毎月1日 3:10 JST | 内閣府祝日CSV + JPX年末年始休場日を同期 |
-| `fetchOHLCVForNewAlertsMidday` | 毎日 13:30 JST | 当日AM分までのOHLCV先行取得。後続チェーンなし |
-| `fetchOHLCVForNewAlerts` | 毎日 16:00 JST | OHLCV本番取得 → 日次メンテ → GAP修復チェーン |
+| `fetchOHLCVForNewAlertsMidday` | 毎日 13:21 JST | 当日AM分までのOHLCV先行取得。後続チェーンなし |
+| `fetchOHLCVForNewAlerts` | 毎日 15:51 JST | OHLCV本番取得 → 日次メンテ → GAP修復チェーン |
 | `purgeOldOhlcvDataDaily` | 毎日 2:00 JST | 365日超の古いOHLCV削除 |
 | `purgeOldSignalArchiveRowsDaily` | 毎日 2:10 JST | `signals_archive` の保持期限超過データ削除 |
 
@@ -235,10 +237,10 @@ OVERLAP_DAYS = 3
 | `sendDeferredDiscordPayload` | Discord 429 レート制限時 | 延期したDiscordペイロードを再送 |
 | `runDailyMaintenanceTrigger` | OHLCV PHASE4完了後 | `runDailyMaintenance` を起動 |
 | `quickRepairTrigger` | `runDailyMaintenance` 完了後 / cleanup完了後 | `quickRepairRecentGaps` を起動 |
-| `resumeOHLCVFetchMidday` | 13:30先行OHLCV取得の再開時 | `fetchOHLCVForNewAlertsMidday` を再起動 |
-| `postprocessMiddayOhlcv` | 13:30先行OHLCV取得完了後 | 追記後のtimestamp正規化・不正timestamp削除を小分けで再開 |
-| `resumeMiddayOhlcvRollback` | 13:30先行OHLCV戻し処理の再開時 | 触った銘柄の120日OHLCV削除を再開 |
-| `resumeOHLCVFetch` | 16:00 OHLCV本番取得の再開時 | `fetchOHLCVForNewAlerts` を再起動 |
+| `resumeOHLCVFetchMidday` | 13:21先行OHLCV取得の再開時 | `fetchOHLCVForNewAlertsMidday` を再起動 |
+| `postprocessMiddayOhlcv` | 13:21先行OHLCV取得完了後 | 追記後のtimestamp正規化・不正timestamp削除を小分けで再開 |
+| `resumeMiddayOhlcvRollback` | 13:21先行OHLCV戻し処理の再開時 | 触った銘柄の120日OHLCV削除を再開 |
+| `resumeOHLCVFetch` | 15:51 OHLCV本番取得の再開時 | `fetchOHLCVForNewAlerts` を再起動 |
 | `resumeDailyMaintenance` | 日次メンテナンス再開時 | `runDailyMaintenanceInternal_` を再開 |
 | `resumeQuickRepair` | GAP修復再開時 | `quickRepairRecentGaps` を再開 |
 | `resumeOhlcvPostRepairCleanup` | GAP修復後cleanup再開時 | timestamp正規化、AM保護マーキング、日付バケット重複整理、最終sortを再開 |
@@ -289,7 +291,7 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 - `09:00 JST` はAM代表行。
 - `13:00 JST` はPM代表行。
 - B列 `alert_id` には通常取得、`MIDDAY_yyyy-mm-dd`、`MIDDAY_LOCKED_yyyy-mm-dd`、`GAP_REPAIR` などのマーカーが入る。
-- `MIDDAY_LOCKED_yyyy-mm-dd` は13:30に `alerts_raw` の出来高を転記したAM保護行。16:00本番、GAP修復、重複整理、MIDDAY掃除でも削除・上書きしない。
+- `MIDDAY_LOCKED_yyyy-mm-dd` は13:21に `alerts_raw` の出来高を転記したAM保護行。15:51本番、GAP修復、重複整理、MIDDAY掃除でも削除・上書きしない。
 - 重複排除は `timestamp + symbol`。
 - 最終状態は必ず timestamp 昇順へ戻す。
 
@@ -305,7 +307,7 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 | `DISCORD_WEBHOOK` | ✅ | OHLCV完了通知先Discord Webhook |
 | `GITHUB_PAT` | 任意 | `Ken5InvestmentLab/screening-bot` の `optimize.yml` dispatch 用 |
 | `OHLCV_VERBOSE_FETCH_LOGS` | 任意 | `true` のとき銘柄別OHLCV取得ログを詳細出力 |
-| `OHLCV_VERBOSE_PM_VOLUME_LOGS` | 任意 | `true` のとき16:00本番の銘柄別PM出来高補正ログを詳細出力 |
+| `OHLCV_VERBOSE_PM_VOLUME_LOGS` | 任意 | `true` のとき15:51本番の銘柄別PM出来高補正ログを詳細出力 |
 
 ### 内部状態
 
@@ -314,10 +316,10 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 | `LAST_WEEKLY_REPORT_WEEK` | 週次レポート重複送信防止 |
 | `VARIANT_HISTORY_V1` | 週次レポート文言の直近履歴 |
 | `DEFERRED_DISCORD_PAYLOAD` | Discord 429時の延期ペイロード |
-| `OHLCV_CURRENT_PHASE` | 16:00 OHLCV本番取得フェーズ |
-| `OHLCV_PROGRESS_INDEX` | 16:00 OHLCV本番取得の再開カーソル |
-| `OHLCV_SYMBOL_LIST` | 16:00 OHLCV本番取得対象銘柄 |
-| `OHLCV_NEW_ALERT_COUNT` | 16:00 OHLCV本番取得時の当日シグナル銘柄数 |
+| `OHLCV_CURRENT_PHASE` | 15:51 OHLCV本番取得フェーズ |
+| `OHLCV_PROGRESS_INDEX` | 15:51 OHLCV本番取得の再開カーソル |
+| `OHLCV_SYMBOL_LIST` | 15:51 OHLCV本番取得対象銘柄 |
+| `OHLCV_NEW_ALERT_COUNT` | 15:51 OHLCV本番取得時の当日シグナル銘柄数 |
 | `CURRENT_REFRESH_ID` | 現在のOHLCV取得ID |
 | `LAST_TS_MAP` | 銘柄別最終timestamp |
 | `SYNC_ENTRY_PRICE_INDEX` | entry_price 同期処理用カーソル |
@@ -327,16 +329,16 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 | `OHLCV_REPAIR_SYMBOLS` | 次回120日再取得する修復対象銘柄 |
 | `OHLCV_MANUAL_BUSINESS_DATE` | 手動基準日 |
 | `OHLCV_MANUAL_BUSINESS_EXPIRES_AT` | 手動基準日の期限 |
-| `OHLCV_MIDDAY_PROGRESS_INDEX` | 13:30先行取得の再開カーソル |
-| `OHLCV_MIDDAY_SYMBOL_LIST` | 13:30先行取得対象銘柄 |
-| `OHLCV_MIDDAY_NEW_ALERT_COUNT` | 13:30先行取得時の当日シグナル銘柄数 |
-| `OHLCV_MIDDAY_LAST_TS_MAP` | 13:30先行取得用の銘柄別最終timestamp |
-| `OHLCV_MIDDAY_REFRESH_ID` | 13:30先行取得ID |
-| `OHLCV_MIDDAY_FULL_BACKFILL_SYMBOLS` | 13:30で120日取得する真の新規銘柄 |
-| `OHLCV_MIDDAY_POSTPROCESS_PENDING` | 13:30後処理トリガーが残っているかの印 |
-| `OHLCV_MIDDAY_POSTPROCESS_STATE_V1` | 13:30後処理の末尾timestamp掃除を小分け再開する状態 |
-| `OHLCV_MIDDAY_ROLLBACK_STATE_V1` | 13:30先行取得戻し処理の再開状態 |
-| `OHLCV_MIDDAY_ROLLBACK_SYMBOLS_V1` | 13:30先行取得戻し処理で120日削除する銘柄 |
+| `OHLCV_MIDDAY_PROGRESS_INDEX` | 13:21先行取得の再開カーソル |
+| `OHLCV_MIDDAY_SYMBOL_LIST` | 13:21先行取得対象銘柄 |
+| `OHLCV_MIDDAY_NEW_ALERT_COUNT` | 13:21先行取得時の当日シグナル銘柄数 |
+| `OHLCV_MIDDAY_LAST_TS_MAP` | 13:21先行取得用の銘柄別最終timestamp |
+| `OHLCV_MIDDAY_REFRESH_ID` | 13:21先行取得ID |
+| `OHLCV_MIDDAY_FULL_BACKFILL_SYMBOLS` | 13:21で120日取得する真の新規銘柄 |
+| `OHLCV_MIDDAY_POSTPROCESS_PENDING` | 13:21後処理トリガーが残っているかの印 |
+| `OHLCV_MIDDAY_POSTPROCESS_STATE_V1` | 13:21後処理の末尾timestamp掃除を小分け再開する状態 |
+| `OHLCV_MIDDAY_ROLLBACK_STATE_V1` | 13:21先行取得戻し処理の再開状態 |
+| `OHLCV_MIDDAY_ROLLBACK_SYMBOLS_V1` | 13:21先行取得戻し処理で120日削除する銘柄 |
 | `DAILY_MAINT_CURSOR` | 日次メンテナンス再開カーソル |
 | `DAILY_MAINT_NEW_COUNT` | 日次メンテナンス用の新規件数メタ |
 | `DAILY_MAINT_REFRESH_ID` | 日次メンテナンス用の取得IDメタ |
@@ -385,14 +387,14 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 
 ### 日次処理チェーン
 
-13:30 と 16:00 は役割が異なる。
+13:21 と 15:51 は役割が異なる。
 
-#### 13:30: `fetchOHLCVForNewAlertsMidday`
+#### 13:21: `fetchOHLCVForNewAlertsMidday`
 
-13:30はAM先行取得だけを行う。
+13:21はAM先行取得だけを行う。
 
 - 当日が休場日の場合はスキップ。
-- 16:00本番処理が近い場合は再開せず終了。
+- 15:51本番処理が近い場合は再開せず終了。
 - 対象銘柄は `alerts_raw` に登場する `BOTTOM` シグナルの銘柄。`TOP` シグナルだけの銘柄は取得対象にしない。
 - 今日シグナルが出た銘柄数はメタ情報として `OHLCV_MIDDAY_NEW_ALERT_COUNT` に保持。
 - OHLCV未取得銘柄だけ120日分取得。
@@ -404,19 +406,19 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 - 当日PM行や14:00以降のYahoo足、15:30終値スナップショットは保存しない。
 - 追記後はtimestamp readback検証と軽量な不正timestamp掃除を行うが、GAP修復前の重複整理はしない。
 - MIDDAY追記時は、既存の `timestamp + symbol` と同じ行を書き込まない。既知の `lastTs` 以下の取得結果を捨て、追記直前の既存キー確認はA列ソート前提の日付範囲だけを軽く読む。ソート崩れで漏れた重複は後段の重複削除に任せる。
-- 13:30で `alerts_raw` から出来高を転記したAM行は `MIDDAY_LOCKED_yyyy-mm-dd` として保存し、後続処理では保護する。
-- 13:30再開時は毎回末尾12,000行の不正timestamp掃除を走らせない。初回入口の軽量掃除と `appendRowsToSheet_` 直後の読み返し削除で吸収する。
-- 13:30完了後の広めのtimestamp後処理は `postprocessMiddayOhlcv` に分離し、`OHLCV_MIDDAY_POSTPROCESS_STATE_V1` で末尾から小分け再開する。一括30,000行スキャンへ戻さない。
-- 13:30取得本体では、完了直後の広めのtimestamp後処理をインライン実行しない。GASの6分上限に近づく前に取得を区切り、後処理は `postprocessMiddayOhlcv` の別トリガーへ逃がす。
-- 13:30取得の安全再開トリガーは、通常の自前pause/resumeと重なってロック待ちを増やさないよう、fetch本体の自前実行上限より十分後ろに置く。
-- 13:30取得結果は実行末尾までメモリに溜めず、Yahoo取得バッチごとに `ohlcv_4h` へ追記してカーソルを進める。タイムアウトや16:00引き継ぎ時に、未永続化の取得済み行を失わないようにする。
-- 同じ13:30取得カーソルでタイムアウトが続く場合は、次回実行でYahoo取得バッチを縮小し、単一銘柄でも詰まる場合だけ修復キューへ逃がして全体を止めない。
+- 13:21で `alerts_raw` から出来高を転記したAM行は `MIDDAY_LOCKED_yyyy-mm-dd` として保存し、後続処理では保護する。
+- 13:21再開時は毎回末尾12,000行の不正timestamp掃除を走らせない。初回入口の軽量掃除と `appendRowsToSheet_` 直後の読み返し削除で吸収する。
+- 13:21完了後の広めのtimestamp後処理は `postprocessMiddayOhlcv` に分離し、`OHLCV_MIDDAY_POSTPROCESS_STATE_V1` で末尾から小分け再開する。一括30,000行スキャンへ戻さない。
+- 13:21取得本体では、完了直後の広めのtimestamp後処理をインライン実行しない。GASの6分上限に近づく前に取得を区切り、後処理は `postprocessMiddayOhlcv` の別トリガーへ逃がす。
+- 13:21取得の安全再開トリガーは、通常の自前pause/resumeと重なってロック待ちを増やさないよう、fetch本体の自前実行上限より十分後ろに置く。
+- 13:21取得結果は実行末尾までメモリに溜めず、Yahoo取得バッチごとに `ohlcv_4h` へ追記してカーソルを進める。タイムアウトや15:51引き継ぎ時に、未永続化の取得済み行を失わないようにする。
+- 同じ13:21取得カーソルでタイムアウトが続く場合は、次回実行でYahoo取得バッチを縮小し、単一銘柄でも詰まる場合だけ修復キューへ逃がして全体を止めない。
 - 日次メンテナンス、GitHub Actions、GAP修復には進まない。
 - 完了通知のみ送る。
 
-#### 16:00: `fetchOHLCVForNewAlerts`
+#### 15:51: `fetchOHLCVForNewAlerts`
 
-16:00が本番チェーンの起点。
+15:51が本番チェーンの起点。
 
 ```text
 fetchOHLCVForNewAlerts
@@ -430,15 +432,15 @@ fetchOHLCVForNewAlerts
           → quickRepairRecentGaps
 ```
 
-16:00開始時のルール。
+15:51開始時のルール。
 
 - 残っている `resumeOHLCVFetchMidday` を削除。
-- 13:30専用プロパティをクリア。
-- 13:30で書き込まれたOHLCV行はシート上の成果として引き継ぐ。
-- 13:30から16:00へ引き継がれるのは、`ohlcv_4h` に永続化済みの行だけ。13:30側で未追記のメモリ上データを前提にしない。
-- 16:00側で通常どおり再取得し、重複整理はGAP修復後の最終処理へ回す。
-- 16:00本番で同じ日付・銘柄のAM行を再取得できた場合、通常の `MIDDAY_yyyy-mm-dd` のAM行は削除対象にできるが、`MIDDAY_LOCKED_yyyy-mm-dd` は保護する。
-- 16:00本番の当日PM出来高は、保護AM出来高があればそれを優先して `日足出来高 - AM出来高` で補正する。AM行自体は上書きしない。
+- 13:21専用プロパティをクリア。
+- 13:21で書き込まれたOHLCV行はシート上の成果として引き継ぐ。
+- 13:21から15:51へ引き継がれるのは、`ohlcv_4h` に永続化済みの行だけ。13:21側で未追記のメモリ上データを前提にしない。
+- 15:51側で通常どおり再取得し、重複整理はGAP修復後の最終処理へ回す。
+- 15:51本番で同じ日付・銘柄のAM行を再取得できた場合、通常の `MIDDAY_yyyy-mm-dd` のAM行は削除対象にできるが、`MIDDAY_LOCKED_yyyy-mm-dd` は保護する。
+- 15:51本番の当日PM出来高は、保護AM出来高があればそれを優先して `日足出来高 - AM出来高` で補正する。AM行自体は上書きしない。
 - 当日が休場日の場合はスキップ。
 - 対象銘柄は `alerts_raw` に登場する `BOTTOM` シグナルの銘柄。`OHLCV_REPAIR_SYMBOLS` も、その `BOTTOM` 銘柄集合に含まれるものだけ取得対象にする。
 - OHLCV未取得銘柄は120日分取得。
@@ -447,8 +449,8 @@ fetchOHLCVForNewAlerts
   - `lastTs` が直近5日以内: `lastTs` の3日前から現在まで `period1/period2` で取得
   - `lastTs` が6日〜120日以内: `lastTs` の3日前から現在まで
   - `lastTs` が120日より古い: 直近120日分
-- 16:00 PHASE1の取得結果も実行末尾までメモリに溜めず、Yahoo取得バッチごとに追記してカーソルを進める。
-- 16:00 PHASE1でも同じカーソルでYahoo取得が詰まる場合は、次回実行でバッチを縮小し、単一銘柄でも詰まる場合だけ修復キューへ逃がす。
+- 15:51 PHASE1の取得結果も実行末尾までメモリに溜めず、Yahoo取得バッチごとに追記してカーソルを進める。
+- 15:51 PHASE1でも同じカーソルでYahoo取得が詰まる場合は、次回実行でバッチを縮小し、単一銘柄でも詰まる場合だけ修復キューへ逃がす。
 
 ### OHLCV取得フェーズ
 
@@ -482,8 +484,8 @@ refetchSymbolRange(symbols, startDate, endDate)
 - 終値スナップショットはPMバケットの `close` だけを更新し、`open/high/low/volume` には混ぜない。
 - 通常取得・GAP修復・過去出来高補正では Yahoo Finance の `1h` を主に使う。
 - `1d` はデバッグや分割情報確認など必要な場合に限る。
-- 13:30先行取得、GAP修復、過去出来高補正では、日足出来高を欠損しているAM/PM片側へ寄せない。AM/PM別出来高は1h足の集約値を保存し、欠損は正規再取得で補う。
-- 16:00本番取得の当日PMだけは、日足出来高がAM出来高以上の場合に `PM出来高 = 日足出来高 - AM出来高` でPM行の出来高を補正してよい。1h足由来のPM OHLCがある場合はOHLCをそのまま使い、PM行を合成する必要がある場合だけ日足終値で `O=H=L=C` を埋める。
+- 13:21先行取得、GAP修復、過去出来高補正では、日足出来高を欠損しているAM/PM片側へ寄せない。AM/PM別出来高は1h足の集約値を保存し、欠損は正規再取得で補う。
+- 15:51本番取得の当日PMだけは、日足出来高がAM出来高以上の場合に `PM出来高 = 日足出来高 - AM出来高` でPM行の出来高を補正してよい。1h足由来のPM OHLCがある場合はOHLCをそのまま使い、PM行を合成する必要がある場合だけ日足終値で `O=H=L=C` を埋める。
 
 ### 日次メンテナンス
 
@@ -680,13 +682,13 @@ previewWeeklyReportThisWeek()              // 今週分レポートのプレビ�
 syncMarketHolidays()                       // 祝日同期
 clearManualOhlcvBusinessDate()             // 手動基準日解除
 
-fetchOHLCVForNewAlertsMidday()             // 13:30先行取得を手動実行
-fetchOHLCVForNewAlerts()                   // 16:00本番OHLCVチェーンを手動実行
+fetchOHLCVForNewAlertsMidday()             // 13:21先行取得を手動実行
+fetchOHLCVForNewAlerts()                   // 15:51本番OHLCVチェーンを手動実行
 resetAllOhlcvProperties()                  // OHLCV関連進捗プロパティをリセット
 previewRollbackMiddayOhlcv20260511()       // 2026-05-11 13:30取得戻し対象をDryRun確認
 rollbackMiddayOhlcv20260511()              // 2026-05-11 13:30取得で触った銘柄の120日OHLCVを削除して修復キューへ積む
-resumeMiddayOhlcvRollback()                // 13:30取得戻し処理の再開
-resetMiddayOhlcvRollbackState()            // 13:30取得戻し処理の状態リセット
+resumeMiddayOhlcvRollback()                // 13:21取得戻し処理の再開
+resetMiddayOhlcvRollbackState()            // 13:21取得戻し処理の状態リセット
 
 purgeOldOhlcvDataDaily()                   // 365日超のOHLCV削除
 purgeOldSignalArchiveRowsDaily()           // signals_archive保持期限超過データ削除

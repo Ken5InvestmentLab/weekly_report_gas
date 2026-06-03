@@ -10,8 +10,8 @@ TradingView のアラートを Webhook で受信し、JPX銘柄の中期パフ�
 - HMAC-SHA256 署名検証
 - `alerts_raw` へのアラート記録
 - `ohlcv_4h` へのAM/PM OHLCV保存
-- 13:30のAM先行OHLCV取得
-- 16:00の本番OHLCV取得
+- 13:21のAM先行OHLCV取得
+- 15:51の本番OHLCV取得
 - 株式分割検出・価格調整
 - 5/10/20/40営業日後の評価更新
 - Discord週次レポート送信
@@ -29,12 +29,12 @@ TradingView Alert
   → doPost
     → alerts_raw に記録
 
-13:30
+13:21
   → fetchOHLCVForNewAlertsMidday
     → AM分までOHLCV先行取得
     → 日次メンテ/GitHub Actions/GAP修復には進まない
 
-16:00
+15:51
   → fetchOHLCVForNewAlerts
     → PHASE1: OHLCV取得
     → PHASE2: 株式分割検出・価格調整
@@ -129,6 +129,7 @@ setupAllTriggers()
 ```
 
 この関数は既存トリガーを全削除し、固定トリガーだけ再登録します。
+OHLCV固定トリガーだけを再設定する場合は、動的再開トリガーを触らない `resetOhlcvFetchTriggersOnly()` を使います。
 
 ## 固定トリガー
 
@@ -136,8 +137,8 @@ setupAllTriggers()
 |---|---:|---|
 | `buildAndSendWeeklyReport` | 土曜 9:05 JST | 週次レポート送信 |
 | `syncMarketHolidays` | 毎月1日 3:10 JST | 祝日同期 |
-| `fetchOHLCVForNewAlertsMidday` | 毎日 13:30 JST | AM分OHLCV先行取得 |
-| `fetchOHLCVForNewAlerts` | 毎日 16:00 JST | OHLCV本番取得 |
+| `fetchOHLCVForNewAlertsMidday` | 毎日 13:21 JST | AM分OHLCV先行取得 |
+| `fetchOHLCVForNewAlerts` | 毎日 15:51 JST | OHLCV本番取得 |
 | `purgeOldOhlcvDataDaily` | 毎日 2:00 JST | 365日超のOHLCV削除 |
 | `purgeOldSignalArchiveRowsDaily` | 毎日 2:10 JST | 古い `signals_archive` 削除 |
 
@@ -150,8 +151,8 @@ setupAllTriggers()
 | `sendDeferredDiscordPayload` | Discordレート制限時の再送 |
 | `runDailyMaintenanceTrigger` | OHLCV完了後の日次メンテ起動 |
 | `quickRepairTrigger` | GAP修復起動 |
-| `resumeOHLCVFetchMidday` | 13:30 OHLCV先行取得の再開 |
-| `resumeOHLCVFetch` | 16:00 OHLCV本番取得の再開 |
+| `resumeOHLCVFetchMidday` | 13:21 OHLCV先行取得の再開 |
+| `resumeOHLCVFetch` | 15:51 OHLCV本番取得の再開 |
 | `resumeDailyMaintenance` | 日次メンテナンスの再開 |
 | `resumeQuickRepair` | GAP修復の再開 |
 | `purgeOldOhlcvResumeTrigger` | OHLCV削除の再開 |
@@ -202,20 +203,20 @@ OVERLAP_DAYS = 3
 |---|---|
 | OHLCV未取得銘柄 | 直近120日分 |
 | `OHLCV_REPAIR_SYMBOLS` 対象銘柄 | 直近120日分を強制再取得 |
-| `lastTs` が直近5日以内 | 13:30/16:00本体では `period1/period2` を強制し、`lastTs - 3日` から取得終了時刻まで取得 |
+| `lastTs` が直近5日以内 | 13:21/15:51本体では `period1/period2` を強制し、`lastTs - 3日` から取得終了時刻まで取得 |
 | `lastTs` が6日〜120日以内 | `lastTs` の3日前から現在まで `period1/period2` |
 | `lastTs` が120日より古い | 直近120日分 |
 | `lastTs` が取得終了時刻以上 | 異常値対策として直近範囲を `period1/period2` |
 
 ポイント。
 
-- 13:30/16:00本体では `range=5d` を使わない。`range=5d` は取得終了時刻を明示できず、当日足のキャッシュ差異でAM集約が壊れるため、直近取得でも `period1/period2` を使う。
+- 13:21/15:51本体では `range=5d` を使わない。`range=5d` は取得終了時刻を明示できず、当日足のキャッシュ差異でAM集約が壊れるため、直近取得でも `period1/period2` を使う。
 - `lastTs` が40日前など中途半端に古い場合は、`range=5d` ではなく `lastTs - 3日` から取得する。
 - これにより、40日前〜直近5営業日前のような空白期間を防ぐ。
 - 3日の重ね取りは、Yahoo側の欠損、祝日、前回途中終了、AM/PM合成境界のズレを吸収するため。
 - 重ね取りで重複した行は `timestamp + symbol` で重複排除する。
 
-### 13:30先行取得
+### 13:21先行取得
 
 関数。
 
@@ -233,11 +234,11 @@ fetchOHLCVForNewAlertsMidday()
   - `lastTs` が6日〜120日以内: `lastTs` の3日前から当日AM終端まで
   - `lastTs` が120日より古い: 直近120日分
 - 今日シグナルが出た銘柄数はメタ情報として保持する。
-- 16:00本番チェーンには進まない。
+- 15:51本番チェーンには進まない。
 - 日次メンテナンス、GitHub Actions、GAP修復は起動しない。
-- 16:00本番が近い場合は再開せず終了する。
+- 15:51本番が近い場合は再開せず終了する。
 
-### 16:00本番取得
+### 15:51本番取得
 
 関数。
 
@@ -280,8 +281,8 @@ fetchOHLCVForNewAlerts()
 - `15:30 JST` の `volume=0` かつ `O=H=L=C` バーは後場の終値スナップショットとして扱う。
 - 終値スナップショットはPMバケットの `close` だけを更新し、`open/high/low/volume` には混ぜない。
 - Yahoo Finance の `1d` は、デバッグや分割情報確認など必要な場合に限る。
-- 13:30先行取得、GAP修復、過去出来高補正では、日足出来高をAM/PM片側へ寄せて補正しない。AM/PM別出来高は1h足の集約値を保存し、欠損は正規再取得で補う。
-- 16:00本番取得の当日PMだけは、日足出来高がAM出来高以上の場合に `PM出来高 = 日足出来高 - AM出来高` でPM行の出来高を補正してよい。1h足由来のPM OHLCがある場合はOHLCをそのまま使い、PM行を合成する必要がある場合だけ日足終値で `O=H=L=C` を埋める。
+- 13:21先行取得、GAP修復、過去出来高補正では、日足出来高をAM/PM片側へ寄せて補正しない。AM/PM別出来高は1h足の集約値を保存し、欠損は正規再取得で補う。
+- 15:51本番取得の当日PMだけは、日足出来高がAM出来高以上の場合に `PM出来高 = 日足出来高 - AM出来高` でPM行の出来高を補正してよい。1h足由来のPM OHLCがある場合はOHLCをそのまま使い、PM行を合成する必要がある場合だけ日足終値で `O=H=L=C` を埋める。
 
 ## 評価ロジック
 
