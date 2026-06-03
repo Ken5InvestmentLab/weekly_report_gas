@@ -164,10 +164,10 @@ status, note, logged_at
 
 15:51  fetchOHLCVForNewAlerts → (PHASE1→2→3→4)
          PHASE1は未取得銘柄120日分、既存銘柄は当日PM分だけ取得。
-         → PHASE4完了: runDailyMaintenanceTrigger（5秒後）
+         → PHASE4完了: runDailyMaintenanceTrigger（10秒後）
            → runDailyMaintenance: 評価日到達銘柄の価格更新
              → 完了後: Discord完了通知をOHLCV_COMPLETION_NOTICE_PENDING_V1に保存
-               + quickRepairTrigger（5秒後）
+               + quickRepairTrigger（10秒後）
                → quickRepairRecentGaps: セッション欠落修復
                  → 完了後: resumeOhlcvPostRepairCleanup
                    → timestamp正規化・AM保護・重複整理・ソート
@@ -195,6 +195,7 @@ GAS の実行上限は **6分**。長時間処理はどちらかのパターン�
 3. GAS の 360 秒強制終了対策。バッファ 60 秒は `.after()` のスケジュール遅延吸収用
 4. ロック取得前後・対象件数・バッチ進捗を `console.log` に必ず出す
 5. OHLCV 13:21/15:51取得では、バッチ追記直後に再開カーソルと補助状態を保存し、safety retry は保存済み位置から引き継ぐ
+6. `.after(10 * 1000)` は10秒ぴったりの起動保証ではなく最小待機時間。実起動はGAS側の時間主導トリガーキューで遅れることがある
 
 **パターンB — 内部タイムリミット方式（`fetchOHLCVForNewAlerts`, `runDailyMaintenance`）**
 1. 処理開始時に `setupResumeTrigger_(handlerName)` で 10 秒後の継続トリガーをセット

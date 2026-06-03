@@ -250,6 +250,7 @@ OVERLAP_DAYS = 3
 | `resumeHistoricalOhlcvVolumeRepair` | 過去OHLCV出来高補正未完了時 | `repairHistoricalOhlcvVolumes` を再開 |
 
 重要: ワンショットトリガーのラッパー関数は、冒頭で `deleteTriggersByHandler_("自分の関数名")` を呼び、自分自身のトリガーを削除してから本体処理を呼ぶ。
+重要: `.after(10 * 1000)` は10秒ぴったりの起動保証ではなく、GAS側の最小待機時間指定。実際の起動はGoogle側の時間主導トリガーキューにより遅れることがある。
 
 ## スプレッドシート構造
 
@@ -497,7 +498,7 @@ refetchSymbolRange(symbols, startDate, endDate)
 - 全チェックポイントが埋まると `status=COMPLETE`。
 - DiscordのOHLCV完了通知は、日次メンテナンス直後ではなく、`quickRepairRecentGaps` 後の `resumeOhlcvPostRepairCleanup` が完了してから送る。
 - `GITHUB_PAT` があれば `Ken5InvestmentLab/screening-bot` の `optimize.yml` を起動。
-- 完了後に `quickRepairTrigger` を1分後に予約。
+- 完了後に `quickRepairTrigger` を10秒後に予約。
 
 ### アーカイブ・削除
 
@@ -550,7 +551,7 @@ emergencyStopQuickRepairAndCleanOhlcv()
 - `QUICK_REPAIR_TAIL_CLEANUP_STATE` を削除。
 - `cleanupLegacyGapFailedAndEmptyTimestamps(false)` を本番実行。
 - cleanupが複数回に分かれる場合は `resumeCleanupLegacyGapFailedAndEmptyTimestamps` で再開。
-- cleanup完了後にだけ `CLEANUP_LEGACY_AUTO_QUICK_REPAIR_V1` を見て `quickRepairTrigger` を1分後に予約。
+- cleanup完了後にだけ `CLEANUP_LEGACY_AUTO_QUICK_REPAIR_V1` を見て `quickRepairTrigger` を10秒後に予約。
 
 cleanup中に `quickRepairRecentGaps()` を直接起動しない。
 

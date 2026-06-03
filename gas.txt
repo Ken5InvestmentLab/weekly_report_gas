@@ -768,10 +768,10 @@ savePendingOhlcvCompletionNotice_(displayCount, "0", tag);
 deleteTriggersByHandler_("quickRepairTrigger");
 ScriptApp.newTrigger("quickRepairTrigger")
   .timeBased()
-  .after(5 * 1000)
+  .after(OHLCV_CHAIN_NEXT_TRIGGER_AFTER_MS)
   .create();
 
-writeProcessLog_("日次メンテナンス", "評価更新完了。Discord通知はpost-repair cleanup完了後に送信します。GAP修復を5秒後に起動します。", {
+writeProcessLog_("日次メンテナンス", "評価更新完了。Discord通知はpost-repair cleanup完了後に送信します。GAP修復を10秒後に起動します。", {
   handlerName: "quickRepairTrigger",
   discordNotice: "pending_after_post_repair_cleanup",
   githubOptimize: "after_post_repair_cleanup"
@@ -1877,6 +1877,7 @@ const OHLCV_PHASE1_MAX_RUN_MS = 150 * 1000;
 const OHLCV_LOCK_WAIT_MS = 15000;
 const OHLCV_LOCK_BUSY_RESUME_AFTER_MS = 60 * 1000;
 const OHLCV_SAFETY_RESUME_AFTER_MS = 6.5 * 60 * 1000;
+const OHLCV_CHAIN_NEXT_TRIGGER_AFTER_MS = 10 * 1000;
 const OHLCV_DEFAULT_LOOKBACK_DAYS = 120;
 const OHLCV_LAST_TS_SCAN_CHUNK_ROWS = 5000;
 const OHLCV_LAST_TS_SCAN_MAX_ROWS = 60000;
@@ -4988,7 +4989,7 @@ if (phase === "PHASE4") {
   deleteTriggersByHandler_("resumeOHLCVFetch");
   deleteTriggersByHandler_("resumeOHLCVFetchMidday");
 
-  writeProcessLog_("OHLCV", "OHLCV取得フローが完了しました。続いて日次メンテナンスを1分後に起動します。", {
+  writeProcessLog_("OHLCV", "OHLCV取得フローが完了しました。続いて日次メンテナンスを10秒後に起動します。", {
     newRowsOrSymbols: newCount,
     refreshId: refreshId,
     phase4Mode: "ultra_light",
@@ -5010,10 +5011,10 @@ if (phase === "PHASE4") {
 
   ScriptApp.newTrigger("runDailyMaintenanceTrigger")
     .timeBased()
-    .after(5 * 1000)
+    .after(OHLCV_CHAIN_NEXT_TRIGGER_AFTER_MS)
     .create();
 
-  writeProcessLog_("OHLCV", "日次メンテナンスのワンショットトリガーを5秒後に設定しました。", {
+  writeProcessLog_("OHLCV", "日次メンテナンスのワンショットトリガーを10秒後に設定しました。", {
     handlerName: "runDailyMaintenanceTrigger",
     phase4Mode: "ultra_light"
   });
@@ -10529,7 +10530,7 @@ function purgeBogusGapRepairRows() {
 
 
 const CLEANUP_LEGACY_AUTO_QUICK_REPAIR_KEY = "CLEANUP_LEGACY_AUTO_QUICK_REPAIR_V1";
-const CLEANUP_LEGACY_QUICK_REPAIR_DELAY_MS = 60 * 1000;
+const CLEANUP_LEGACY_QUICK_REPAIR_DELAY_MS = OHLCV_CHAIN_NEXT_TRIGGER_AFTER_MS;
 const OHLCV_RECOVERY_AUDIT_SCAN_ROWS = 90000;
 const OHLCV_RECOVERY_TS_STATE_KEY = "OHLCV_RECOVERY_TS_NORMALIZE_STATE_V1";
 const OHLCV_RECOVERY_TS_RESUME_HANDLER = "resumeOhlcvRecoveryTimestampNormalization";
@@ -10845,7 +10846,7 @@ function scheduleQuickRepairTriggerAfterCleanup_(cleanupSummary) {
       invalidSessionTimestamp: cleanupSummary && cleanupSummary.invalidSessionTimestamp ? cleanupSummary.invalidSessionTimestamp : 0,
       emptyTimestamp: cleanupSummary && cleanupSummary.emptyTimestamp ? cleanupSummary.emptyTimestamp : 0
     };
-    writeProcessLog_("緊急OHLCV整理", "OHLCV整理が完了したため、ギャップ修復を1分後に自動起動します。", payload);
+    writeProcessLog_("緊急OHLCV整理", "OHLCV整理が完了したため、ギャップ修復を10秒後に自動起動します。", payload);
     console.log(`[cleanupLegacy] quickRepairTrigger scheduled: ${JSON.stringify(payload)}`);
     return { scheduled: true, handlerName: "quickRepairTrigger", delayMs: CLEANUP_LEGACY_QUICK_REPAIR_DELAY_MS };
   } catch (e) {
@@ -12470,10 +12471,10 @@ function forceFinishOhlcvPhase4LightNow() {
 
     ScriptApp.newTrigger("runDailyMaintenanceTrigger")
       .timeBased()
-      .after(5 * 1000)
+      .after(OHLCV_CHAIN_NEXT_TRIGGER_AFTER_MS)
       .create();
 
-    writeProcessLog_("OHLCV", "PHASE4軽量版でOHLCV取得フローを完了扱いにしました。日次メンテナンスを5秒後に起動します。", {
+    writeProcessLog_("OHLCV", "PHASE4軽量版でOHLCV取得フローを完了扱いにしました。日次メンテナンスを10秒後に起動します。", {
       newRowsOrSymbols: newCount,
       refreshId: refreshId,
       lightResult: lightResult
@@ -12526,10 +12527,10 @@ function forceFinishOhlcvPhase4UltraLightNow() {
 
     ScriptApp.newTrigger("runDailyMaintenanceTrigger")
       .timeBased()
-      .after(5 * 1000)
+      .after(OHLCV_CHAIN_NEXT_TRIGGER_AFTER_MS)
       .create();
 
-    writeProcessLog_("OHLCV", "PHASE4超軽量版でOHLCV取得フローを完了扱いにしました。日次メンテナンスを5秒後に起動します。", {
+    writeProcessLog_("OHLCV", "PHASE4超軽量版でOHLCV取得フローを完了扱いにしました。日次メンテナンスを10秒後に起動します。", {
       newRowsOrSymbols: newCount,
       refreshId: refreshId,
       phase4Result: result
@@ -12913,10 +12914,10 @@ function completeOhlcvPostMaintenanceCleanup_(summary) {
   deleteTriggersByHandler_("quickRepairTrigger");
   ScriptApp.newTrigger("quickRepairTrigger")
     .timeBased()
-    .after(5 * 1000)
+    .after(OHLCV_CHAIN_NEXT_TRIGGER_AFTER_MS)
     .create();
 
-  writeProcessLog_("OHLCV掃除", "OHLCV掃除チェーンが完了しました。続いてギャップ修復を5秒後に起動します。", {
+  writeProcessLog_("OHLCV掃除", "OHLCV掃除チェーンが完了しました。続いてギャップ修復を10秒後に起動します。", {
     handlerName: "quickRepairTrigger",
     newCount: newCount,
     refreshId: refreshId,
