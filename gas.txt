@@ -1825,9 +1825,9 @@ const SYMBOL_LIST_KEY = "OHLCV_SYMBOL_LIST";
 const NEW_ALERT_COUNT_KEY = "OHLCV_NEW_ALERT_COUNT";
 const MAIN_FULL_BACKFILL_SYMBOLS_KEY = "OHLCV_FULL_BACKFILL_SYMBOLS";
 const SYNC_INDEX_KEY = "SYNC_ENTRY_PRICE_INDEX";
-const OHLCV_BATCH_SIZE = 5;
+const OHLCV_BATCH_SIZE = 10;
 const OHLCV_BATCH_SLEEP_MS = 300;
-const MIDDAY_OHLCV_BATCH_SIZE = 5;
+const MIDDAY_OHLCV_BATCH_SIZE = 10;
 const MIDDAY_OHLCV_BATCH_SLEEP_MS = 300;
 const PHASE2_ROW_CHUNK_SIZE = 120;
 const PHASE2_SPLIT_BATCH_SIZE = 10;
@@ -1840,9 +1840,10 @@ const OHLCV_LAST_TS_SCAN_CHUNK_ROWS = 5000;
 const OHLCV_LAST_TS_SCAN_MAX_ROWS = 60000;
 const OHLCV_APPEND_INTEGRITY_SCAN_ROWS = 30000;
 const OHLCV_FINAL_DEDUPE_SCAN_ROWS = 60000;
-const OHLCV_APPEND_GUARD_MAX_RANGE_SCAN_ROWS = 30000;
-const OHLCV_APPEND_GUARD_MAX_DATE_BUCKET_ROWS = 20000;
-const OHLCV_APPEND_GUARD_FALLBACK_TAIL_ROWS = 30000;
+const OHLCV_APPEND_GUARD_MAX_RANGE_SCAN_ROWS = 15000;
+const OHLCV_APPEND_GUARD_MAX_DATE_BUCKET_ROWS = 5000;
+const OHLCV_APPEND_GUARD_FALLBACK_TAIL_ROWS = 5000;
+const OHLCV_APPEND_GUARD_MAX_TARGET_DATES = 7;
 // 全行重複削除（cleanupOhlcvDuplicatesNow）の resume 用状態キーとチャンク設定。
 // 末尾N行に限定せずシート全体を前方カーソルで走査し、6分上限を跨いで完走する。
 const OHLCV_FULL_DEDUP_STATE_KEY = "OHLCV_FULL_DEDUP_STATE_V1";
@@ -2608,7 +2609,7 @@ const newRows = filterMiddayRowsAfterKnownLastTs_(meta.symbol, filteredRows, kno
 const rawVolumeApplied = applyRawAlertVolumesToOhlcvRows_(newRows, rawAlertVolumeMap);
 const finalRows = rawVolumeApplied.rows;
 
-if (rawVolumeApplied.overridden > 0) {
+if (rawVolumeApplied.overridden > 0 && isVerboseOhlcvFetchLogEnabled_()) {
   debugLogToSheet_("ohlcv.midday.rawVolumeOverride", {
     symbol: meta.symbol,
     overridden: rawVolumeApplied.overridden
@@ -3170,48 +3171,56 @@ function buildExistingOhlcvItemMapForCandidateRows_(sheet, rows, options) {
 
   const maxRangeRows = Math.max(1000, Number(opts.maxRangeScanRows) || OHLCV_APPEND_GUARD_MAX_RANGE_SCAN_ROWS);
   const maxDateBucketRows = Math.max(1000, Number(opts.maxDateBucketRows) || OHLCV_APPEND_GUARD_MAX_DATE_BUCKET_ROWS);
-  const fallbackTailRows = Math.max(0, Number(opts.fallbackTailRows) || OHLCV_APPEND_GUARD_FALLBACK_TAIL_ROWS);
+  const fallbackTailRows = Math.max(0, Object.prototype.hasOwnProperty.call(opts, "fallbackTailRows")
+    ? Number(opts.fallbackTailRows)
+    : OHLCV_APPEND_GUARD_FALLBACK_TAIL_ROWS);
+  const maxTargetDates = Math.max(1, Number(opts.maxTargetDates) || OHLCV_APPEND_GUARD_MAX_TARGET_DATES);
+  const targetDateKeys = Object.keys(keyInfo.targetDates).sort();
+  const targetDateCount = targetDateKeys.length;
 
   let usedSingleSortedRange = false;
-  try {
-    const minDay = toJstDayKeyFromDateStr_(keyInfo.minDateKey);
-    const maxDate = new Date(String(keyInfo.maxDateKey || keyInfo.minDateKey) + "T00:00:00+09:00");
-    const afterMaxDateKey = formatYmd_(new Date(maxDate.getTime() + 24 * 60 * 60 * 1000));
-    const afterMaxDay = toJstDayKeyFromDateStr_(afterMaxDateKey);
-    if (minDay !== null && afterMaxDay !== null) {
-      const startInfo = findFirstOhlcvRowOnOrAfterDayKey_(sheet, minDay, lastRow, null);
-      const endInfo = findFirstOhlcvRowOnOrAfterDayKey_(sheet, afterMaxDay, lastRow, null);
-      if (!startInfo.incomplete && !endInfo.incomplete && startInfo.row <= lastRow) {
-        const endRow = Math.min(lastRow, (endInfo.row || (lastRow + 1)) - 1);
-        const candidateRows = Math.max(0, endRow - startInfo.row + 1);
-        if (candidateRows > 0 && candidateRows <= maxRangeRows) {
-          addExistingOhlcvItemsFromRange_(sheet, startInfo.row, candidateRows, keyInfo.targetKeys, itemMap, seenRows, stats, "sorted_range");
-          usedSingleSortedRange = true;
+  if (targetDateCount <= maxTargetDates) {
+    try {
+      const minDay = toJstDayKeyFromDateStr_(keyInfo.minDateKey);
+      const maxDate = new Date(String(keyInfo.maxDateKey || keyInfo.minDateKey) + "T00:00:00+09:00");
+      const afterMaxDateKey = formatYmd_(new Date(maxDate.getTime() + 24 * 60 * 60 * 1000));
+      const afterMaxDay = toJstDayKeyFromDateStr_(afterMaxDateKey);
+      if (minDay !== null && afterMaxDay !== null) {
+        const startInfo = findFirstOhlcvRowOnOrAfterDayKey_(sheet, minDay, lastRow, null);
+        const endInfo = findFirstOhlcvRowOnOrAfterDayKey_(sheet, afterMaxDay, lastRow, null);
+        if (!startInfo.incomplete && !endInfo.incomplete && startInfo.row <= lastRow) {
+          const endRow = Math.min(lastRow, (endInfo.row || (lastRow + 1)) - 1);
+          const candidateRows = Math.max(0, endRow - startInfo.row + 1);
+          if (candidateRows > 0 && candidateRows <= maxRangeRows) {
+            addExistingOhlcvItemsFromRange_(sheet, startInfo.row, candidateRows, keyInfo.targetKeys, itemMap, seenRows, stats, "sorted_range");
+            usedSingleSortedRange = true;
+          }
         }
       }
+    } catch (e) {
+      stats.sortedRangeError = String(e);
     }
-  } catch (e) {
-    stats.sortedRangeError = String(e);
-  }
 
-  if (!usedSingleSortedRange) {
-    const dates = Object.keys(keyInfo.targetDates).sort();
-    dates.forEach(dateKey => {
-      try {
-        const range = getOhlcvDateRangeRows_(sheet, dateKey, lastRow, null);
-        if (range.incomplete || range.numRows <= 0) return;
-        if (range.numRows > maxDateBucketRows) {
+    if (!usedSingleSortedRange) {
+      targetDateKeys.forEach(dateKey => {
+        try {
+          const range = getOhlcvDateRangeRows_(sheet, dateKey, lastRow, null);
+          if (range.incomplete || range.numRows <= 0) return;
+          if (range.numRows > maxDateBucketRows) {
+            stats.skippedDateBuckets++;
+            return;
+          }
+          addExistingOhlcvItemsFromRange_(sheet, range.startRow, range.numRows, keyInfo.targetKeys, itemMap, seenRows, stats, "date_bucket");
+        } catch (e) {
           stats.skippedDateBuckets++;
-          return;
         }
-        addExistingOhlcvItemsFromRange_(sheet, range.startRow, range.numRows, keyInfo.targetKeys, itemMap, seenRows, stats, "date_bucket");
-      } catch (e) {
-        stats.skippedDateBuckets++;
-      }
-    });
+      });
+    }
+  } else {
+    stats.skippedWideDateSpan = targetDateCount;
   }
 
-  if (fallbackTailRows > 0) {
+  if (fallbackTailRows > 0 && stats.rangeCount === 0) {
     const tailRows = Math.min(fallbackTailRows, Math.max(0, lastRow - 1));
     if (tailRows > 0) {
       const tailStart = lastRow - tailRows + 1;
@@ -3263,7 +3272,8 @@ function prepareOhlcvRowsForGuardedWrite_(sheet, rows, context) {
     context: contextText || "append_guard",
     maxRangeScanRows: isMiddayContext ? MIDDAY_APPEND_EXISTING_KEY_SCAN_MAX_ROWS : OHLCV_APPEND_GUARD_MAX_RANGE_SCAN_ROWS,
     maxDateBucketRows: OHLCV_APPEND_GUARD_MAX_DATE_BUCKET_ROWS,
-    fallbackTailRows: isMiddayContext ? MIDDAY_APPEND_EXISTING_KEY_SCAN_MAX_ROWS : OHLCV_APPEND_GUARD_FALLBACK_TAIL_ROWS
+    fallbackTailRows: isMiddayContext ? MIDDAY_APPEND_EXISTING_KEY_SCAN_MAX_ROWS : OHLCV_APPEND_GUARD_FALLBACK_TAIL_ROWS,
+    maxTargetDates: OHLCV_APPEND_GUARD_MAX_TARGET_DATES
   });
 
   const appendRows = [];
@@ -4927,10 +4937,12 @@ function prepareMainRunRowsFastPmVolume_(symbol, rows, dailyMap, todayKey, rawAl
       const fastRawPmVolRounded = Math.round(fastRawPmVol);
       fastPmRow[7] = fastRawPmVolRounded;
       fastPmRow[1] = makePmLockedMarker_(todayKey);
-      debugLogToSheet_("ohlcv.mainToday.pmVolumePmLocked", {
-        symbol: fastSym, todayKey: todayKey,
-        pmBefore: fastPmBefore, pmAfter: fastPmRow[7], source: "alerts_raw_pm_locked"
-      });
+      if (isVerboseOhlcvFetchLogEnabled_()) {
+        debugLogToSheet_("ohlcv.mainToday.pmVolumePmLocked", {
+          symbol: fastSym, todayKey: todayKey,
+          pmBefore: fastPmBefore, pmAfter: fastPmRow[7], source: "alerts_raw_pm_locked"
+        });
+      }
       // PMをalerts_rawの出来高で上書きした分、AM側で吸収して AM+PM のトータルを fetched 合計に維持する。
       // MIDDAY_LOCKED（13:30のAM保護）が付いているAM行は触らない（同日AM+PM両シグナルは発生しない想定）。
       if (fastAmRow && !isProtectedMiddayOhlcvMarker_(fastAmRow[1])) {
@@ -4938,30 +4950,34 @@ function prepareMainRunRowsFastPmVolume_(symbol, rows, dailyMap, todayKey, rawAl
         const fastAmRawAdjusted = fastFetchedAm + fastPmBefore - fastRawPmVolRounded;
         const fastAmAfter = Math.max(0, fastAmRawAdjusted);
         fastAmRow[7] = fastAmAfter;
-        debugLogToSheet_("ohlcv.mainToday.amVolumeAdjustedForPmLock", {
-          symbol: fastSym, todayKey: todayKey,
-          fetchedAm: fastFetchedAm,
-          fetchedPm: fastPmBefore,
-          alertsRawPm: fastRawPmVolRounded,
-          amBefore: fastFetchedAm,
-          amAfter: fastAmAfter,
-          clippedToZero: fastAmRawAdjusted < 0
-        });
+        if (isVerboseOhlcvFetchLogEnabled_()) {
+          debugLogToSheet_("ohlcv.mainToday.amVolumeAdjustedForPmLock", {
+            symbol: fastSym, todayKey: todayKey,
+            fetchedAm: fastFetchedAm,
+            fetchedPm: fastPmBefore,
+            alertsRawPm: fastRawPmVolRounded,
+            amBefore: fastFetchedAm,
+            amAfter: fastAmAfter,
+            clippedToZero: fastAmRawAdjusted < 0
+          });
+        }
       }
     } else if ((fastAmRow && fastHasValidDailyDiff) ||
         (!fastAmRow && (isDailyCompatibleWithSessionRow_(fastDaily, fastPmRow) || isSinglePriceDailyOhlcv_(fastDaily)))) {
       const fastPmBefore = toSafeVolumeNumber_(fastPmRow[7]);
       fastPmRow[7] = fastHasAmVolume ? fastPmVolAfter : fastDailyVol;
-      debugLogToSheet_("ohlcv.mainToday.pmVolumeAdjusted", {
-        symbol: fastSym,
-        todayKey: todayKey,
-        dailyVol: fastDailyVol,
-        amVol: fastAmVol,
-        amVolumeSource: fastUseProtectedAmVol ? "alerts_raw_locked_am" : "fetched_intra_am",
-        pmBefore: fastPmBefore,
-        pmAfter: fastPmRow[7],
-        mode: fastHasAmVolume ? "daily_minus_am" : "daily_compatible_pm_only"
-      });
+      if (isVerboseOhlcvFetchLogEnabled_()) {
+        debugLogToSheet_("ohlcv.mainToday.pmVolumeAdjusted", {
+          symbol: fastSym,
+          todayKey: todayKey,
+          dailyVol: fastDailyVol,
+          amVol: fastAmVol,
+          amVolumeSource: fastUseProtectedAmVol ? "alerts_raw_locked_am" : "fetched_intra_am",
+          pmBefore: fastPmBefore,
+          pmAfter: fastPmRow[7],
+          mode: fastHasAmVolume ? "daily_minus_am" : "daily_compatible_pm_only"
+        });
+      }
     }
     return fastOtherRows.concat(sortTodaySessionRows_(fastTodayRows));
   }
@@ -4975,10 +4991,12 @@ function prepareMainRunRowsFastPmVolume_(symbol, rows, dailyMap, todayKey, rawAl
       Math.round(fastRawPmVol)
     ];
     fastTodayRows.push(fastPmRow);
-    debugLogToSheet_("ohlcv.mainToday.pmSynthesizedPmLocked", {
-      symbol: fastSym, todayKey: todayKey,
-      pmVol: Math.round(fastRawPmVol), close: fastDailyClose, source: "alerts_raw_pm_locked"
-    });
+    if (isVerboseOhlcvFetchLogEnabled_()) {
+      debugLogToSheet_("ohlcv.mainToday.pmSynthesizedPmLocked", {
+        symbol: fastSym, todayKey: todayKey,
+        pmVol: Math.round(fastRawPmVol), close: fastDailyClose, source: "alerts_raw_pm_locked"
+      });
+    }
   } else if (fastHasValidDailyDiff && fastPmVolAfter > 0 && (fastHasAmVolume || isSinglePriceDailyOhlcv_(fastDaily))) {
     const fastMarker = fastAmRow ? String(fastAmRow[1] || "new_session") : "new_session";
     fastPmRow = [
@@ -4992,16 +5010,18 @@ function prepareMainRunRowsFastPmVolume_(symbol, rows, dailyMap, todayKey, rawAl
       fastPmVolAfter
     ];
     fastTodayRows.push(fastPmRow);
-    debugLogToSheet_("ohlcv.mainToday.pmSynthesizedFromDaily", {
-      symbol: fastSym,
-      todayKey: todayKey,
-      dailyVol: fastDailyVol,
-      amVol: fastAmVol,
-      amVolumeSource: fastUseProtectedAmVol ? "alerts_raw_locked_am" : "fetched_intra_am",
-      pmVol: fastPmVolAfter,
-      close: fastDailyClose,
-      reason: fastHasAmVolume ? "missing_pm_with_am" : "single_price_daily"
-    });
+    if (isVerboseOhlcvFetchLogEnabled_()) {
+      debugLogToSheet_("ohlcv.mainToday.pmSynthesizedFromDaily", {
+        symbol: fastSym,
+        todayKey: todayKey,
+        dailyVol: fastDailyVol,
+        amVol: fastAmVol,
+        amVolumeSource: fastUseProtectedAmVol ? "alerts_raw_locked_am" : "fetched_intra_am",
+        pmVol: fastPmVolAfter,
+        close: fastDailyClose,
+        reason: fastHasAmVolume ? "missing_pm_with_am" : "single_price_daily"
+      });
+    }
   }
 
   return fastOtherRows.concat(sortTodaySessionRows_(fastTodayRows));
