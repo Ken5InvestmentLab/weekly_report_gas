@@ -1761,6 +1761,17 @@ function isVerboseOhlcvFetchLogEnabled_() {
   }
   return OHLCV_VERBOSE_FETCH_LOGS_CACHE_;
 }
+let OHLCV_VERBOSE_PM_VOLUME_LOGS_CACHE_ = null;
+function isVerboseOhlcvPmVolumeLogEnabled_() {
+  if (OHLCV_VERBOSE_PM_VOLUME_LOGS_CACHE_ !== null) return OHLCV_VERBOSE_PM_VOLUME_LOGS_CACHE_;
+  try {
+    OHLCV_VERBOSE_PM_VOLUME_LOGS_CACHE_ =
+      String(PropertiesService.getScriptProperties().getProperty("OHLCV_VERBOSE_PM_VOLUME_LOGS") || "").toLowerCase() === "true";
+  } catch (e) {
+    OHLCV_VERBOSE_PM_VOLUME_LOGS_CACHE_ = false;
+  }
+  return OHLCV_VERBOSE_PM_VOLUME_LOGS_CACHE_;
+}
 function describeDebugStage_(stage, data) {
   const d = data || {};
   if (stage === "daily.start") return d.isResume ? "日次メンテナンスを再開しました。" : "日次メンテナンスを開始しました。";
@@ -1833,8 +1844,10 @@ const PHASE2_ROW_CHUNK_SIZE = 120;
 const PHASE2_SPLIT_BATCH_SIZE = 10;
 const PHASE2_SPLIT_BATCH_SLEEP_MS = 800;
 const FETCH_GUARD_MS = 90000;
+const OHLCV_PHASE1_MAX_RUN_MS = 150 * 1000;
 const OHLCV_LOCK_WAIT_MS = 15000;
-const OHLCV_SAFETY_RESUME_AFTER_MS = 6.5 * 60 * 1000;
+const OHLCV_LOCK_BUSY_RESUME_AFTER_MS = 60 * 1000;
+const OHLCV_SAFETY_RESUME_AFTER_MS = 8 * 60 * 1000;
 const OHLCV_DEFAULT_LOOKBACK_DAYS = 120;
 const OHLCV_LAST_TS_SCAN_CHUNK_ROWS = 5000;
 const OHLCV_LAST_TS_SCAN_MAX_ROWS = 60000;
@@ -2217,7 +2230,7 @@ function fetchOHLCVForNewAlerts() {
     lock = LockService.getScriptLock();
     if (!lock.tryLock(OHLCV_LOCK_WAIT_MS)) {
       logOhlcvRuntime_("lock_busy", { waitMs: OHLCV_LOCK_WAIT_MS });
-      setupResumeTrigger_("resumeOHLCVFetch");
+      scheduleOhlcvResume_("resumeOHLCVFetch", OHLCV_LOCK_BUSY_RESUME_AFTER_MS);
       return { ok: false, skipped: true, reason: "lock_busy" };
     }
     finalizeMiddayOhlcvBeforeMainRun_();
@@ -4458,14 +4471,12 @@ let batchNo = 0;
 
 for (let i = startIndex; i < symbols.length;) {
   const elapsedBeforeBatch = Date.now() - startTime;
-  if (elapsedBeforeBatch > LIMIT_MS || (LIMIT_MS - elapsedBeforeBatch) < FETCH_GUARD_MS) {
+  if (elapsedBeforeBatch >= OHLCV_PHASE1_MAX_RUN_MS || elapsedBeforeBatch > LIMIT_MS || (LIMIT_MS - elapsedBeforeBatch) < FETCH_GUARD_MS) {
     const appendedOnPause = allFetchedData.length > 0 ? appendRowsToSheet_(ohlcvSheet, allFetchedData, "phase1_pause") : 0;
     phase1AppendedRows += appendedOnPause;
     allFetchedData = [];
     props.setProperty(STATE_KEY, i.toString());
     props.setProperty(NEW_ALERT_COUNT_KEY, newAlertCount.toString());
-    props.setProperty("LAST_TS_MAP", JSON.stringify(lastTsMap));
-    props.setProperty(MAIN_FULL_BACKFILL_SYMBOLS_KEY, JSON.stringify(Array.from(fullBackfillSet)));
     writeProcessLog_("OHLCV", `PHASE1: 実行時間が近づいたため、${i}/${symbols.length} 銘柄までの進捗を保存して再開します。`, {
       cursor: i,
       totalSymbols: symbols.length,
@@ -4640,6 +4651,26 @@ if (validRows.length > 0) {
         parseErrCount: parseErrCount,
         elapsedMs: Date.now() - batchStart
       });
+      const elapsedAfterBatch = Date.now() - startTime;
+      if (elapsedAfterBatch >= OHLCV_PHASE1_MAX_RUN_MS) {
+        writeProcessLog_("OHLCV", "PHASE1: short-run guard paused after a completed batch.", {
+          cursor: nextIndex,
+          totalSymbols: symbols.length,
+          appendedRowsThisRun: phase1AppendedRows,
+          elapsedMs: elapsedAfterBatch,
+          maxRunMs: OHLCV_PHASE1_MAX_RUN_MS
+        });
+        debugLogToSheet_("ohlcv.phase.summary", {
+          event: "phase_pause",
+          phase: "PHASE1",
+          cursor: nextIndex,
+          totalSymbols: symbols.length,
+          reason: "short_run_guard",
+          elapsedMs: elapsedAfterBatch
+        });
+        setupResumeTrigger_("resumeOHLCVFetch");
+        return;
+      }
       Utilities.sleep(OHLCV_BATCH_SLEEP_MS);
       i = nextIndex;
     }
@@ -4937,7 +4968,7 @@ function prepareMainRunRowsFastPmVolume_(symbol, rows, dailyMap, todayKey, rawAl
       const fastRawPmVolRounded = Math.round(fastRawPmVol);
       fastPmRow[7] = fastRawPmVolRounded;
       fastPmRow[1] = makePmLockedMarker_(todayKey);
-      if (isVerboseOhlcvFetchLogEnabled_()) {
+      if (isVerboseOhlcvPmVolumeLogEnabled_()) {
         debugLogToSheet_("ohlcv.mainToday.pmVolumePmLocked", {
           symbol: fastSym, todayKey: todayKey,
           pmBefore: fastPmBefore, pmAfter: fastPmRow[7], source: "alerts_raw_pm_locked"
@@ -4950,7 +4981,7 @@ function prepareMainRunRowsFastPmVolume_(symbol, rows, dailyMap, todayKey, rawAl
         const fastAmRawAdjusted = fastFetchedAm + fastPmBefore - fastRawPmVolRounded;
         const fastAmAfter = Math.max(0, fastAmRawAdjusted);
         fastAmRow[7] = fastAmAfter;
-        if (isVerboseOhlcvFetchLogEnabled_()) {
+        if (isVerboseOhlcvPmVolumeLogEnabled_()) {
           debugLogToSheet_("ohlcv.mainToday.amVolumeAdjustedForPmLock", {
             symbol: fastSym, todayKey: todayKey,
             fetchedAm: fastFetchedAm,
@@ -4966,7 +4997,7 @@ function prepareMainRunRowsFastPmVolume_(symbol, rows, dailyMap, todayKey, rawAl
         (!fastAmRow && (isDailyCompatibleWithSessionRow_(fastDaily, fastPmRow) || isSinglePriceDailyOhlcv_(fastDaily)))) {
       const fastPmBefore = toSafeVolumeNumber_(fastPmRow[7]);
       fastPmRow[7] = fastHasAmVolume ? fastPmVolAfter : fastDailyVol;
-      if (isVerboseOhlcvFetchLogEnabled_()) {
+      if (isVerboseOhlcvPmVolumeLogEnabled_()) {
         debugLogToSheet_("ohlcv.mainToday.pmVolumeAdjusted", {
           symbol: fastSym,
           todayKey: todayKey,
@@ -4991,7 +5022,7 @@ function prepareMainRunRowsFastPmVolume_(symbol, rows, dailyMap, todayKey, rawAl
       Math.round(fastRawPmVol)
     ];
     fastTodayRows.push(fastPmRow);
-    if (isVerboseOhlcvFetchLogEnabled_()) {
+    if (isVerboseOhlcvPmVolumeLogEnabled_()) {
       debugLogToSheet_("ohlcv.mainToday.pmSynthesizedPmLocked", {
         symbol: fastSym, todayKey: todayKey,
         pmVol: Math.round(fastRawPmVol), close: fastDailyClose, source: "alerts_raw_pm_locked"
@@ -5010,7 +5041,7 @@ function prepareMainRunRowsFastPmVolume_(symbol, rows, dailyMap, todayKey, rawAl
       fastPmVolAfter
     ];
     fastTodayRows.push(fastPmRow);
-    if (isVerboseOhlcvFetchLogEnabled_()) {
+    if (isVerboseOhlcvPmVolumeLogEnabled_()) {
       debugLogToSheet_("ohlcv.mainToday.pmSynthesizedFromDaily", {
         symbol: fastSym,
         todayKey: todayKey,

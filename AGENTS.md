@@ -305,6 +305,7 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 | `DISCORD_WEBHOOK` | ✅ | OHLCV完了通知先Discord Webhook |
 | `GITHUB_PAT` | 任意 | `Ken5InvestmentLab/screening-bot` の `optimize.yml` dispatch 用 |
 | `OHLCV_VERBOSE_FETCH_LOGS` | 任意 | `true` のとき銘柄別OHLCV取得ログを詳細出力 |
+| `OHLCV_VERBOSE_PM_VOLUME_LOGS` | 任意 | `true` のとき16:00本番の銘柄別PM出来高補正ログを詳細出力 |
 
 ### 内部状態
 
