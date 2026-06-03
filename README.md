@@ -202,19 +202,19 @@ OVERLAP_DAYS = 3
 | 状態 | 取得方法 |
 |---|---|
 | OHLCV未取得銘柄 | 直近120日分 |
-| `OHLCV_REPAIR_SYMBOLS` 対象銘柄 | 直近120日分を強制再取得 |
-| `lastTs` が直近5日以内 | 13:21/15:51本体では `period1/period2` を強制し、`lastTs - 3日` から取得終了時刻まで取得 |
+| `OHLCV_REPAIR_SYMBOLS` 対象銘柄 | OHLCV未取得や手動全量修復では直近120日分。15:51本体の既存銘柄は当日PM分のみ |
+| `lastTs` が直近5日以内 | 通常差分取得では `period1/period2` を強制し、`lastTs - 3日` から取得終了時刻まで取得 |
 | `lastTs` が6日〜120日以内 | `lastTs` の3日前から現在まで `period1/period2` |
 | `lastTs` が120日より古い | 直近120日分 |
 | `lastTs` が取得終了時刻以上 | 異常値対策として直近範囲を `period1/period2` |
 
 ポイント。
 
-- 13:21/15:51本体では `range=5d` を使わない。`range=5d` は取得終了時刻を明示できず、当日足のキャッシュ差異でAM集約が壊れるため、直近取得でも `period1/period2` を使う。
-- `lastTs` が40日前など中途半端に古い場合は、`range=5d` ではなく `lastTs - 3日` から取得する。
-- これにより、40日前〜直近5営業日前のような空白期間を防ぐ。
-- 3日の重ね取りは、Yahoo側の欠損、祝日、前回途中終了、AM/PM合成境界のズレを吸収するため。
-- 重ね取りで重複した行は `timestamp + symbol` で重複排除する。
+- 13:21先行取得の既存OHLCV銘柄は、当日08:00〜13:00:59 JSTの当日AM分だけを `period1/period2` で取得する。
+- 15:51本体の既存OHLCV銘柄は、当日13:00:00 JST以降の当日PM分だけを `period1/period2` で取得する。
+- 15:51本体では `range=5d` を使わない。`range=5d` は取得終了時刻を明示できず、当日足のキャッシュ差異でAM/PM集約が壊れるため、当日AM/PMだけの取得でも `period1/period2` を使う。
+- 既存銘柄の過去GAPは15:51 PHASE1の重ね取りで埋めず、後段のGAP修復と post-repair cleanup で補填・整理する。
+- GAS再試行や120日新規取得に備え、15:51本体や後段cleanupでは `timestamp + symbol` の軽量重複ガード・重複整理を保険として残す。
 
 ### 13:21先行取得
 
@@ -229,10 +229,10 @@ fetchOHLCVForNewAlertsMidday()
 - AM分までのOHLCVを先行取得する。
 - 対象は `alerts_raw` に登場する全銘柄。
 - OHLCV未取得銘柄だけ120日分取得する。
-- 既存OHLCVがある銘柄は、最終timestampに応じて以下の取得窓を使う。
-  - `lastTs` が直近5日以内: `lastTs` の3日前から当日AM終端まで `period1/period2`
-  - `lastTs` が6日〜120日以内: `lastTs` の3日前から当日AM終端まで
-  - `lastTs` が120日より古い: 直近120日分
+- 既存OHLCVがある銘柄は、当日AM未取得の場合だけ当日08:00〜13:00:59 JSTを取得する。
+- 既存OHLCVがある銘柄で `lastTs >= 当日09:00 JST` のものは取得対象から外す。
+- 追記は軽量appendで行い、既存キー探索、重複ガード、readback削除、広範囲timestamp後処理は行わない。
+- 重複やGAPが残っても13:21では直さず、15:51本番、GAP修復、post-repair cleanupへ委譲する。
 - 今日シグナルが出た銘柄数はメタ情報として保持する。
 - 15:51本番チェーンには進まない。
 - 日次メンテナンス、GitHub Actions、GAP修復は起動しない。
@@ -249,13 +249,11 @@ fetchOHLCVForNewAlerts()
 役割。
 
 - `alerts_raw` に登場する全銘柄を対象にする。
-- `OHLCV_REPAIR_SYMBOLS` の銘柄も対象に含める。
+- `OHLCV_REPAIR_SYMBOLS` の銘柄も、`BOTTOM` 銘柄集合に含まれるものだけ対象に含める。
 - OHLCV未取得銘柄は120日分取得する。
-- 修復対象銘柄は120日分強制再取得する。
-- 既存OHLCVがある銘柄は、最終timestampに応じて以下の取得窓を使う。
-  - `lastTs` が直近5日以内: `lastTs` の3日前から現在まで `period1/period2`
-  - `lastTs` が6日〜120日以内: `lastTs` の3日前から現在まで
-  - `lastTs` が120日より古い: 直近120日分
+- 既存OHLCVがある銘柄は、当日PM未取得の場合だけ当日13:00:00 JST以降を取得する。
+- 既存OHLCVがある銘柄で `lastTs >= 当日13:00 JST` のものは取得対象から外す。
+- 既存OHLCVがある修復対象銘柄の過去GAPは、15:51 PHASE1ではなく後段のGAP修復へ委譲する。
 - PHASE1〜PHASE4を進める。
 - 完了後に日次メンテナンスを起動する。
 

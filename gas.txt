@@ -1932,6 +1932,8 @@ const MIDDAY_POSTPROCESS_INLINE_ENABLED = false;
 const MIDDAY_FETCH_MAX_RUN_MS = 2.5 * 60 * 1000;
 const MIDDAY_FETCH_MIN_REMAINING_MS = 45 * 1000;
 const MIDDAY_FETCH_SAFETY_RESUME_AFTER_MS = 6.5 * 60 * 1000;
+const MIDDAY_EXISTING_FETCH_START_HOUR = 8;
+const MAIN_EXISTING_FETCH_START_HOUR = 13;
 const MIDDAY_FULL_BACKFILL_SYMBOLS_KEY = "OHLCV_MIDDAY_FULL_BACKFILL_SYMBOLS";
 const MIDDAY_HISTORY_COVERAGE_SCAN_MAX_ROWS = 250000;
 const MIDDAY_APPEND_EXISTING_KEY_SCAN_MAX_ROWS = 5000;
@@ -2430,12 +2432,38 @@ if (symbols.length === 0) {
   fullBackfillSymbols = Array.from(fullBackfillSet).sort();
 
   newAlertCount = todaySymbols.length;
+  const totalCandidateSymbols = symbols.length;
+  let skippedAlreadyHasTodayAm = 0;
+  symbols = symbols.filter(sym => {
+    if (fullBackfillSet.has(sym)) return true;
+    if (hasMiddayTodayAmCoverage_(lastTsMap[sym], todayKey)) {
+      skippedAlreadyHasTodayAm++;
+      return false;
+    }
+    return true;
+  });
+  fullBackfillSymbols = fullBackfillSymbols.filter(sym => symbols.indexOf(sym) !== -1);
+  fullBackfillSet = new Set(fullBackfillSymbols);
 
-  writeProcessLog_("OHLCV-AM", "13:21先行取得の対象銘柄を差分取得型に初期化しました。OHLCV未取得銘柄だけ120日分、既存OHLCV銘柄はlastTs以降を取得します。", {
+  if (symbols.length === 0) {
+    writeProcessLog_("OHLCV-AM", "13:21先行取得で新規120日取得または当日AM取得が必要な銘柄がないためスキップします。", {
+      businessDate: todayKey,
+      totalCandidateSymbols: totalCandidateSymbols,
+      skippedAlreadyHasTodayAm: skippedAlreadyHasTodayAm,
+      todaySignalSymbols: todaySymbols.length
+    });
+    clearMiddayOhlcvState_();
+    return { ok: true, skipped: true, reason: "no_midday_fetch_needed" };
+  }
+
+  writeProcessLog_("OHLCV-AM", "13:21先行取得の対象銘柄を軽量取得型に初期化しました。OHLCV未取得銘柄は120日分、既存OHLCV銘柄は当日AM分だけ取得します。", {
+    totalCandidateSymbols: totalCandidateSymbols,
     totalFetchSymbols: symbols.length,
     trueNewFullBackfillSymbols: fullBackfillSymbols.length,
-    existingDeltaSymbols: symbols.length - fullBackfillSymbols.length,
+    existingTodayAmSymbols: symbols.length - fullBackfillSymbols.length,
+    skippedAlreadyHasTodayAm: skippedAlreadyHasTodayAm,
     todaySignalSymbols: todaySymbols.length,
+    existingFetchStart: new Date(getMiddayExistingOhlcvFetchStartMillis_(todayKey)).toISOString(),
     fetchEnd: getMiddayOhlcvFetchEndIso_(todayKey)
   });
 
@@ -2463,19 +2491,10 @@ if (symbols.length === 0) {
     fullBackfillSymbols: fullBackfillSet.size
   });
 
-  if (startIndex === 0) {
-    maybePurgeInvalidOhlcvTimestampRows_(
-      ohlcvSheet,
-      "midday.before_fetch",
-      QUICK_REPAIR_ENTRY_CLEANUP_ROWS,
-      todayKey
-    );
-  } else {
-    writeProcessLog_("OHLCV-AM", "13:21先行取得の再開実行では、広範囲の不正timestamp掃除をスキップします。", {
-      cursor: startIndex,
-      cleanupRows: 0
-    });
-  }
+  writeProcessLog_("OHLCV-AM", "13:21先行取得では事前の重複整理・GAP修復・広範囲timestamp掃除を行わず、15:51本番側へ委譲します。", {
+    cursor: startIndex,
+    cleanupRows: 0
+  });
 
   for (let i = startIndex; i < symbols.length;) {
     const elapsedBeforeBatch = Date.now() - startTime;
@@ -2537,11 +2556,15 @@ if (symbols.length === 0) {
     markOhlcvFetchInflight_(props, MIDDAY_FETCH_INFLIGHT_KEY, batchPlan, batch, "midday");
     const requests = [];
     const reqMeta = [];
+    const existingStartSec = Math.floor(getMiddayExistingOhlcvFetchStartMillis_(todayKey) / 1000);
+    const existingEndSec = Math.floor(fetchEndMillis / 1000);
 
     batch.forEach(sym => {
   try {
-    const useLastTs = fullBackfillSet.has(sym) ? null : (lastTsMap[sym] || null);
-    const pair = buildOhlcvRequestPairForEndMillis_(sym, useLastTs, fetchEndMillis, null, null, { forcePeriod: true });
+    const fullBackfill = fullBackfillSet.has(sym);
+    const pair = fullBackfill
+      ? buildOhlcvRequestPairForEndMillis_(sym, null, fetchEndMillis, null, null, { forcePeriod: true })
+      : buildOhlcvRequestPairForEndMillis_(sym, null, fetchEndMillis, existingStartSec, existingEndSec, { forcePeriod: true });
 
     const intraIdx = requests.length;
     requests.push({
@@ -2553,7 +2576,8 @@ if (symbols.length === 0) {
     reqMeta.push({
       symbol: sym,
       intraIdx: intraIdx,
-      fullBackfill: fullBackfillSet.has(sym)
+      fullBackfill: fullBackfill,
+      existingTodayAmOnly: !fullBackfill
     });
 
   } catch (e) {
@@ -2584,10 +2608,6 @@ try {
   props.setProperty(MIDDAY_FULL_BACKFILL_SYMBOLS_KEY, JSON.stringify(Array.from(fullBackfillSet)));
 
 const appendedOnError = appendAndNormalizeMiddayOhlcvRows_(ohlcvSheet, allFetchedData, "fetch_error");
-
-if (appendedOnError > 0) {
-  scheduleMiddayOhlcvPostprocess_();
-}
 
 if (isUrlFetchDailyLimitError_(e)) {
   deleteTriggersByHandler_(MIDDAY_RESUME_HANDLER);
@@ -2697,6 +2717,7 @@ if (finalRows.length > 0) {
       appendedRowsThisRun: appendedRowsThisRun,
       symbolsWithRows: fetchedSymbolsInBatch,
       fullBackfillSymbols: fullBackfillInBatch,
+      existingTodayAmSymbols: fetchedSymbolsInBatch - fullBackfillInBatch,
       parseErrCount: parseErrCount,
       elapsedMs: Date.now() - batchStart
     });
@@ -2713,64 +2734,15 @@ clearMiddayOhlcvState_();
 
 sendCompletionNotice_(String(newAlertCount), "0", "AM");
 
-// 重複排除・ソートは時間余裕があればインラインで実行。
-// 足りなければ既存通り別トリガー予約。GAS タイムアウト 360 秒から
-// 30 秒の安全バッファを引いた残り時間が 180 秒以上あればインライン化を試みる。
-if (appended > 0) {
-  const elapsedSoFar = Date.now() - startTime;
-  const INLINE_SAFETY_BUFFER_MS = 30 * 1000;
-  const INLINE_MIN_AVAILABLE_MS = 180 * 1000;
-  const availableForInlineMs = 360 * 1000 - elapsedSoFar - INLINE_SAFETY_BUFFER_MS;
-
-  if (MIDDAY_POSTPROCESS_INLINE_ENABLED && availableForInlineMs >= INLINE_MIN_AVAILABLE_MS) {
-    try {
-      const state = loadMiddayOhlcvPostprocessState_(ohlcvSheet);
-      // runMiddayOhlcvPostprocessChunks_ の deadline = startedAt + MIDDAY_POSTPROCESS_TIME_LIMIT_MS。
-      // deadline = Date.now() + availableForInlineMs にしたいので startedAt を逆算する。
-      const spoofedStartedAt = Date.now() + availableForInlineMs - MIDDAY_POSTPROCESS_TIME_LIMIT_MS;
-      const result = runMiddayOhlcvPostprocessChunks_(ohlcvSheet, state, spoofedStartedAt);
-      if (result.complete) {
-        clearMiddayOhlcvPostprocessState_();
-        writeProcessLog_("OHLCV-AM", "13:21先行取得が完了し、後処理もインラインで完了しました。", {
-          fetchedSymbols: newAlertCount,
-          appendedRows: appended,
-          refreshId: refreshId,
-          postprocessTotals: result.state.totals,
-          inlineElapsedMs: result.elapsedMs
-        });
-      } else {
-        saveMiddayOhlcvPostprocessState_(result.state);
-        scheduleMiddayOhlcvPostprocess_({ keepState: true });
-        writeProcessLog_("OHLCV-AM", "13:21先行取得が完了。インライン後処理は途中までで時間切れのため、続きを別トリガーで実行します。", {
-          fetchedSymbols: newAlertCount,
-          appendedRows: appended,
-          refreshId: refreshId,
-          remainingRows: result.state.remainingRows,
-          inlineElapsedMs: result.elapsedMs
-        });
-      }
-    } catch (postErr) {
-      writeProcessLog_("OHLCV-AM", "インライン後処理で例外発生。別トリガーで再試行します。", {
-        message: postErr && postErr.message ? postErr.message : String(postErr)
-      });
-      scheduleMiddayOhlcvPostprocess_({ keepState: true });
-    }
-  } else {
-    scheduleMiddayOhlcvPostprocess_();
-    writeProcessLog_("OHLCV-AM", "13:21先行取得が完了しました。時間余裕がないため後処理は別トリガーで実行します。", {
-      fetchedSymbols: newAlertCount,
-      appendedRows: appended,
-      refreshId: refreshId,
-      elapsedMs: elapsedSoFar
-    });
-  }
-} else {
-  writeProcessLog_("OHLCV-AM", "13:21先行取得が完了しました（追記行なし）。", {
+writeProcessLog_("OHLCV-AM", appended > 0
+  ? "13:21先行取得が完了しました。重複整理・GAP修復・広範囲timestamp掃除は15:51本番側へ委譲します。"
+  : "13:21先行取得が完了しました（追記行なし）。", {
     fetchedSymbols: newAlertCount,
     appendedRows: appended,
-    refreshId: refreshId
+    refreshId: refreshId,
+    elapsedMs: Date.now() - startTime,
+    postprocessScheduled: false
   });
-}
 
 return { ok: true, complete: true, fetchedSymbols: newAlertCount, appendedRows: appended };
 }
@@ -2890,34 +2862,59 @@ function filterMiddayRowsAfterKnownLastTs_(symbol, rows, knownLastTs, context) {
 function appendAndNormalizeMiddayOhlcvRows_(sheet, rows, context) {
   if (!rows || rows.length === 0) return 0;
 
-  const prepared = prepareMiddayOhlcvRowsForAppend_(sheet, rows, context);
-  if (prepared.rows.length === 0) {
-    if (prepared.skippedExistingRows > 0 || prepared.skippedDuplicateRows > 0) {
-      writeProcessLog_("OHLCV-AM", "13:21 MIDDAY append skipped because all fetched rows already exist.", {
-        context: context || "",
-        requestedRows: rows.length,
-        skippedExistingRows: prepared.skippedExistingRows,
-        skippedDuplicateRows: prepared.skippedDuplicateRows,
-        existingKeyScan: prepared.existingKeyScan
-      });
-    }
-    return 0;
-  }
-
-  const appended = appendRowsToSheet_(sheet, prepared.rows, context || "midday_append");
+  const detail = appendMiddayOhlcvRowsWithoutGuard_(sheet, rows, context || "midday_append");
+  const appended = detail.rows || 0;
 
   if (appended > 0) {
-    writeProcessLog_("OHLCV-AM", "13:21先行取得でOHLCVを追記しました。", {
+    writeProcessLog_("OHLCV-AM", "13:21先行取得でOHLCVを軽量追記しました。", {
       context: context || "",
       requestedRows: rows.length,
       appendedRows: appended,
-      skippedExistingRows: prepared.skippedExistingRows,
-      skippedDuplicateRows: prepared.skippedDuplicateRows,
-      existingKeyScan: prepared.existingKeyScan
+      skippedInvalidRows: detail.skippedRows || 0,
+      duplicateGuard: "skipped"
     });
   }
 
   return appended;
+}
+
+function appendMiddayOhlcvRowsWithoutGuard_(sheet, rows, context) {
+  const validData = [];
+  const skippedSamples = [];
+  (rows || []).forEach((row, index) => {
+    const normalized = normalizeOhlcvRowForWrite_(row);
+    if (normalized) {
+      validData.push(normalized);
+    } else if (skippedSamples.length < 5) {
+      skippedSamples.push({
+        index: index,
+        timestamp: row && row.length ? String(row[0]) : "",
+        symbol: row && row.length > 2 ? String(row[2] || "") : ""
+      });
+    }
+  });
+
+  const skipped = (rows || []).length - validData.length;
+  if (skipped > 0) {
+    debugLogToSheet_("appendRowsToSheet_.skippedInvalidTs", {
+      context: context || "midday_fast_append",
+      total: rows ? rows.length : 0,
+      valid: validData.length,
+      skipped: skipped,
+      samples: skippedSamples
+    });
+  }
+
+  if (validData.length === 0) return { rows: 0, skippedRows: skipped };
+
+  const startRow = sheet.getLastRow() + 1;
+  sheet.getRange(startRow, 2, validData.length, 7).setValues(validData.map(row => row.slice(1, 8)));
+  const timestampRange = sheet.getRange(startRow, 1, validData.length, 1);
+  timestampRange.setNumberFormat("yyyy/mm/dd hh:mm");
+  timestampRange.setValues(validData.map(row => [normalizeOhlcvTimestamp_(row[0]) || row[0]]));
+  SpreadsheetApp.flush();
+
+  return { rows: validData.length, skippedRows: skipped };
 }
 
 function makeOhlcvTimestampSymbolKey_(row) {
@@ -3617,6 +3614,30 @@ function shouldStopMiddayOhlcvResume_() {
 function getMiddayOhlcvFetchEndMillis_(dateKey) {
   const key = normalizeBusinessDateKey_(dateKey);
   return new Date(`${key}T13:00:59+09:00`).getTime();
+}
+
+function getMiddayExistingOhlcvFetchStartMillis_(dateKey) {
+  const key = normalizeBusinessDateKey_(dateKey);
+  return new Date(`${key}T${pad2_(MIDDAY_EXISTING_FETCH_START_HOUR)}:00:00+09:00`).getTime();
+}
+
+function hasMiddayTodayAmCoverage_(lastTs, dateKey) {
+  const n = Number(lastTs || 0);
+  if (!Number.isFinite(n) || n <= 0) return false;
+  const todayAmTs = new Date(`${normalizeBusinessDateKey_(dateKey)}T09:00:00+09:00`).getTime();
+  return n >= todayAmTs;
+}
+
+function getMainExistingOhlcvFetchStartMillis_(dateKey) {
+  const key = normalizeBusinessDateKey_(dateKey);
+  return new Date(`${key}T${pad2_(MAIN_EXISTING_FETCH_START_HOUR)}:00:00+09:00`).getTime();
+}
+
+function hasMainTodayPmCoverage_(lastTs, dateKey) {
+  const n = Number(lastTs || 0);
+  if (!Number.isFinite(n) || n <= 0) return false;
+  const todayPmTs = new Date(`${normalizeBusinessDateKey_(dateKey)}T13:00:00+09:00`).getTime();
+  return n >= todayPmTs;
 }
 
 function getMiddayOhlcvFetchEndIso_(dateKey) {
@@ -4411,7 +4432,7 @@ if (phase === "PHASE1") {
     const repairSymsJson = props.getProperty("OHLCV_REPAIR_SYMBOLS");
     const repairSymsSet = repairSymsJson ? new Set(JSON.parse(repairSymsJson)) : new Set();
     if (repairSymsSet.size > 0) {
-      writeProcessLog_("OHLCV", `PHASE1: 修復対象 ${repairSymsSet.size} 銘柄を取得対象に追加します。既存OHLCVがある銘柄はlastTs以降のみ取得します。`, {
+      writeProcessLog_("OHLCV", `PHASE1: 修復対象 ${repairSymsSet.size} 銘柄を取得対象に追加します。既存OHLCVがある銘柄は当日PM分だけ取得します。`, {
         repairSymbols: repairSymsSet.size
       });
     }
@@ -4455,13 +4476,13 @@ if (phase === "PHASE1") {
     }
   });
 
-symbols = Array.from(uniqueSymbols).sort();
+const candidateSymbols = Array.from(uniqueSymbols).sort();
 
-lastTsMap = buildLastTsMapFromOhlcv_(ohlcvSheet, symbols, new Set());
+lastTsMap = buildLastTsMapFromOhlcv_(ohlcvSheet, candidateSymbols, new Set());
 
 // 本当の120日取得対象 = OHLCVが存在しない銘柄だけ
 // 修復対象でも、既存OHLCVがあれば lastTs 以降だけ取得する
-const trueNewFullBackfillSymbols = symbols.filter(sym => {
+const trueNewFullBackfillSymbols = candidateSymbols.filter(sym => {
   const s = String(sym || "").trim();
   return s && !lastTsMap[s];
 });
@@ -4471,19 +4492,35 @@ todaySet.forEach(sym => {
   if (!s) return;
   if (!lastTsMap[s]) fullBackfillSet.add(s);
 });
-fullBackfillSymbols = Array.from(fullBackfillSet).sort();
+
+let skippedAlreadyHasTodayPm = 0;
+symbols = candidateSymbols.filter(sym => {
+  const s = String(sym || "").trim();
+  if (!s) return false;
+  if (fullBackfillSet.has(s)) return true;
+  if (hasMainTodayPmCoverage_(lastTsMap[s], businessDateKey)) {
+    skippedAlreadyHasTodayPm++;
+    return false;
+  }
+  return true;
+});
+const targetSymbolSet = new Set(symbols);
+fullBackfillSymbols = Array.from(fullBackfillSet).filter(sym => targetSymbolSet.has(sym)).sort();
+fullBackfillSet = new Set(fullBackfillSymbols);
 
 const repairDeltaSymbols = symbols.filter(sym => {
   const s = String(sym || "").trim();
   return s && repairSymsSet.has(s) && !!lastTsMap[s];
 });
 
-writeProcessLog_("OHLCV", "PHASE1: OHLCV取得対象を差分取得型にしました。OHLCV未取得銘柄だけ120日分、既存銘柄は修復対象でもlastTs以降のみ取得します。", {
+writeProcessLog_("OHLCV", "PHASE1: OHLCV取得対象を軽量取得型にしました。OHLCV未取得銘柄だけ120日分、既存銘柄は当日PM分だけ取得します。", {
+  totalCandidateSymbols: candidateSymbols.length,
   totalSymbols: symbols.length,
-  trueNewFullBackfillSymbols: trueNewFullBackfillSymbols.length,
+  trueNewFullBackfillSymbols: fullBackfillSymbols.length,
   repairDeltaSymbols: repairDeltaSymbols.length,
   droppedNonBottomRepairSymbols: droppedRepairSymbols,
-  existingDeltaSymbols: symbols.length - trueNewFullBackfillSymbols.length,
+  existingTodayPmSymbols: symbols.length - fullBackfillSymbols.length,
+  skippedAlreadyHasTodayPm: skippedAlreadyHasTodayPm,
   todaySignalSymbols: todaySet.size
 });
 
@@ -4504,6 +4541,13 @@ newAlertCount = todaySet.size;
 let allFetchedData = [];
 let phase1AppendedRows = 0;
 let batchNo = 0;
+const todayAmVolumeMap = buildTodayOhlcvSessionVolumeMap_(
+  ohlcvSheet,
+  symbols,
+  todayKey,
+  "AM",
+  OHLCV_LAST_TS_SCAN_MAX_ROWS
+);
 
 for (let i = startIndex; i < symbols.length;) {
   const elapsedBeforeBatch = Date.now() - startTime;
@@ -4552,10 +4596,15 @@ for (let i = startIndex; i < symbols.length;) {
       markOhlcvFetchInflight_(props, MAIN_PHASE1_FETCH_INFLIGHT_KEY, batchPlan, batch, "main_phase1");
       const requests = [];
       const reqMeta = [];
+      const runEndMillis = getOhlcvRunEndMillis_();
+      const existingPmStartSec = Math.floor(getMainExistingOhlcvFetchStartMillis_(todayKey) / 1000);
+      const existingPmEndSec = Math.floor(runEndMillis / 1000);
       batch.forEach(sym => {
         try {
-          const useLastTs = fullBackfillSet.has(sym) ? null : (lastTsMap[sym] || null);
-          const pair = buildOhlcvRequestPairForEndMillis_(sym, useLastTs, getOhlcvRunEndMillis_(), null, null, { forcePeriod: true });
+          const isFullBackfill = fullBackfillSet.has(sym);
+          const pair = isFullBackfill
+            ? buildOhlcvRequestPairForEndMillis_(sym, null, runEndMillis, null, null, { forcePeriod: true })
+            : buildOhlcvRequestPairForEndMillis_(sym, null, runEndMillis, existingPmStartSec, existingPmEndSec, { forcePeriod: true });
 
 const dailyIdx = requests.length;
 requests.push({
@@ -4574,7 +4623,9 @@ requests.push({
 reqMeta.push({
   symbol: sym,
   dailyIdx: dailyIdx,
-  intraIdx: intraIdx
+  intraIdx: intraIdx,
+  fullBackfill: isFullBackfill,
+  existingTodayPmOnly: !isFullBackfill
 });
         } catch (e) {
           writeProcessLog_("OHLCV", `PHASE1: ${sym} のYahoo Finance取得URLを作れませんでした。`, { symbol: sym, message: e.message });
@@ -4624,14 +4675,18 @@ const dailyMapForParse = Object.assign({}, dailyMap);
 delete dailyMapForParse[todayKey];
 
 const result = parseIntraResponse_(meta.symbol, intraRes, null, dailyMapForParse);
-const validRowsRaw = applyPhase1ResultRows_(meta.symbol, result, refreshId, lastTsMap);
+let validRowsRaw = applyPhase1ResultRows_(meta.symbol, result, refreshId, lastTsMap);
+if (meta.existingTodayPmOnly) {
+  validRowsRaw = filterMainExistingTodayPmRows_(meta.symbol, validRowsRaw, todayKey);
+}
 
 let validRows = prepareMainRunRowsFastPmVolume_(
   meta.symbol,
   validRowsRaw,
   dailyMap,
   todayKey,
-  rawAlertVolumeMap
+  rawAlertVolumeMap,
+  todayAmVolumeMap
 );
 
 // alerts_raw J列 volume で、該当シグナル足のvolumeだけ上書きする
@@ -4961,7 +5016,7 @@ if (phase === "PHASE4") {
 }
 }
 
-function prepareMainRunRowsFastPmVolume_(symbol, rows, dailyMap, todayKey, rawAlertVolumeMap) {
+function prepareMainRunRowsFastPmVolume_(symbol, rows, dailyMap, todayKey, rawAlertVolumeMap, todayAmVolumeMap) {
   const fastSym = String(symbol || "").trim();
   const fastNormalizedRows = (rows || []).map(row => normalizeOhlcvRowForWrite_(row)).filter(Boolean);
   if (!fastSym || !todayKey) return fastNormalizedRows;
@@ -4990,8 +5045,12 @@ function prepareMainRunRowsFastPmVolume_(symbol, rows, dailyMap, todayKey, rawAl
   const fastAmTimestamp = new Date(`${todayKey}T09:00:00+09:00`);
   const fastRawAmVol = rawAlertVolumeMap ? Number(rawAlertVolumeMap[makeRawAlertVolumeKey_(fastAmTimestamp, fastSym)]) : NaN;
   const fastUseProtectedAmVol = Number.isFinite(fastRawAmVol) && fastRawAmVol >= 0;
-  const fastAmVol = fastUseProtectedAmVol ? Math.round(fastRawAmVol) : (fastAmRow ? toSafeVolumeNumber_(fastAmRow[7]) : 0);
-  const fastHasAmVolume = !!fastAmRow || fastUseProtectedAmVol;
+  const fastSheetAmVol = todayAmVolumeMap ? Number(todayAmVolumeMap[fastSym]) : NaN;
+  const fastUseSheetAmVol = !fastUseProtectedAmVol && Number.isFinite(fastSheetAmVol) && fastSheetAmVol >= 0;
+  const fastAmVol = fastUseProtectedAmVol
+    ? Math.round(fastRawAmVol)
+    : (fastUseSheetAmVol ? Math.round(fastSheetAmVol) : (fastAmRow ? toSafeVolumeNumber_(fastAmRow[7]) : 0));
+  const fastHasAmVolume = !!fastAmRow || fastUseProtectedAmVol || fastUseSheetAmVol;
   const fastPmTimestamp = new Date(`${todayKey}T13:00:00+09:00`);
   const fastRawPmVol = rawAlertVolumeMap ? Number(rawAlertVolumeMap[makeRawAlertVolumeKey_(fastPmTimestamp, fastSym)]) : NaN;
   const fastUseProtectedPmVol = Number.isFinite(fastRawPmVol) && fastRawPmVol >= 0;
@@ -5029,8 +5088,8 @@ function prepareMainRunRowsFastPmVolume_(symbol, rows, dailyMap, todayKey, rawAl
           });
         }
       }
-    } else if ((fastAmRow && fastHasValidDailyDiff) ||
-        (!fastAmRow && (isDailyCompatibleWithSessionRow_(fastDaily, fastPmRow) || isSinglePriceDailyOhlcv_(fastDaily)))) {
+    } else if ((fastHasAmVolume && fastHasValidDailyDiff) ||
+        (!fastHasAmVolume && (isDailyCompatibleWithSessionRow_(fastDaily, fastPmRow) || isSinglePriceDailyOhlcv_(fastDaily)))) {
       const fastPmBefore = toSafeVolumeNumber_(fastPmRow[7]);
       fastPmRow[7] = fastHasAmVolume ? fastPmVolAfter : fastDailyVol;
       if (isVerboseOhlcvPmVolumeLogEnabled_()) {
@@ -5039,7 +5098,7 @@ function prepareMainRunRowsFastPmVolume_(symbol, rows, dailyMap, todayKey, rawAl
           todayKey: todayKey,
           dailyVol: fastDailyVol,
           amVol: fastAmVol,
-          amVolumeSource: fastUseProtectedAmVol ? "alerts_raw_locked_am" : "fetched_intra_am",
+          amVolumeSource: fastUseProtectedAmVol ? "alerts_raw_locked_am" : (fastUseSheetAmVol ? "ohlcv_today_am" : "fetched_intra_am"),
           pmBefore: fastPmBefore,
           pmAfter: fastPmRow[7],
           mode: fastHasAmVolume ? "daily_minus_am" : "daily_compatible_pm_only"
@@ -5093,6 +5152,85 @@ function prepareMainRunRowsFastPmVolume_(symbol, rows, dailyMap, todayKey, rawAl
 
   return fastOtherRows.concat(sortTodaySessionRows_(fastTodayRows));
 
+}
+
+function filterMainExistingTodayPmRows_(symbol, rows, todayKey) {
+  const sym = String(symbol || "").trim();
+  const key = normalizeBusinessDateKey_(todayKey);
+  if (!sym || !key || !rows || rows.length === 0) return [];
+
+  return rows.map(row => normalizeOhlcvRowForWrite_(row)).filter(row => {
+    if (!row) return false;
+    if (String(row[2] || "").trim() !== sym) return false;
+    const ts = row[0];
+    return formatYmd_(ts) === key && getOhlcvSessionName_(ts) === "PM";
+  });
+}
+
+function buildTodayOhlcvSessionVolumeMap_(sheet, symbols, dateKey, sessionName, maxRows) {
+  const volumeMap = {};
+  if (!sheet || !symbols || symbols.length === 0) return volumeMap;
+
+  const key = normalizeBusinessDateKey_(dateKey);
+  const targetSession = String(sessionName || "").trim().toUpperCase();
+  if (!key || !targetSession) return volumeMap;
+
+  const targetSymbols = {};
+  symbols.forEach(sym => {
+    const s = String(sym || "").trim();
+    if (s) targetSymbols[s] = true;
+  });
+  if (Object.keys(targetSymbols).length === 0) return volumeMap;
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow <= 1) return volumeMap;
+
+  const scanRows = Math.min(Math.max(1, Number(maxRows) || OHLCV_APPEND_INTEGRITY_SCAN_ROWS), lastRow - 1);
+  const startRow = lastRow - scanRows + 1;
+  const values = sheet.getRange(startRow, 1, scanRows, 8).getValues();
+  const bestBySymbol = {};
+
+  values.forEach((row, index) => {
+    const ts = normalizeOhlcvTimestamp_(row[0]);
+    if (!ts || formatYmd_(ts) !== key || getOhlcvSessionName_(ts) !== targetSession) return;
+
+    const sym = String(row[2] || "").trim();
+    if (!targetSymbols[sym]) return;
+
+    const marker = String(row[1] || "").trim();
+    if (marker === "GAP_FAILED") return;
+
+    const item = {
+      row: [
+        ts,
+        marker,
+        sym,
+        row[3],
+        row[4],
+        row[5],
+        row[6],
+        row[7]
+      ],
+      sheetRow: startRow + index
+    };
+
+    const current = bestBySymbol[sym];
+    if (!current) {
+      bestBySymbol[sym] = item;
+      return;
+    }
+
+    const cmp = compareOhlcvDuplicatePriority_(item.row, current.row);
+    if (cmp < 0 || (cmp === 0 && item.sheetRow > current.sheetRow)) {
+      bestBySymbol[sym] = item;
+    }
+  });
+
+  Object.keys(bestBySymbol).forEach(sym => {
+    volumeMap[sym] = toSafeVolumeNumber_(bestBySymbol[sym].row[7]);
+  });
+
+  return volumeMap;
 }
 
 function toSafeVolumeNumber_(value) {

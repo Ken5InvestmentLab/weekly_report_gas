@@ -44,7 +44,7 @@ GAS 本体のコードはすべて **`gas.txt`** 一ファイルに集約され�
 | `resumeDailyMaintenance` | `runDailyMaintenance` 再開時 | `runDailyMaintenanceInternal_` を再起動 |
 | `resumeQuickRepair` | `quickRepairRecentGaps` 再開時 | ギャップ修復を再起動 |
 | `resumeOhlcvPostRepairCleanup` | GAP修復完了後 | timestamp正規化・AM保護マーキング・重複整理・最終ソートを再開 |
-| `postprocessMiddayOhlcv` | 13:21先行OHLCV取得完了後 | 追記後のtimestamp正規化・不正timestamp削除を小分けで再開 |
+| `postprocessMiddayOhlcv` | 旧13:21後処理状態が残る場合 | 追記後のtimestamp正規化・不正timestamp削除を小分けで再開 |
 | `resumeMiddayOhlcvRollback` | 13:21先行OHLCV戻し処理の再開時 | 触った銘柄の120日OHLCV削除を再開 |
 | `purgeOldOhlcvResumeTrigger` | `purgeOldOhlcvDataDaily` 未完了時 | OHLCV削除を再起動 |
 | `resumeCleanupLegacyGapFailedAndEmptyTimestamps` | 旧OHLCV残骸整理未完了時 | 空timestamp・非09:00/13:00・長期GAP_FAILED整理を再開 |
@@ -125,8 +125,8 @@ status, note, logged_at
 | `OHLCV_MIDDAY_LAST_TS_MAP` | 13:21 先行取得用の銘柄別最終timestamp |
 | `OHLCV_MIDDAY_REFRESH_ID` | 13:21 先行取得ID |
 | `OHLCV_MIDDAY_FULL_BACKFILL_SYMBOLS` | 13:21 で120日取得する真の新規銘柄 |
-| `OHLCV_MIDDAY_POSTPROCESS_PENDING` | 13:21 後処理トリガーが残っているかの印 |
-| `OHLCV_MIDDAY_POSTPROCESS_STATE_V1` | 13:21 後処理（不正timestamp掃除）の再開状態 |
+| `OHLCV_MIDDAY_POSTPROCESS_PENDING` | 旧13:21 後処理トリガーが残っているかの印 |
+| `OHLCV_MIDDAY_POSTPROCESS_STATE_V1` | 旧13:21 後処理（不正timestamp掃除）の再開状態 |
 | `OHLCV_MIDDAY_ROLLBACK_STATE_V1` | 13:21 戻し処理の再開状態 |
 | `OHLCV_MIDDAY_ROLLBACK_SYMBOLS_V1` | 13:21 戻し処理で120日削除する銘柄 |
 | `DAILY_MAINT_CURSOR` | `runDailyMaintenance` の再開カーソル |
@@ -159,10 +159,11 @@ status, note, logged_at
 
 ```
 13:21  fetchOHLCVForNewAlertsMidday → AM先行取得のみ（後続チェーンなし）
-         取得完了時に時間余裕（GAS残時間≥180秒）があれば postprocess を
-         インライン実行。足りなければ 5 秒後トリガーで postprocessMiddayOhlcv。
+         未取得銘柄は120日分、既存銘柄は当日AM分だけ取得。
+         重複整理・GAP修復・広範囲timestamp掃除は15:51本番側へ委譲。
 
 15:51  fetchOHLCVForNewAlerts → (PHASE1→2→3→4)
+         PHASE1は未取得銘柄120日分、既存銘柄は当日PM分だけ取得。
          → PHASE4完了: runDailyMaintenanceTrigger（5秒後）
            → runDailyMaintenance: 評価日到達銘柄の価格更新
              → 完了後: Discord完了通知をOHLCV_COMPLETION_NOTICE_PENDING_V1に保存
@@ -202,13 +203,13 @@ GAS の実行上限は **6分**。長時間処理はどちらかのパターン�
 ### OHLCV 取得フロー（4フェーズ）
 
 ```
-PHASE1: 全銘柄の OHLCV を Yahoo Finance 1h足で取得
+PHASE1: OHLCV未取得銘柄は120日分、既存銘柄は当日AM/PM分を Yahoo Finance 1h足で取得
 PHASE2: 株式分割検出・価格調整
 PHASE3: 分割調整キューを OHLCV シートに適用
 PHASE4: 重複排除・ソート・完了通知 → runDailyMaintenanceTrigger をチェーン
 ```
 
-フェーズはスクリプトプロパティ `OHLCV_CURRENT_PHASE` で管理。13:21/15:51本体では `range=5d` を使わず必ず `period1/period2` を使う。
+フェーズはスクリプトプロパティ `OHLCV_CURRENT_PHASE` で管理。15:51本体では `range=5d` を使わず必ず `period1/period2` を使う。13:21先行取得の既存銘柄は当日08:00〜13:00:59 JSTの当日AM分だけ、15:51本体の既存銘柄は当日13:00:00 JST以降の当日PM分だけを取得する。
 
 ### OHLCV 取得窓の決定ロジック
 
@@ -217,13 +218,15 @@ PHASE4: 重複排除・ソート・完了通知 → runDailyMaintenanceTrigger �
 | 状態 | 取得方法 |
 |---|---|
 | OHLCV未取得銘柄 | 直近120日分 |
-| `OHLCV_REPAIR_SYMBOLS` 対象 | 直近120日分を強制再取得 |
+| `OHLCV_REPAIR_SYMBOLS` 対象 | OHLCV未取得や手動全量修復では直近120日分。15:51本体の既存銘柄は当日PM分のみ |
 | `lastTs` が直近5日以内 | `lastTs - 3日` から取得終了時刻まで `period1/period2` |
 | `lastTs` が6日〜120日以内 | `lastTs - 3日` から現在まで `period1/period2` |
 | `lastTs` が120日より古い | 直近120日分 |
 | `lastTs` が取得終了時刻以上 | 異常値対策として直近範囲を `period1/period2` |
 
-3日の重ね取りは Yahoo側の欠損・祝日・前回途中終了・AM/PM合成境界ズレを吸収するため。取得後は `timestamp + symbol` で重複排除する。
+13:21先行取得では、OHLCV未取得銘柄だけ120日分を取得し、既存OHLCV銘柄は当日AM未取得の場合だけ当日AM分を取得する。既存キー探索や重複ガードは行わず、重複やGAPは15:51本番、GAP修復、post-repair cleanupへ委譲する。
+
+15:51本体では、OHLCV未取得銘柄だけ120日分を取得し、既存OHLCV銘柄は当日PM未取得の場合だけ当日PM分を取得する。既存銘柄の過去GAPは15:51 PHASE1の重ね取りで埋めず、後段のGAP修復と post-repair cleanup へ委譲する。GAS再試行や120日新規取得に備え、通常のappend guardと直近重複整理は保険として残す。
 
 ### Yahoo Finance 1h足の集約ルール
 
@@ -259,7 +262,7 @@ PHASE4: 重複排除・ソート・完了通知 → runDailyMaintenanceTrigger �
 - **禁止**: 時間主導トリガーで `SpreadsheetApp.getActiveSpreadsheet()` を使う。必ず `SpreadsheetApp.openById(SPREADSHEET_ID)` を使う
 - **禁止**: GAP修復・監査で `getRange(2, 1, lastRow - 1, ...)` の全行読みを追加する
 - `ohlcv_4h` 先頭からの連続削除は `sheet.deleteRows(firstDataRow, N)` で高速に行う
-- 追記は `appendRowsToSheet_` を通す。追記後はA列を読み返して空・不正・09:00/13:00以外の行を即削除する
+- 通常追記は `appendRowsToSheet_` を通す。13:21軽量MIDDAY追記だけは `appendMiddayOhlcvRowsWithoutGuard_()` を使い、既存キー探索・重複ガード・readback削除を15:51側へ委譲する
 - 全行一括書き戻しは避け、変更した行のみ個別または小バッチで `setValues()` する
 
 ### アーカイブ保持期間
