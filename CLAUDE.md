@@ -95,7 +95,7 @@ status, note, logged_at
 - `MIDDAY_LOCKED_yyyy-mm-dd` は13:21で `alerts_raw` の出来高を転記したAM保護行。15:51本番・GAP修復・重複整理でも削除・上書き禁止
 - `PM_LOCKED_yyyy-mm-dd` は15:51本番で当日PMにBOTTOMシグナルが点灯した銘柄のPM行に付くマーカー。PM出来高=`alerts_raw` PM出来高で上書きされ、削除・上書き禁止
 - 重複排除は `timestamp + symbol`（timestampは09:00/13:00バケット）で行い、同一キーは1行だけ残す（残す優先度は `compareOhlcvDuplicatePriority_`）
-- 日次チェーンの重複排除は末尾窓に限定（PHASE4=末尾60,000行、GAP修復後cleanup=末尾5,000行+`targetDates`）。窓より手前の古い重複には届かないため、過去分の一括掃除は `cleanupOhlcvDuplicatesNow()`（シート全体を前方カーソルで走査、resume対応）を使う
+- PHASE4では重い重複削除を行わず、取得フローを完了して日次メンテナンスへ進める。通常の重複整理はGAP修復後cleanup、過去分の一括掃除は `cleanupOhlcvDuplicatesNow()`（シート全体を前方カーソルで走査、resume対応）を使う
 - 最終状態は必ず A列 timestamp 昇順
 
 ## スクリプトプロパティ
@@ -206,7 +206,7 @@ GAS の実行上限は **6分**。長時間処理はどちらかのパターン�
 PHASE1: OHLCV未取得銘柄は120日分、既存銘柄は当日AM/PM分を Yahoo Finance 1h足で取得
 PHASE2: 株式分割検出・価格調整
 PHASE3: 分割調整キューを OHLCV シートに適用
-PHASE4: 重複排除・ソート・完了通知 → runDailyMaintenanceTrigger をチェーン
+PHASE4: 重い重複削除を行わず取得フロー完了 → runDailyMaintenanceTrigger をチェーン
 ```
 
 フェーズはスクリプトプロパティ `OHLCV_CURRENT_PHASE` で管理。15:51本体では `range=5d` を使わず必ず `period1/period2` を使う。13:21先行取得の既存銘柄は当日08:00〜13:00:59 JSTの当日AM分だけ、15:51本体の既存銘柄は当日13:00:00 JST以降の当日PM分だけを取得する。

@@ -421,7 +421,7 @@ fetchOHLCVForNewAlerts
   → PHASE1: OHLCV取得
   → PHASE2: 株式分割検出・価格調整
   → PHASE3: 分割調整キュー適用
-  → PHASE4: 重複排除・ソート・完了通知
+  → PHASE4: 取得フロー完了・日次メンテ予約（重複整理は後段）
     → runDailyMaintenanceTrigger
       → runDailyMaintenance
         → quickRepairTrigger
@@ -453,7 +453,7 @@ fetchOHLCVForNewAlerts
 | `PHASE1` | Yahoo Finance 1h足からOHLCV取得 |
 | `PHASE2` | 株式分割検出・価格調整 |
 | `PHASE3` | 分割調整キューを `ohlcv_4h` に適用 |
-| `PHASE4` | 重複排除・timestamp昇順ソート・日次メンテ予約 |
+| `PHASE4` | 重い重複削除を行わず取得フローを完了し、日次メンテナンスを予約 |
 
 通常の未指定取得窓は `OHLCV_DEFAULT_LOOKBACK_DAYS = 120` 日。
 

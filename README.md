@@ -39,7 +39,7 @@ TradingView Alert
     → PHASE1: OHLCV取得
     → PHASE2: 株式分割検出・価格調整
     → PHASE3: 分割調整キュー適用
-    → PHASE4: 重複排除・ソート・完了通知
+    → PHASE4: 取得フロー完了・日次メンテ予約
       → runDailyMaintenance
         → quickRepairRecentGaps
 
@@ -264,7 +264,7 @@ fetchOHLCVForNewAlerts()
 | `PHASE1` | Yahoo Finance 1h足からOHLCV取得 |
 | `PHASE2` | 株式分割検出・価格調整 |
 | `PHASE3` | 分割調整キュー適用 |
-| `PHASE4` | 重複排除・timestamp昇順ソート・完了通知 |
+| `PHASE4` | 重い重複削除を行わず取得フローを完了し、日次メンテナンスを予約 |
 
 ## Yahoo Finance 1h足の集約
 

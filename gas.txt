@@ -11486,6 +11486,32 @@ function finishOhlcvPhase4UltraLight_(ohlcvSheet, todayKey, startTime) {
 
   SpreadsheetApp.flush();
 
+  result.duplicateCleanupSkipped = true;
+  result.duplicateCleanupDelegatedTo = "quickRepair/postRepairCleanup";
+  result.afterLastRow = ohlcvSheet.getLastRow();
+
+  writeProcessLog_("OHLCV", "PHASE4超軽量版: 重複削除を実行せず、日次メンテナンスとGAP修復チェーンへ進みます。", {
+    beforeLastRow: beforeLastRow,
+    afterLastRow: result.afterLastRow,
+    businessDate: todayKey,
+    cleanupDelegatedTo: result.duplicateCleanupDelegatedTo
+  });
+
+  debugLogToSheet_("ohlcv.phase4.ultra_light.complete", {
+    beforeLastRow: result.beforeLastRow,
+    afterLastRow: result.afterLastRow,
+    invalidDeletedRows: result.invalidDeletedRows,
+    invalidConvertedRows: result.invalidConvertedRows,
+    duplicateDeletedRows: result.duplicateDeletedRows,
+    duplicateCleanupSkipped: result.duplicateCleanupSkipped,
+    elapsedMs: Date.now() - startTime
+  });
+
+  return result;
+}
+
+/*
+
   // 末尾 OHLCV_FINAL_DEDUPE_SCAN_ROWS 行内の同一 timestamp+symbol 重複を削除する。
   // 後段の resumeOhlcvPostRepairCleanup は OHLCV_POST_REPAIR_DEDUP_READ_ROWS=5000 行しか
   // スキャンしないため、それより前にある MIDDAY_yyyy-mm-dd / GAP_REPAIR 系の重複が
@@ -11519,6 +11545,8 @@ function finishOhlcvPhase4UltraLight_(ohlcvSheet, todayKey, startTime) {
 
   return result;
 }
+
+*/
 
 function deleteDuplicateOhlcvRowsRecentFast_(sheet, maxRows, deadlineMs) {
   if (!sheet) return { deletedRows: 0 };
