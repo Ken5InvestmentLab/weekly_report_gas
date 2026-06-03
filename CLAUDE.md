@@ -190,10 +190,11 @@ status, note, logged_at
 GAS の実行上限は **6分**。長時間処理はどちらかのパターンで実装する：
 
 **パターンA — 先行トリガー方式（`quickRepairRecentGaps`, `runOhlcvPostRepairCleanup_`）**
-1. 処理開始直後に `resumeXxx` safety トリガー（7分後 = 420 秒）を先にセット
+1. 処理開始直後に `resumeXxx` safety トリガーを先にセット。OHLCV 13:21/15:51取得では6.5分後（390秒）に固定
 2. 処理が正常完了したらトリガーを削除
 3. GAS の 360 秒強制終了対策。バッファ 60 秒は `.after()` のスケジュール遅延吸収用
 4. ロック取得前後・対象件数・バッチ進捗を `console.log` に必ず出す
+5. OHLCV 13:21/15:51取得では、バッチ追記直後に再開カーソルと補助状態を保存し、safety retry は保存済み位置から引き継ぐ
 
 **パターンB — 内部タイムリミット方式（`fetchOHLCVForNewAlerts`, `runDailyMaintenance`）**
 1. 処理開始時に `setupResumeTrigger_(handlerName)` で 10 秒後の継続トリガーをセット

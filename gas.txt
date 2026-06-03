@@ -1876,7 +1876,7 @@ const FETCH_GUARD_MS = 90000;
 const OHLCV_PHASE1_MAX_RUN_MS = 150 * 1000;
 const OHLCV_LOCK_WAIT_MS = 15000;
 const OHLCV_LOCK_BUSY_RESUME_AFTER_MS = 60 * 1000;
-const OHLCV_SAFETY_RESUME_AFTER_MS = 8 * 60 * 1000;
+const OHLCV_SAFETY_RESUME_AFTER_MS = 6.5 * 60 * 1000;
 const OHLCV_DEFAULT_LOOKBACK_DAYS = 120;
 const OHLCV_LAST_TS_SCAN_CHUNK_ROWS = 5000;
 const OHLCV_LAST_TS_SCAN_MAX_ROWS = 60000;
@@ -2700,6 +2700,8 @@ if (finalRows.length > 0) {
     const nextIndex = Math.min(i + batch.length, symbols.length);
     props.setProperty(MIDDAY_STATE_KEY, String(nextIndex));
     props.setProperty(MIDDAY_NEW_ALERT_COUNT_KEY, newAlertCount.toString());
+    props.setProperty(MIDDAY_LAST_TS_MAP_KEY, JSON.stringify(lastTsMap));
+    props.setProperty(MIDDAY_FULL_BACKFILL_SYMBOLS_KEY, JSON.stringify(Array.from(fullBackfillSet)));
     clearOhlcvFetchInflight_(props, MIDDAY_FETCH_INFLIGHT_KEY);
 
     debugLogToSheet_("ohlcv.midday.batch", {
@@ -4557,6 +4559,8 @@ for (let i = startIndex; i < symbols.length;) {
     allFetchedData = [];
     props.setProperty(STATE_KEY, i.toString());
     props.setProperty(NEW_ALERT_COUNT_KEY, newAlertCount.toString());
+    props.setProperty("LAST_TS_MAP", JSON.stringify(lastTsMap));
+    props.setProperty(MAIN_FULL_BACKFILL_SYMBOLS_KEY, JSON.stringify(Array.from(fullBackfillSet)));
     writeProcessLog_("OHLCV", `PHASE1: 実行時間が近づいたため、${i}/${symbols.length} 銘柄までの進捗を保存して再開します。`, {
       cursor: i,
       totalSymbols: symbols.length,
@@ -4719,6 +4723,8 @@ if (validRows.length > 0) {
       const nextIndex = Math.min(i + batch.length, symbols.length);
       props.setProperty(STATE_KEY, String(nextIndex));
       props.setProperty(NEW_ALERT_COUNT_KEY, newAlertCount.toString());
+      props.setProperty("LAST_TS_MAP", JSON.stringify(lastTsMap));
+      props.setProperty(MAIN_FULL_BACKFILL_SYMBOLS_KEY, JSON.stringify(Array.from(fullBackfillSet)));
       clearOhlcvFetchInflight_(props, MAIN_PHASE1_FETCH_INFLIGHT_KEY);
 
       debugLogToSheet_("ohlcv.phase1.batch", {
