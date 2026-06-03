@@ -1847,11 +1847,11 @@ const OHLCV_APPEND_GUARD_FALLBACK_TAIL_ROWS = 30000;
 // 末尾N行に限定せずシート全体を前方カーソルで走査し、6分上限を跨いで完走する。
 const OHLCV_FULL_DEDUP_STATE_KEY = "OHLCV_FULL_DEDUP_STATE_V1";
 const OHLCV_FULL_DEDUP_DONE_KEY = "OHLCV_FULL_DEDUP_DONE_V1";
-const OHLCV_FULL_DEDUP_CHUNK_ROWS = 200;
-const OHLCV_FULL_DEDUP_MAX_RUN_MS = 45 * 1000;
-const OHLCV_FULL_DEDUP_MIN_REMAINING_MS = 15000;
-const OHLCV_FULL_DEDUP_DELETE_MARGIN_MS = 10000;
-const OHLCV_FULL_DEDUP_MAX_DELETE_ROWS_PER_CHUNK = 50;
+const OHLCV_FULL_DEDUP_CHUNK_ROWS = 3000;
+const OHLCV_FULL_DEDUP_MAX_RUN_MS = 150 * 1000;
+const OHLCV_FULL_DEDUP_MIN_REMAINING_MS = 45000;
+const OHLCV_FULL_DEDUP_DELETE_MARGIN_MS = 20000;
+const OHLCV_FULL_DEDUP_MAX_DELETE_ROWS_PER_CHUNK = 400;
 const OHLCV_FULL_DEDUP_RESUME_HANDLER = "resumeCleanupOhlcvDuplicates";
 const OHLCV_FULL_DEDUP_SAFETY_AFTER_MS = 5 * 60 * 1000;
 const OHLCV_FULL_DEDUP_RESUME_AFTER_MS = 20 * 1000;
@@ -1880,7 +1880,10 @@ const MIDDAY_POSTPROCESS_CHUNK_ROWS = 5000;
 const MIDDAY_POSTPROCESS_TIME_LIMIT_MS = 4 * 60 * 1000;
 const MIDDAY_POSTPROCESS_MIN_REMAINING_MS = 45 * 1000;
 const MIDDAY_POSTPROCESS_RESUME_AFTER_MS = 5 * 1000;
-const MIDDAY_DEDUPE_GUARD_MS = 120 * 1000;
+const MIDDAY_POSTPROCESS_INLINE_ENABLED = false;
+const MIDDAY_FETCH_MAX_RUN_MS = 2.5 * 60 * 1000;
+const MIDDAY_FETCH_MIN_REMAINING_MS = 45 * 1000;
+const MIDDAY_FETCH_SAFETY_RESUME_AFTER_MS = 6.5 * 60 * 1000;
 const MIDDAY_FULL_BACKFILL_SYMBOLS_KEY = "OHLCV_MIDDAY_FULL_BACKFILL_SYMBOLS";
 const MIDDAY_HISTORY_COVERAGE_SCAN_MAX_ROWS = 250000;
 const MIDDAY_APPEND_EXISTING_KEY_SCAN_MAX_ROWS = 5000;
@@ -2166,7 +2169,7 @@ function fetchOHLCVForNewAlertsMidday() {
       writeProcessLog_("OHLCV-AM", "16:00本番処理の時間が近いため、13:30先行取得は再開せず終了します。", { businessDate: todayKey });
       return { ok: true, skipped: true, reason: "main_run_window" };
     }
-    scheduleMiddayOhlcvResumeIfAllowed_(OHLCV_SAFETY_RESUME_AFTER_MS);
+    scheduleMiddayOhlcvResumeIfAllowed_(MIDDAY_FETCH_SAFETY_RESUME_AFTER_MS);
     lock = LockService.getScriptLock();
     if (!lock.tryLock(OHLCV_LOCK_WAIT_MS)) {
       writeProcessLog_("OHLCV-AM", "別の処理が実行中のため、13:30先行取得を1分後に再試行します。", { waitMs: OHLCV_LOCK_WAIT_MS });
@@ -2243,7 +2246,7 @@ function fetchOHLCVForNewAlertsMiddayInternal_(outerStartedAt) {
   }
 
 const startTime = outerStartedAt || Date.now();
-const LIMIT_MS = 4 * 60 * 1000;
+const LIMIT_MS = MIDDAY_FETCH_MAX_RUN_MS;
 const ss = openAppSpreadsheet_();
 const rawSheet = ss.getSheetByName(CONFIG.RAW_SHEET);
 const ohlcvSheet = ss.getSheetByName(CONFIG.OHLCV_SHEET);
@@ -2347,7 +2350,7 @@ if (symbols.length === 0) {
   for (let i = startIndex; i < symbols.length; i += MIDDAY_OHLCV_BATCH_SIZE) {
     const elapsedBeforeBatch = Date.now() - startTime;
 
-    if (elapsedBeforeBatch > LIMIT_MS || (LIMIT_MS - elapsedBeforeBatch) < MIDDAY_DEDUPE_GUARD_MS) {
+    if (elapsedBeforeBatch > LIMIT_MS || (LIMIT_MS - elapsedBeforeBatch) < MIDDAY_FETCH_MIN_REMAINING_MS) {
       const appended = appendAndNormalizeMiddayOhlcvRows_(ohlcvSheet, allFetchedData, "pause");
 
       props.setProperty(MIDDAY_STATE_KEY, i.toString());
@@ -2537,7 +2540,7 @@ if (appended > 0) {
   const INLINE_MIN_AVAILABLE_MS = 180 * 1000;
   const availableForInlineMs = 360 * 1000 - elapsedSoFar - INLINE_SAFETY_BUFFER_MS;
 
-  if (availableForInlineMs >= INLINE_MIN_AVAILABLE_MS) {
+  if (MIDDAY_POSTPROCESS_INLINE_ENABLED && availableForInlineMs >= INLINE_MIN_AVAILABLE_MS) {
     try {
       const state = loadMiddayOhlcvPostprocessState_(ohlcvSheet);
       // runMiddayOhlcvPostprocessChunks_ の deadline = startedAt + MIDDAY_POSTPROCESS_TIME_LIMIT_MS。
@@ -2687,7 +2690,7 @@ function filterMiddayRowsAfterKnownLastTs_(symbol, rows, knownLastTs, context) {
     out.push(row);
   });
 
-  if (skipped > 0) {
+  if (skipped > 0 && isVerboseOhlcvFetchLogEnabled_()) {
     writeProcessLog_("OHLCV-AM", "MIDDAY append skipped rows at or before known last timestamp.", {
       context: context || "",
       symbol: String(symbol || ""),

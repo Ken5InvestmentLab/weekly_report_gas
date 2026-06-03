@@ -406,6 +406,8 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 - 13:30で `alerts_raw` から出来高を転記したAM行は `MIDDAY_LOCKED_yyyy-mm-dd` として保存し、後続処理では保護する。
 - 13:30再開時は毎回末尾12,000行の不正timestamp掃除を走らせない。初回入口の軽量掃除と `appendRowsToSheet_` 直後の読み返し削除で吸収する。
 - 13:30完了後の広めのtimestamp後処理は `postprocessMiddayOhlcv` に分離し、`OHLCV_MIDDAY_POSTPROCESS_STATE_V1` で末尾から小分け再開する。一括30,000行スキャンへ戻さない。
+- 13:30取得本体では、完了直後の広めのtimestamp後処理をインライン実行しない。GASの6分上限に近づく前に取得を区切り、後処理は `postprocessMiddayOhlcv` の別トリガーへ逃がす。
+- 13:30取得の安全再開トリガーは、通常の自前pause/resumeと重なってロック待ちを増やさないよう、fetch本体の自前実行上限より十分後ろに置く。
 - 日次メンテナンス、GitHub Actions、GAP修復には進まない。
 - 完了通知のみ送る。
 
