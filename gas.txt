@@ -6751,8 +6751,10 @@ const OHLCV_POST_REPAIR_SAFETY_AFTER_MS = 7 * 60 * 1000;
 const OHLCV_POST_REPAIR_DEDUP_READ_ROWS = 5000;
 const OHLCV_POST_REPAIR_RAW_VOLUME_SCAN_ROWS = 20000;
 const OHLCV_RAW_ALERT_VOLUME_MAP_CHUNK_ROWS = 5000;
-// 1回のSCAN呼び出しで処理する targetDates 件数（メモリ・所要時間を予測可能にするための上限）
-const OHLCV_POST_REPAIR_DEDUP_DATE_BATCH = 10;
+// 1回のSCAN呼び出しで処理する targetDates 件数。
+// Apps Script のシートAPI待ちが重い日は10日分のdate bucket探索だけで時間切れになり、
+// dateIndexが進まない再試行ループに入るため、1日ずつ確実に前進させる。
+const OHLCV_POST_REPAIR_DEDUP_DATE_BATCH = 1;
 // SCANループ内のデッドラインチェック間隔（行）
 const OHLCV_POST_REPAIR_DEDUP_TIMECHECK_EVERY = 1000;
 // SCAN中断のための残り時間下限（ms）
@@ -12489,8 +12491,9 @@ function runOhlcvPostRepairCleanup_() {
         if (OHLCV_POST_REPAIR_LIMIT_MS - (Date.now() - startedAt) < OHLCV_POST_REPAIR_MIN_DEDUP_REMAINING_MS) break;
 
         // 1ショットあたりの作業量を予測可能にするため targetDates をバッチ分割
-        const batchEnd = Math.min(state.targetDates.length, state.dateIndex + OHLCV_POST_REPAIR_DEDUP_DATE_BATCH);
-        const batchDates = state.targetDates.slice(state.dateIndex, batchEnd);
+        const batchStartIndex = state.dateIndex;
+        const batchEnd = Math.min(state.targetDates.length, batchStartIndex + OHLCV_POST_REPAIR_DEDUP_DATE_BATCH);
+        const batchDates = state.targetDates.slice(batchStartIndex, batchEnd);
         const dedupDeadlineMs = startedAt + OHLCV_POST_REPAIR_LIMIT_MS;
         writeProcessLog_("OHLCV_POST_REPAIR", "Multi-date dedup scan starting.", {
           totalDates: state.targetDates.length,
@@ -12506,6 +12509,14 @@ function runOhlcvPostRepairCleanup_() {
         if (r.timedOut) {
           state.updatedAt = new Date().toISOString();
           saveOhlcvPostRepairCleanupState_(state);
+          writeProcessLog_("OHLCV_POST_REPAIR", "Multi-date dedup scan timed out; batch will retry.", {
+            dateIndex: batchStartIndex,
+            batchDates: batchDates,
+            scannedRows: r.scannedRows || 0,
+            totalRows: r.totalRows || 0,
+            duplicateRows: r.duplicateRows || 0,
+            remainingMs: dedupDeadlineMs - Date.now()
+          });
           break;
         }
         if ((r.duplicateRows || 0) > 0) {
@@ -12514,11 +12525,18 @@ function runOhlcvPostRepairCleanup_() {
         } else {
           // このバッチに重複なし → そのまま次のバッチへ
           const advanced2 = batchEnd;
-          state.totals.duplicateDatesProcessed = (state.totals.duplicateDatesProcessed || 0) + (advanced2 - state.dateIndex);
+          state.totals.duplicateDatesProcessed = (state.totals.duplicateDatesProcessed || 0) + (advanced2 - batchStartIndex);
           state.dateIndex = advanced2;
         }
         state.updatedAt = new Date().toISOString();
         saveOhlcvPostRepairCleanupState_(state);
+        writeProcessLog_("OHLCV_POST_REPAIR", "Multi-date dedup batch scan finished.", {
+          dateIndex: batchStartIndex,
+          nextDateIndex: (r.duplicateRows || 0) > 0 ? state.dateIndex : batchEnd,
+          batchDates: batchDates,
+          scannedRows: r.scannedRows || 0,
+          duplicateRows: r.duplicateRows || 0
+        });
         continue;
       }
 
