@@ -6752,9 +6752,10 @@ const OHLCV_POST_REPAIR_DEDUP_READ_ROWS = 5000;
 const OHLCV_POST_REPAIR_RAW_VOLUME_SCAN_ROWS = 20000;
 const OHLCV_RAW_ALERT_VOLUME_MAP_CHUNK_ROWS = 5000;
 // 1回のSCAN呼び出しで処理する targetDates 件数。
-// Apps Script のシートAPI待ちが重い日は10日分のdate bucket探索だけで時間切れになり、
-// dateIndexが進まない再試行ループに入るため、1日ずつ確実に前進させる。
-const OHLCV_POST_REPAIR_DEDUP_DATE_BATCH = 1;
+// 10日単位では重い日のdate bucket探索だけで時間切れになるため、2日ずつ小さく前進させる。
+// 2日分のdate bucketが近接する場合は date_span として1回のgetValues()にまとめる。
+const OHLCV_POST_REPAIR_DEDUP_DATE_BATCH = 2;
+const OHLCV_POST_REPAIR_DEDUP_DATE_SPAN_MAX_ROWS = 10000;
 // SCANループ内のデッドラインチェック間隔（行）
 const OHLCV_POST_REPAIR_DEDUP_TIMECHECK_EVERY = 1000;
 // SCAN中断のための残り時間下限（ms）
@@ -13595,16 +13596,51 @@ function dedupeOhlcvAllTargetDates_(sheet, targetDates, deadlineMs) {
   };
 
   const dates = Object.keys(dateSet).sort();
-  for (let i = 0; i < dates.length; i++) {
+  let usedDateSpan = false;
+  if (dates.length > 1) {
     if (deadlineMs && deadlineMs - Date.now() < OHLCV_POST_REPAIR_DEDUP_TAIL_MARGIN_MS) {
       return { timedOut: true, allDeleteRows: [], duplicateRows: 0, scannedRows: scannedRows, totalRows: numDataRows };
     }
-    const range = getOhlcvDateRangeRows_(sheet, dates[i], lastRow, deadlineMs);
-    if (range.incomplete) {
-      return { timedOut: true, allDeleteRows: [], duplicateRows: 0, scannedRows: scannedRows, totalRows: numDataRows };
+    const minDay = toJstDayKeyFromDateStr_(dates[0]);
+    const maxDate = new Date(String(dates[dates.length - 1]) + "T00:00:00+09:00");
+    const afterMaxDateKey = formatYmd_(new Date(maxDate.getTime() + 24 * 60 * 60 * 1000));
+    const afterMaxDay = toJstDayKeyFromDateStr_(afterMaxDateKey);
+    if (minDay !== null && afterMaxDay !== null) {
+      const startInfo = findFirstOhlcvRowOnOrAfterDayKey_(sheet, minDay, lastRow, deadlineMs || null);
+      if (startInfo.incomplete) {
+        return { timedOut: true, allDeleteRows: [], duplicateRows: 0, scannedRows: scannedRows, totalRows: numDataRows };
+      }
+      const endInfo = findFirstOhlcvRowOnOrAfterDayKey_(sheet, afterMaxDay, lastRow, deadlineMs || null);
+      if (endInfo.incomplete) {
+        return { timedOut: true, allDeleteRows: [], duplicateRows: 0, scannedRows: scannedRows, totalRows: numDataRows };
+      }
+      if (!startInfo.row || startInfo.row > lastRow) {
+        usedDateSpan = true;
+      } else {
+        const endRow = Math.min(lastRow, (endInfo.row || (lastRow + 1)) - 1);
+        const spanRows = Math.max(0, endRow - startInfo.row + 1);
+        if (spanRows <= OHLCV_POST_REPAIR_DEDUP_DATE_SPAN_MAX_ROWS) {
+          usedDateSpan = true;
+          if (scanRange(startInfo.row, spanRows, "date_span")) {
+            return { timedOut: true, allDeleteRows: [], duplicateRows: 0, scannedRows: scannedRows, totalRows: numDataRows };
+          }
+        }
+      }
     }
-    if (scanRange(range.startRow, range.numRows, "date_bucket")) {
-      return { timedOut: true, allDeleteRows: [], duplicateRows: 0, scannedRows: scannedRows, totalRows: numDataRows };
+  }
+
+  if (!usedDateSpan) {
+    for (let i = 0; i < dates.length; i++) {
+      if (deadlineMs && deadlineMs - Date.now() < OHLCV_POST_REPAIR_DEDUP_TAIL_MARGIN_MS) {
+        return { timedOut: true, allDeleteRows: [], duplicateRows: 0, scannedRows: scannedRows, totalRows: numDataRows };
+      }
+      const range = getOhlcvDateRangeRows_(sheet, dates[i], lastRow, deadlineMs);
+      if (range.incomplete) {
+        return { timedOut: true, allDeleteRows: [], duplicateRows: 0, scannedRows: scannedRows, totalRows: numDataRows };
+      }
+      if (scanRange(range.startRow, range.numRows, "date_bucket")) {
+        return { timedOut: true, allDeleteRows: [], duplicateRows: 0, scannedRows: scannedRows, totalRows: numDataRows };
+      }
     }
   }
 
