@@ -540,6 +540,7 @@ refetchSymbolRange(symbols, startDate, endDate)
 - 空timestamp、`00:00`、Yahoo生1h足時刻をマーカーとして保存しない。
 - `quickRepairRecentGaps()` 完了時は `dedupeAndSortOhlcv_()` を直接呼ばず、`OHLCV_POST_REPAIR_CLEANUP_STATE_V1` を作って `resumeOhlcvPostRepairCleanup` に委譲する。
 - post-repair cleanupは全行timestamp正規化、保護AMマーキング、日付バケット重複整理、最終sortを小分けで進める。保護AM行は削除候補に入れない。
+- post-repair cleanupの重複行削除は、Sheets API `batchUpdate/deleteDimension` による一括削除を主経路にし、失敗時だけ `deleteRows` の降順レンジ削除へ戻す。クラッシュ時に誤った行番号を再削除しないよう、pre-advanceと部分適用時の同日再スキャンを維持する。
 - post-repair cleanupの `DEDUP_DATES` で同じ `dateIndex` が再開ログに繰り返し出る場合は、日付バッチが大きすぎて進捗保存前に時間切れになっている可能性を優先して疑う。日付単位の小さいバッチで前進させ、全日まとめて再スキャンする方向へ戻さない。
 - post-repair cleanupの最終sortは、大規模シートでは6分上限を超えるため無理に実行しない。行数が安全閾値を超える場合はsortをスキップし、後続の重複・GAP検出はunsorted-safeな日付範囲/tailスキャンで吸収する。
 
