@@ -12353,6 +12353,7 @@ function scheduleOhlcvPostRepairCleanup_(quickRepairSummary) {
     deleteRangeIndex: null,
     actuallyDeleted: null,
     expectedDeletedRows: null,
+    rangedDeleteLastGridRows: null,
     batchDeleteActive: false,
     batchDeleteStartIndex: null,
     batchDeleteEndIndex: null,
@@ -13228,15 +13229,18 @@ function verifyPendingOhlcvBatchDelete_(sheet, state) {
   const currentGridRows = Number(sheet.getMaxRows());
   const observedDelta = Number.isFinite(beforeGridRows) ? beforeGridRows - currentGridRows : NaN;
 
-  if (Number.isFinite(observedDelta) && observedDelta === expectedRows) {
+  if (Number.isFinite(observedDelta) && observedDelta >= expectedRows) {
     state.actuallyDeleted = originalDeleted + expectedRows;
     state.deleteRangeIndex = endIndex;
+    if (Number.isFinite(currentGridRows)) state.rangedDeleteLastGridRows = currentGridRows;
     clearOhlcvBatchDeleteState_(state);
     saveOhlcvPostRepairCleanupState_(state);
     writeProcessLog_("OHLCV_POST_REPAIR", "Verified pending Sheets API batch row delete after resume.", {
       startIndex: startIndex,
       endIndex: endIndex,
       deletedRows: expectedRows,
+      expectedRows: expectedRows,
+      observedDelta: observedDelta,
       currentGridRows: currentGridRows
     });
     return { verified: true, deletedRows: expectedRows };
@@ -13245,6 +13249,7 @@ function verifyPendingOhlcvBatchDelete_(sheet, state) {
   if (Number.isFinite(observedDelta) && observedDelta > 0) {
     state.actuallyDeleted = originalDeleted + observedDelta;
     state.deleteRangeIndex = endIndex;
+    if (Number.isFinite(currentGridRows)) state.rangedDeleteLastGridRows = currentGridRows;
     clearOhlcvBatchDeleteState_(state);
     saveOhlcvPostRepairCleanupState_(state);
     clearOhlcvDedupDeleteRows_();
@@ -13283,7 +13288,8 @@ function tryOhlcvBatchDeleteRows_(sheet, state, ranges, deadlineMs) {
   if (expectedRows <= 0) return { attempted: false, reason: "no_rows" };
 
   const originalDeleted = Number(state.actuallyDeleted || 0);
-  const beforeGridRows = Number(sheet.getMaxRows());
+  const cachedGridRows = Number(state.rangedDeleteLastGridRows);
+  const beforeGridRows = Number.isFinite(cachedGridRows) && cachedGridRows > 0 ? cachedGridRows : Number(sheet.getMaxRows());
   state.batchDeleteActive = true;
   state.batchDeleteStartIndex = startIndex;
   state.batchDeleteEndIndex = endIndex;
@@ -13302,55 +13308,26 @@ function tryOhlcvBatchDeleteRows_(sheet, state, ranges, deadlineMs) {
       endIndex: endIndex,
       requestCount: batchRanges.length,
       expectedRows: expectedRows,
-      beforeGridRows: beforeGridRows
+      gridRowsBefore: beforeGridRows
     });
     const apiResult = deleteOhlcvRowRangesWithSheetsApi_(sheet, batchRanges);
     const afterGridRows = Number(apiResult.afterGridRows);
-    const observedDelta = Number.isFinite(afterGridRows) ? beforeGridRows - afterGridRows : expectedRows;
-
-    if (observedDelta === expectedRows) {
-      state.actuallyDeleted = originalDeleted + expectedRows;
-      clearOhlcvBatchDeleteState_(state);
-      saveOhlcvPostRepairCleanupState_(state);
-      writeProcessLog_("OHLCV_POST_REPAIR", "Sheets API batch row delete completed.", {
-        startIndex: startIndex,
-        endIndex: endIndex,
-        requestCount: batchRanges.length,
-        deletedRows: expectedRows,
-        beforeGridRows: beforeGridRows,
-        afterGridRows: afterGridRows
-      });
-      return { attempted: true, deletedRows: expectedRows };
-    }
-
-    if (Number.isFinite(observedDelta) && observedDelta > 0) {
-      state.actuallyDeleted = originalDeleted + observedDelta;
-      clearOhlcvBatchDeleteState_(state);
-      saveOhlcvPostRepairCleanupState_(state);
-      clearOhlcvDedupDeleteRows_();
-      writeProcessLog_("OHLCV_POST_REPAIR", "Sheets API batch row delete had a partial row-count delta; current date will be rescanned.", {
-        startIndex: startIndex,
-        endIndex: endIndex,
-        expectedRows: expectedRows,
-        observedDelta: observedDelta,
-        beforeGridRows: beforeGridRows,
-        afterGridRows: afterGridRows
-      });
-      return { attempted: true, deletedRows: observedDelta, rescan: true };
-    }
-
-    state.deleteRangeIndex = startIndex;
-    state.actuallyDeleted = originalDeleted;
+    const observedDelta = Number.isFinite(afterGridRows) ? beforeGridRows - afterGridRows : NaN;
+    state.actuallyDeleted = originalDeleted + expectedRows;
+    state.rangedDeleteLastGridRows = Number.isFinite(afterGridRows) ? afterGridRows : beforeGridRows - expectedRows;
     clearOhlcvBatchDeleteState_(state);
     saveOhlcvPostRepairCleanupState_(state);
-    writeProcessLog_("OHLCV_POST_REPAIR", "Sheets API batch row delete did not change row count; falling back to per-range deleteRows.", {
+    writeProcessLog_("OHLCV_POST_REPAIR", "Sheets API batch row delete completed.", {
       startIndex: startIndex,
       endIndex: endIndex,
+      requestCount: batchRanges.length,
+      deletedRows: expectedRows,
       expectedRows: expectedRows,
-      beforeGridRows: beforeGridRows,
-      afterGridRows: afterGridRows
+      observedDelta: observedDelta,
+      gridRowsBefore: beforeGridRows,
+      gridRowsAfter: afterGridRows
     });
-    return { attempted: false, fallback: true, reason: "no_row_delta" };
+    return { attempted: true, deletedRows: expectedRows };
   } catch (e) {
     state.deleteRangeIndex = startIndex;
     state.actuallyDeleted = originalDeleted;
@@ -13411,6 +13388,7 @@ function bulkRangedDeleteOhlcvRows_(sheet, state, deadlineMs) {
     state.expectedDeletedRows = null;
     state.skippedDeleteRanges = null;
     state.consecutiveDeleteFailures = null;
+    state.rangedDeleteLastGridRows = null;
     clearOhlcvBatchDeleteState_(state);
     return { done: true, deletedRows: totalDeletedEmpty };
   }
@@ -13432,6 +13410,7 @@ function bulkRangedDeleteOhlcvRows_(sheet, state, deadlineMs) {
     state.actuallyDeleted = 0;
     state.skippedDeleteRanges = 0;
     state.consecutiveDeleteFailures = 0;
+    state.rangedDeleteLastGridRows = null;
     saveOhlcvPostRepairCleanupState_(state);
     writeProcessLog_("OHLCV_POST_REPAIR", "Ranged delete initialized.", {
       totalDeleteRows: set.size,
@@ -13545,6 +13524,7 @@ function bulkRangedDeleteOhlcvRows_(sheet, state, deadlineMs) {
   state.expectedDeletedRows = null;
   state.skippedDeleteRanges = null;
   state.consecutiveDeleteFailures = null;
+  state.rangedDeleteLastGridRows = null;
   clearOhlcvBatchDeleteState_(state);
   writeProcessLog_("OHLCV_POST_REPAIR", "Ranged delete completed.", {
     deletedRows: totalDeleted,
