@@ -205,7 +205,7 @@ OVERLAP_DAYS = 3
 - ローカルに clasp を使う場合:
   - `clasp push` でデプロイ
   - `clasp pull` で取得
-  - `.clasp.json` は本番GASの `scriptId` と `rootDir: ".clasp-src"` を使う。
+  - `.clasp.json` は本番GASの `scriptId`、`projectId: "screening-bot-491514"`、`rootDir: ".clasp-src"` を使う。`projectId` は `clasp logs` / `clasp list-apis` / `clasp open-logs` に必要。
   - `.clasp-src/` は `clasp pull/push` 用の生成ディレクトリで、git管理しない。
   - 本番反映時は `clasp pull` でmanifestとファイル名を確認し、`gas.txt` を `.clasp-src/株価記録&週報作成.js` へ反映してから `clasp push -f` する。
 - トリガー再設定:
