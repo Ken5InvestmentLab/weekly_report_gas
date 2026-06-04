@@ -1864,9 +1864,9 @@ const SYMBOL_LIST_KEY = "OHLCV_SYMBOL_LIST";
 const NEW_ALERT_COUNT_KEY = "OHLCV_NEW_ALERT_COUNT";
 const MAIN_FULL_BACKFILL_SYMBOLS_KEY = "OHLCV_FULL_BACKFILL_SYMBOLS";
 const SYNC_INDEX_KEY = "SYNC_ENTRY_PRICE_INDEX";
-const OHLCV_BATCH_SIZE = 10;
+const OHLCV_BATCH_SIZE = 5;
 const OHLCV_BATCH_SLEEP_MS = 300;
-const MIDDAY_OHLCV_BATCH_SIZE = 10;
+const MIDDAY_OHLCV_BATCH_SIZE = 5;
 const MIDDAY_OHLCV_BATCH_SLEEP_MS = 300;
 const PHASE2_ROW_CHUNK_SIZE = 120;
 const PHASE2_SPLIT_BATCH_SIZE = 10;
@@ -4216,14 +4216,20 @@ function hasMiddayOhlcvState_() {
 
 function finalizeMiddayOhlcvBeforeMainRun_() {
   deleteTriggersByHandler_(MIDDAY_RESUME_HANDLER);
+  const props = PropertiesService.getScriptProperties();
+  const hasMainOhlcvState = !!(props.getProperty(PHASE_KEY) ||
+    props.getProperty(STATE_KEY) ||
+    props.getProperty(SYMBOL_LIST_KEY) ||
+    props.getProperty(MAIN_PHASE1_FETCH_INFLIGHT_KEY));
+  if (!hasMainOhlcvState) clearCachedRawAlertVolumeMap_();
 
   // 13:21 先行取得時に構築した rawAlertVolumeMap キャッシュは、当日 PM の BOTTOM
   // シグナルがまだ alerts_raw に書かれていない時点のスナップショット。これを 15:51
   // PHASE1 で再利用すると PM 出来高 0 件の古い map を見て fastUseProtectedPmVol=false と
-  // なり、当日 PM の PM_LOCKED 化が全件スキップされる。15:51 への移行時に必ず破棄して
-  // PHASE1 で最新の alerts_raw から作り直させる。
+  // なり、当日 PM の PM_LOCKED 化が全件スキップされる。初回15:51への移行時だけ破棄して
+  // PHASE1で最新の alerts_raw から作り直させる。メイン状態があるresumeではキャッシュを保持する。
   try {
-    CacheService.getScriptCache().remove(RAW_ALERT_VOLUME_MAP_CACHE_KEY);
+    if (!hasMainOhlcvState) CacheService.getScriptCache().remove(RAW_ALERT_VOLUME_MAP_CACHE_KEY);
   } catch (e) {
     // ベストエフォート。失敗しても本処理に影響しない
   }
@@ -5042,8 +5048,25 @@ function buildTodayOhlcvSessionVolumeMap_(sheet, symbols, dateKey, sessionName, 
   const lastRow = sheet.getLastRow();
   if (lastRow <= 1) return volumeMap;
 
-  const scanRows = Math.min(Math.max(1, Number(maxRows) || OHLCV_APPEND_INTEGRITY_SCAN_ROWS), lastRow - 1);
-  const startRow = lastRow - scanRows + 1;
+  const maxScanRows = Math.min(Math.max(1, Number(maxRows) || OHLCV_APPEND_INTEGRITY_SCAN_ROWS), lastRow - 1);
+  let scanRows = maxScanRows;
+  let startRow = lastRow - scanRows + 1;
+  let scanMode = "tail";
+
+  try {
+    const range = getOhlcvDateRangeRows_(sheet, key, lastRow, null);
+    if (!range.incomplete) {
+      if (range.numRows <= 0) return volumeMap;
+      if (range.numRows <= maxScanRows) {
+        startRow = range.startRow;
+        scanRows = range.numRows;
+        scanMode = "date_range";
+      }
+    }
+  } catch (e) {
+    scanMode = "tail_after_range_error";
+  }
+
   const values = sheet.getRange(startRow, 1, scanRows, 8).getValues();
   const bestBySymbol = {};
 
@@ -5085,6 +5108,16 @@ function buildTodayOhlcvSessionVolumeMap_(sheet, symbols, dateKey, sessionName, 
 
   Object.keys(bestBySymbol).forEach(sym => {
     volumeMap[sym] = toSafeVolumeNumber_(bestBySymbol[sym].row[7]);
+  });
+
+  debugLogToSheet_("ohlcv.todaySessionVolumeMap.scan", {
+    dateKey: key,
+    sessionName: targetSession,
+    targetSymbols: Object.keys(targetSymbols).length,
+    mappedSymbols: Object.keys(volumeMap).length,
+    scanRows: scanRows,
+    startRow: startRow,
+    mode: scanMode
   });
 
   return volumeMap;
@@ -5244,6 +5277,7 @@ function resetProcessProperties_() {
   props.deleteProperty(NEW_ALERT_COUNT_KEY);
   props.deleteProperty(MAIN_FULL_BACKFILL_SYMBOLS_KEY);
   props.deleteProperty(MAIN_PHASE1_FETCH_INFLIGHT_KEY);
+  clearCachedRawAlertVolumeMap_();
   props.deleteProperty("LAST_TS_MAP");
   props.deleteProperty("CURRENT_REFRESH_ID");
   props.deleteProperty("SPLIT_QUEUE");
@@ -6380,6 +6414,8 @@ function resetAllOhlcvProperties() {
   props.deleteProperty(SYMBOL_LIST_KEY);
   props.deleteProperty(NEW_ALERT_COUNT_KEY);
   props.deleteProperty(MAIN_FULL_BACKFILL_SYMBOLS_KEY);
+  props.deleteProperty(MAIN_PHASE1_FETCH_INFLIGHT_KEY);
+  clearCachedRawAlertVolumeMap_();
   props.deleteProperty("LAST_TS_MAP");
   props.deleteProperty("CURRENT_REFRESH_ID");
   props.deleteProperty("SPLIT_QUEUE");
@@ -10688,6 +10724,8 @@ function emergencyStopOhlcvTimeoutLoop() {
   props.deleteProperty(SYMBOL_LIST_KEY);
   props.deleteProperty(NEW_ALERT_COUNT_KEY);
   props.deleteProperty(MAIN_FULL_BACKFILL_SYMBOLS_KEY);
+  props.deleteProperty(MAIN_PHASE1_FETCH_INFLIGHT_KEY);
+  clearCachedRawAlertVolumeMap_();
   props.deleteProperty("LAST_TS_MAP");
   props.deleteProperty("CURRENT_REFRESH_ID");
   props.deleteProperty("SPLIT_QUEUE");
@@ -10710,17 +10748,43 @@ function isUrlFetchDailyLimitError_(err) {
 // 13:21 と 15:51 で同じ営業日のマップを 2 回計算する無駄を避けるため。
 // businessDate が変わったら自動的にミスする（payload 内の businessDate と照合）。
 const RAW_ALERT_VOLUME_MAP_CACHE_KEY = "RAW_ALERT_VOLUME_MAP_V1";
+const RAW_ALERT_VOLUME_MAP_PROP_KEY = "RAW_ALERT_VOLUME_MAP_PROP_V1";
 const RAW_ALERT_VOLUME_MAP_CACHE_TTL_SEC = 6 * 60 * 60; // 6 時間。13:21→15:51 の再利用に十分
 const RAW_ALERT_VOLUME_MAP_CACHE_MAX_BYTES = 90 * 1024; // CacheService の 100KB 上限から安全マージン
+
+function clearCachedRawAlertVolumeMap_() {
+  try {
+    CacheService.getScriptCache().remove(RAW_ALERT_VOLUME_MAP_CACHE_KEY);
+  } catch (e) {
+    // Best effort only.
+  }
+  try {
+    PropertiesService.getScriptProperties().deleteProperty(RAW_ALERT_VOLUME_MAP_PROP_KEY);
+  } catch (e) {
+    // Best effort only.
+  }
+}
 
 function loadCachedRawAlertVolumeMap_(businessDateKey) {
   try {
     const cache = CacheService.getScriptCache();
     const cached = cache.get(RAW_ALERT_VOLUME_MAP_CACHE_KEY);
-    if (!cached) return null;
-    const parsed = JSON.parse(cached);
+    if (cached) {
+      const parsed = JSON.parse(cached);
+      if (parsed && parsed.businessDate === businessDateKey) {
+        return { volumeMap: parsed.volumeMap || {}, stats: Object.assign({}, parsed.stats || {}, { cacheHit: true, cacheSource: "cache_service" }) };
+      }
+    }
+  } catch (e) {
+    // Fall back to ScriptProperties.
+  }
+
+  try {
+    const raw = PropertiesService.getScriptProperties().getProperty(RAW_ALERT_VOLUME_MAP_PROP_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
     if (!parsed || parsed.businessDate !== businessDateKey) return null;
-    return { volumeMap: parsed.volumeMap || {}, stats: parsed.stats || {} };
+    return { volumeMap: parsed.volumeMap || {}, stats: Object.assign({}, parsed.stats || {}, { cacheHit: true, cacheSource: "script_properties" }) };
   } catch (e) {
     return null;
   }
@@ -10736,6 +10800,7 @@ function saveCachedRawAlertVolumeMap_(businessDateKey, result) {
     });
     if (payload.length > RAW_ALERT_VOLUME_MAP_CACHE_MAX_BYTES) return; // 大きすぎる場合はキャッシュしない
     CacheService.getScriptCache().put(RAW_ALERT_VOLUME_MAP_CACHE_KEY, payload, RAW_ALERT_VOLUME_MAP_CACHE_TTL_SEC);
+    PropertiesService.getScriptProperties().setProperty(RAW_ALERT_VOLUME_MAP_PROP_KEY, payload);
   } catch (e) {
     // ベストエフォート。失敗しても本処理に影響しない
   }

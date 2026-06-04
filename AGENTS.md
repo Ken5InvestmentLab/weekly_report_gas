@@ -348,6 +348,7 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 | `QUICK_REPAIR_TAIL_CLEANUP_STATE` | GAP修復入口の末尾不正timestamp掃除状態 |
 | `OHLCV_POST_REPAIR_CLEANUP_STATE_V1` | GAP修復完了後の小分けcleanup状態 |
 | `OHLCV_INTRADAY_STALE_SYMBOLS_V1` | Yahoo 1hのOHLCが対象期間で古い/nullの銘柄の一時保留リスト |
+| `RAW_ALERT_VOLUME_MAP_PROP_V1` | 15:51 PHASE1 resumeで再利用する当日 `alerts_raw` 出来高マップキャッシュ |
 | `CLEANUP_LEGACY_STATE_V1` | 旧OHLCV残骸整理の再開状態 |
 | `CLEANUP_LEGACY_AUTO_QUICK_REPAIR_V1` | cleanup完了後に `quickRepairTrigger` を予約するためのフラグ |
 | `EVAL_OHLCV_COVERAGE_REPAIR_STATE_V1` | 評価対象銘柄120日OHLCV補填の再開状態 |
@@ -441,6 +442,8 @@ fetchOHLCVForNewAlerts
 - 既存OHLCV銘柄で `lastTs >= 当日13:00 JST` のものは15:51取得対象から外す。
 - 15:51本番で120日新規取得により同じ日付・銘柄のAM行を取得できた場合、通常の `MIDDAY_yyyy-mm-dd` のAM行は削除対象にできるが、`MIDDAY_LOCKED_yyyy-mm-dd` は保護する。
 - 15:51本番の当日PM出来高は、保護AM出来高または13:21保存済みAM出来高があればそれを優先して `日足出来高 - AM出来高` で補正する。AM行自体は上書きしない。
+- 15:51 PHASE1の `rawAlertVolumeMap` は、13:21由来のキャッシュを初回15:51開始時だけ破棄し、メイン状態があるresumeでは保持する。再開ごとに `alerts_raw` 全体を読み直さない。
+- 15:51 PHASE1の当日AM出来高マップは、`ohlcv_4h` のtimestamp昇順前提で当日の日付範囲だけを読んで作る。resumeごとに末尾60,000行を無条件で読まない。
 - 当日が休場日の場合はスキップ。
 - 対象銘柄は `alerts_raw` に登場する `BOTTOM` シグナルの銘柄。`OHLCV_REPAIR_SYMBOLS` も、その `BOTTOM` 銘柄集合に含まれるものだけ取得対象にする。
 - OHLCV未取得銘柄は120日分取得。
