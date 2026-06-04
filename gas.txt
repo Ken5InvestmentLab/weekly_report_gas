@@ -7736,7 +7736,7 @@ function quickScanMissingSessions(daysBack = 14, minSessions = 2, options) {
   symbols.forEach(sym => symbolLookup[sym] = true);
 
   // ohlcv_4h はA列(timestamp)昇順に整列している前提。直近分だけを末尾から読む。
-  const values = readRecentOhlcvRowsByTimestamp_(sh, cutoffDateKey, nowDateKey, 3, {
+  const values = readRecentOhlcvRowsByTimestamp_(sh, cutoffDateKey, nowDateKey, 8, {
     deadlineMs: opts.deadlineMs || 0,
     maxRows: opts.maxRows || getQuickRepairRecentScanMaxRows_(symbols.length, daysBack)
   });
@@ -7755,6 +7755,7 @@ function quickScanMissingSessions(daysBack = 14, minSessions = 2, options) {
   // 日付×銘柄 ごとの有効セッション数カウント
   const countMap = {};
   const periodMap = {};
+  const detailMap = {};
   const hasGapMarker = {};
   const dateStrByDayKey = {};
   const seenTargetSymbols = {};
@@ -7782,6 +7783,7 @@ function quickScanMissingSessions(daysBack = 14, minSessions = 2, options) {
     if (!period) continue;
     if (!periodMap[key]) periodMap[key] = {};
     periodMap[key][period] = true;
+    addOhlcvSessionDetail_(detailMap, key, row);
     countMap[key] = Object.keys(periodMap[key]).length;
     if (alertId === "GAP_REPAIR") {
       hasGapMarker[key] = true;
@@ -7839,6 +7841,7 @@ function quickScanMissingSessions(daysBack = 14, minSessions = 2, options) {
     sessionInfo: {
       countMap: countMap,
       periodMap: periodMap,
+      detailMap: detailMap,
       markerMap: hasGapMarker
     },
     scanStats: scanStats
@@ -7921,6 +7924,31 @@ function addSessionPeriod_(periodMap, key, period) {
   if (!period) return;
   if (!periodMap[key]) periodMap[key] = {};
   periodMap[key][period] = true;
+}
+
+function addOhlcvSessionDetail_(detailMap, key, row) {
+  if (!detailMap || !key || !row) return;
+  const normalized = normalizeOhlcvRowForWrite_(row);
+  if (!normalized) return;
+  const sessionName = getOhlcvSessionName_(normalized[0]);
+  if (!sessionName) return;
+
+  if (!detailMap[key]) detailMap[key] = {};
+  const current = detailMap[key][sessionName];
+  if (current) {
+    const cmp = compareOhlcvDuplicatePriority_(normalized, current.row);
+    if (cmp > 0) return;
+  }
+
+  detailMap[key][sessionName] = {
+    row: normalized,
+    marker: String(normalized[1] || "").trim(),
+    volume: toSafeVolumeNumber_(normalized[7]),
+    open: toFiniteNumberOrNull_(normalized[3]),
+    high: toFiniteNumberOrNull_(normalized[4]),
+    low: toFiniteNumberOrNull_(normalized[5]),
+    close: toFiniteNumberOrNull_(normalized[6])
+  };
 }
 
 function countSessionPeriods_(periodMap, key) {
@@ -8611,6 +8639,9 @@ function processQuickRepairGroups_(sheet, groups, sessionInfo, minSessions) {
     deferredDates: 0,
     noDataDates: 0,
     markedFailed: 0,
+    dailyFallbackDates: 0,
+    dailyFallbackRows: 0,
+    dailyFallbackUnsafeDates: 0,
 
     missingSamples: [],
     rows: 0,
@@ -8676,13 +8707,14 @@ function processQuickRepairGroups_(sheet, groups, sessionInfo, minSessions) {
 
   // === 日足フォールバック ===
   // 1h で 0 行しか取れなかった (symbol, date) だけを対象に 1d を後追い取得し、
-  // AM(09:00)/PM(13:00) を 50/50 出来高分割で合成する。1418 のような薄商い銘柄で
-  // Yahoo の 1h データが完全に欠落している日を救うための保険。
+  // AM/PM別の出来高は推定しない。日足出来高が既存片側で説明できる場合や
+  // 日足出来高0の場合だけ、欠損セッションを volume=0 で補完する。
   // staleSymbolMap (1h のタイムスタンプ枠だけ来て OHLC が null) もここで救うため、
   // stale 判定でスキップせず必ず 1d を試す。1d でも 0 件 (=1h と 1d の両方が空) なら
   // しきい値判定をスキップして即 GAP_FAILED を書き込み、それ以降の修復対象から外す。
   const dailyFallbackTargets = [];
   const dailyFallbackFailedSet = new Set();
+  const dailyFallbackUnsafeSet = new Set();
   metaList.forEach(meta => {
     const fallbackDates = meta.dates.filter(dateStr => {
       const key = meta.symbol + "|" + dateStr;
@@ -8723,6 +8755,7 @@ function processQuickRepairGroups_(sheet, groups, sessionInfo, minSessions) {
       const dailyResponses = UrlFetchApp.fetchAll(dailyRequests);
       const dailyFallbackSamples = [];
       const dailyMissSamples = [];
+      const dailyUnsafeSamples = [];
       let dailyMissCount = 0;
       dailyTargetMeta.forEach((target, idx) => {
         const dailyRes = dailyResponses[idx];
@@ -8756,44 +8789,81 @@ function processQuickRepairGroups_(sheet, groups, sessionInfo, minSessions) {
           const high = daily.high != null ? daily.high : Math.max(open, close);
           const low = daily.low != null ? daily.low : Math.min(open, close);
           const dailyVol = Math.round(Number(daily.volume) || 0);
-          const amVol = Math.floor(dailyVol / 2);
-          const pmVol = dailyVol - amVol; // 奇数は PM 側を 1 多く
-
           const key = target.symbol + "|" + dateStr;
           const existing = sessionInfo.periodMap[key] || {};
+          const detailBySession = sessionInfo.detailMap && sessionInfo.detailMap[key] ? sessionInfo.detailMap[key] : {};
+          const existingSessions = ["AM", "PM"].filter(sessionName => !!existing[sessionName]);
+          const missingSessions = ["AM", "PM"].filter(sessionName => !existing[sessionName]);
           let synthRowsForDate = 0;
+          let unsafeReason = "";
+          let existingVolume = null;
 
-          if (!existing.AM) {
-            const ts = makeJstSessionTimestamp_(dateStr, "AM");
+          if (missingSessions.length === 0) return;
+
+          if (existingSessions.length === 0) {
+            if (dailyVol !== 0) {
+              unsafeReason = "daily_positive_without_sessions";
+            }
+          } else if (existingSessions.length === 1) {
+            const existingSession = existingSessions[0];
+            const existingDetail = detailBySession[existingSession] || null;
+            existingVolume = existingDetail ? toSafeVolumeNumber_(existingDetail.volume) : null;
+            if (!existingDetail) {
+              unsafeReason = "missing_existing_session_detail";
+            } else if (dailyVol !== existingVolume) {
+              unsafeReason = "daily_volume_not_accounted_by_existing_session";
+            }
+          } else {
+            return;
+          }
+
+          if (unsafeReason) {
+            dailyFallbackUnsafeSet.add(key);
+            summary.dailyFallbackUnsafeDates++;
+            if (dailyUnsafeSamples.length < 10) {
+              dailyUnsafeSamples.push({
+                symbol: target.symbol,
+                date: dateStr,
+                dailyVol: dailyVol,
+                existingSessions: existingSessions,
+                existingVolume: existingVolume,
+                missingSessions: missingSessions,
+                reason: unsafeReason
+              });
+            }
+            return;
+          }
+
+          missingSessions.forEach(sessionName => {
+            const ts = makeJstSessionTimestamp_(dateStr, sessionName);
             if (isValidOhlcvTimestamp_(ts)) {
-              repairRows.push([ts, "GAP_REPAIR", target.symbol, open, high, low, close, amVol]);
-              addSessionPeriod_(fetchedPeriodMap, key, "AM");
+              repairRows.push([ts, "GAP_REPAIR", target.symbol, open, high, low, close, 0]);
+              addSessionPeriod_(fetchedPeriodMap, key, sessionName);
               synthRowsForDate++;
             }
-          }
-          if (!existing.PM) {
-            const ts = makeJstSessionTimestamp_(dateStr, "PM");
-            if (isValidOhlcvTimestamp_(ts)) {
-              repairRows.push([ts, "GAP_REPAIR", target.symbol, open, high, low, close, pmVol]);
-              addSessionPeriod_(fetchedPeriodMap, key, "PM");
-              synthRowsForDate++;
-            }
-          }
+          });
           if (synthRowsForDate > 0) {
             summary.dailyFallbackDates++;
             summary.dailyFallbackRows += synthRowsForDate;
             if (dailyFallbackSamples.length < 10) {
-              dailyFallbackSamples.push({ symbol: target.symbol, date: dateStr, dailyVol: dailyVol, rows: synthRowsForDate });
+              dailyFallbackSamples.push({ symbol: target.symbol, date: dateStr, dailyVol: dailyVol, rows: synthRowsForDate, mode: "zero_volume_only" });
             }
           }
         });
       });
       if (summary.dailyFallbackDates > 0) {
-        writeProcessLog_("ギャップ修復", "1h レスポンスに無かった日付を日足から AM/PM 50:50 で合成しました。", {
+        writeProcessLog_("ギャップ修復", "Daily fallback added only zero-volume missing AM/PM rows; positive daily volume was not split across sessions.", {
           fallbackDates: summary.dailyFallbackDates,
           fallbackRows: summary.dailyFallbackRows,
           requestedSymbols: dailyRequests.length,
           samples: dailyFallbackSamples
+        });
+      }
+      if (summary.dailyFallbackUnsafeDates > 0) {
+        writeProcessLog_("ギャップ修復", "Daily fallback skipped unsafe positive-volume inference; missing sessions will be marked GAP_FAILED.", {
+          unsafeDates: summary.dailyFallbackUnsafeDates,
+          requestedSymbols: dailyRequests.length,
+          samples: dailyUnsafeSamples
         });
       }
       if (dailyMissCount > 0) {
@@ -8852,6 +8922,34 @@ function processQuickRepairGroups_(sheet, groups, sessionInfo, minSessions) {
       if (staleSymbolMap[meta.symbol]) return;
       const savedCount = countMergedSessionPeriods_(sessionInfo.periodMap, savedPeriodMap, key);
       const fetchedCount = countMergedSessionPeriods_(sessionInfo.periodMap, fetchedPeriodMap, key);
+      const forcedDailyFailure = dailyFallbackFailedSet.has(key) || dailyFallbackUnsafeSet.has(key);
+      if (forcedDailyFailure) {
+        summary.failedDates++;
+        try {
+          const failedRowsForKey = makeGapFailedRows_(meta.symbol, dateStr, sessionInfo.periodMap, savedPeriodMap);
+          failedRowsForKey.forEach(r => gapFailedRows.push(r));
+          if (failedRowsForKey.length > 0) {
+            summary.markedFailed++;
+            if (gapFailedSamples.length < 10) {
+              gapFailedSamples.push({
+                symbol: meta.symbol,
+                date: dateStr,
+                attempts: 1,
+                reason: dailyFallbackUnsafeSet.has(key) ? "unsafe_daily_fallback" : "1h_and_1d_empty"
+              });
+            }
+          }
+          delete failMap[key];
+        } catch (err) {
+          failMap[key] = Number(failMap[key]) || 1;
+          writeProcessLog_("ギャップ修復", "Failed to create GAP_FAILED rows for daily fallback failure. It will retry next run.", {
+            symbol: meta.symbol,
+            date: dateStr,
+            message: err && err.message
+          });
+        }
+        return;
+      }
       if (savedCount >= minSessions) {
         summary.repairedDates++;
         delete failMap[key];
@@ -9947,7 +10045,7 @@ function flattenQuickRepairGroupsToTasks_(groups) {
 
 function buildRecentSessionInfoForTasks_(sheet, tasks, daysBack, options) {
   const opts = options || {};
-  const info = { countMap: {}, periodMap: {}, markerMap: {} };
+  const info = { countMap: {}, periodMap: {}, detailMap: {}, markerMap: {} };
   if (!tasks || tasks.length === 0) return info;
 
   const targetSymbols = {};
@@ -9962,7 +10060,7 @@ function buildRecentSessionInfoForTasks_(sheet, tasks, daysBack, options) {
   const cutoff = new Date(now.getTime() - daysBack * 24 * 60 * 60 * 1000);
   const cutoffDateKey = Utilities.formatDate(cutoff, CONFIG.TIMEZONE, "yyyy/MM/dd");
   const nowDateKey = Utilities.formatDate(now, CONFIG.TIMEZONE, "yyyy/MM/dd");
-  const values = readRecentOhlcvRowsByTimestamp_(sheet, cutoffDateKey, nowDateKey, 3, {
+  const values = readRecentOhlcvRowsByTimestamp_(sheet, cutoffDateKey, nowDateKey, 8, {
     deadlineMs: opts.deadlineMs || 0,
     maxRows: opts.maxRows || getQuickRepairRecentScanMaxRows_(Object.keys(targetSymbols).length, daysBack)
   });
@@ -9990,6 +10088,7 @@ if (!isValidOhlcvTimestamp_(ts) || !sym || !targetSymbols[sym]) continue;
     if (alertId === "GAP_REPAIR") info.markerMap[key] = true;
 
     addSessionPeriod_(info.periodMap, key, getOhlcvSessionName_(ts));
+    addOhlcvSessionDetail_(info.detailMap, key, row);
     info.countMap[key] = countSessionPeriods_(info.periodMap, key);
   }
   return info;

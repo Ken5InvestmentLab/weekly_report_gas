@@ -531,6 +531,7 @@ refetchSymbolRange(symbols, startDate, endDate)
 - 再開時は直近スキャンをやり直し、既に埋まったグループやマーカー付き未充足日は再取得対象から外す。
 - 修復行はB列に `GAP_REPAIR` を入れる。
 - 自動GAP修復でYahooから十分な1h足が返らない日は、原則として `GAP_FAILED` を作らずログに残して次回以降の正規再取得対象にする。
+- GAP修復の日足フォールバックでは、AM/PM別出来高を50/50や差分で推定しない。日足出来高が既存片側で説明できる場合、または日足出来高0の場合だけ欠損側を `volume=0` で補完し、正の出来高をどちらのセッションに置くか判断できない場合は欠損側に `GAP_FAILED` を置く。
 - Yahoo 1hのtimestamp配列が新しくてもOHLCが対象期間でnull/古い銘柄は `OHLCV_INTRADAY_STALE_SYMBOLS_V1` に記録し、当日のGAP修復から除外する。日足でAM/PMを仮造りしない。
 - 手動補填など明示的に `GAP_FAILED` を作る経路でも、`09:00 JST` / `13:00 JST` の実timestamp以外は保存しない。
 - 空timestamp、`00:00`、Yahoo生1h足時刻をマーカーとして保存しない。
