@@ -547,6 +547,7 @@ refetchSymbolRange(symbols, startDate, endDate)
 - post-repair cleanupの `DEDUP_DATES` で同じ `dateIndex` が再開ログに繰り返し出る場合は、日付バッチが大きすぎて進捗保存前に時間切れになっている可能性を優先して疑う。日付単位の小さいバッチで前進させ、全日まとめて再スキャンする方向へ戻さない。
 - post-repair cleanup完了後は `resumeOhlcvPostRepairFinalSort` の専用ワンショットトリガーで `ohlcv_4h` 全体を `timestamp`、`symbol` 昇順にsortする。GitHub Actions起動とDiscordのOHLCV完了通知は、この最終sortが成功してから送る。
 - 最終sortが失敗・タイムアウトした場合は `OHLCV_POST_REPAIR_FINAL_SORT_STATE_V1` から再開し、sort前にGitHub ActionsやDiscord通知を先に送らない。
+- `testOhlcvPostRepairFinalSortOnly()` は最終sortのタイムアウト確認専用。GitHub ActionsとDiscord通知をskipし、pending Discord通知を消費しない。
 
 ### 不正timestamp・GAP修復タイムアウト復旧
 
@@ -711,6 +712,7 @@ previewOhlcvPostRepairCleanup()            // GAP修復後cleanupのDryRun確認
 startOhlcvPostRepairCleanupNow()           // GAP修復後cleanupを手動開始
 resumeOhlcvPostRepairCleanup()             // GAP修復後cleanup再開
 resumeOhlcvPostRepairFinalSort()           // GAP修復後cleanup完了後の最終sortと通知再開
+testOhlcvPostRepairFinalSortOnly()         // 最終sortだけを実行。GitHub Actions/Discord通知なし
 resetOhlcvPostRepairCleanupNow()           // GAP修復後cleanup状態リセット
 
 diagOhlcvTimestamps()                      // 無効timestamp診断

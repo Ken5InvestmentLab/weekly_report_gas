@@ -13947,6 +13947,9 @@ function scheduleOhlcvPostRepairFinalSort_(summary) {
     sortDone: false,
     githubDone: false,
     discordDone: false,
+    skipGithubActions: false,
+    skipDiscordNotice: false,
+    testOnly: false,
     startedAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   };
@@ -13961,6 +13964,41 @@ function scheduleOhlcvPostRepairFinalSort_(summary) {
     handlerName: OHLCV_POST_REPAIR_FINAL_SORT_HANDLER,
     delayMs: OHLCV_POST_REPAIR_FINAL_SORT_AFTER_MS
   };
+}
+
+function testOhlcvPostRepairFinalSortOnly() {
+  const existing = loadOhlcvPostRepairFinalSortState_();
+  if (existing && !existing.testOnly) {
+    throw new Error("Production final-sort state exists. Do not overwrite pending GitHub/Discord handoff state.");
+  }
+
+  clearOhlcvPostRepairFinalSortState_();
+
+  const state = {
+    version: OHLCV_POST_REPAIR_FINAL_SORT_VERSION,
+    summary: {
+      ok: true,
+      testOnly: true,
+      reason: "manual_final_sort_timeout_test",
+      businessDate: getOhlcvBusinessDateKey_(),
+      startedAt: new Date().toISOString()
+    },
+    attempts: 0,
+    sortDone: false,
+    githubDone: false,
+    discordDone: false,
+    skipGithubActions: true,
+    skipDiscordNotice: true,
+    testOnly: true,
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  saveOhlcvPostRepairFinalSortState_(state);
+  writeProcessLog_("OHLCV_POST_REPAIR", "Manual final OHLCV sort test started. GitHub Actions and Discord notice are disabled.", {
+    handlerName: OHLCV_POST_REPAIR_FINAL_SORT_HANDLER
+  });
+  return runOhlcvPostRepairFinalSort_();
 }
 
 function resumeOhlcvPostRepairFinalSort() {
@@ -13984,6 +14022,8 @@ function runOhlcvPostRepairFinalSort_() {
 
     scheduleSingleOhlcvPostRepairFinalSortTrigger_(OHLCV_POST_REPAIR_FINAL_SORT_SAFETY_AFTER_MS);
     state.attempts = Number(state.attempts || 0) + 1;
+    const skipGithubActions = !!state.skipGithubActions;
+    const skipDiscordNotice = !!state.skipDiscordNotice;
     state.updatedAt = new Date().toISOString();
     saveOhlcvPostRepairFinalSortState_(state);
 
@@ -13993,7 +14033,7 @@ function runOhlcvPostRepairFinalSort_() {
     if (!sh) throw new Error("Missing sheet: " + CONFIG.OHLCV_SHEET);
 
     if (!state.sortDone) {
-      state.sortResult = sortOhlcvSheetByTimestampForce_(sh);
+      state.sortResult = sortOhlcvSheetByTimestampForce_(sh, { testOnly: !!state.testOnly });
       state.sortDone = true;
       state.updatedAt = new Date().toISOString();
       saveOhlcvPostRepairFinalSortState_(state);
@@ -14003,7 +14043,9 @@ function runOhlcvPostRepairFinalSort_() {
     summary.finalSort = state.sortResult || { skipped: true, reason: "already_done_without_result" };
 
     if (!state.githubDone) {
-      state.githubOptimize = triggerGitHubActionsOptimize_() || { attempted: true };
+      state.githubOptimize = skipGithubActions
+        ? { skipped: true, reason: "test_only" }
+        : (triggerGitHubActionsOptimize_() || { attempted: true });
       state.githubDone = true;
       state.updatedAt = new Date().toISOString();
       saveOhlcvPostRepairFinalSortState_(state);
@@ -14011,7 +14053,9 @@ function runOhlcvPostRepairFinalSort_() {
     summary.githubOptimize = state.githubOptimize;
 
     if (!state.discordDone) {
-      state.discordNotice = sendPendingOhlcvCompletionNoticeAfterQuickRepair_(summary);
+      state.discordNotice = skipDiscordNotice
+        ? { sent: false, skipped: true, reason: "test_only" }
+        : sendPendingOhlcvCompletionNoticeAfterQuickRepair_(summary);
       state.discordDone = true;
       state.updatedAt = new Date().toISOString();
       saveOhlcvPostRepairFinalSortState_(state);
@@ -14019,13 +14063,20 @@ function runOhlcvPostRepairFinalSort_() {
     summary.discordNotice = state.discordNotice;
 
     clearOhlcvPostRepairFinalSortState_();
-    writeProcessLog_("OHLCV_POST_REPAIR", "Final OHLCV sort completed. GitHub Actions triggered and Discord notice sent after sorting.", summary);
+    writeProcessLog_(
+      "OHLCV_POST_REPAIR",
+      state.testOnly
+        ? "Final OHLCV sort test completed. GitHub Actions and Discord notice were skipped."
+        : "Final OHLCV sort completed. GitHub Actions triggered and Discord notice sent after sorting.",
+      summary
+    );
     return summary;
   } catch (err) {
     const message = err && err.message ? err.message : String(err);
     writeProcessLog_("OHLCV_POST_REPAIR", "Final OHLCV sort/notification step failed. A retry trigger has been scheduled.", {
       message: message,
-      attempts: state ? Number(state.attempts || 0) : null
+      attempts: state ? Number(state.attempts || 0) : null,
+      testOnly: state ? !!state.testOnly : false
     });
     debugLogToSheet_("ohlcv.post_repair_final_sort.error", {
       message: message,
@@ -14038,8 +14089,9 @@ function runOhlcvPostRepairFinalSort_() {
   }
 }
 
-function sortOhlcvSheetByTimestampForce_(sheet) {
+function sortOhlcvSheetByTimestampForce_(sheet, options) {
   if (!sheet) return { attempted: false, skipped: true, reason: "missing_sheet" };
+  options = options || {};
 
   const lastRow = sheet.getLastRow();
   if (lastRow <= 2) return { attempted: false, skipped: true, reason: "not_enough_rows", dataRows: Math.max(0, lastRow - 1) };
@@ -14047,7 +14099,8 @@ function sortOhlcvSheetByTimestampForce_(sheet) {
   const dataRows = lastRow - 1;
   const startedAt = Date.now();
   writeProcessLog_("OHLCV_POST_REPAIR", "Final OHLCV sort starting without row-count skip.", {
-    dataRows: dataRows
+    dataRows: dataRows,
+    testOnly: !!options.testOnly
   });
 
   sheet.getRange(2, 1, dataRows, 8).sort([
@@ -14060,7 +14113,8 @@ function sortOhlcvSheetByTimestampForce_(sheet) {
     attempted: true,
     skipped: false,
     sortedRows: dataRows,
-    elapsedMs: Date.now() - startedAt
+    elapsedMs: Date.now() - startedAt,
+    testOnly: !!options.testOnly
   };
 }
 
