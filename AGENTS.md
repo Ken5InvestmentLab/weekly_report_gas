@@ -208,6 +208,7 @@ OVERLAP_DAYS = 3
   - `.clasp.json` は本番GASの `scriptId`、`projectId: "screening-bot-491514"`、`rootDir: ".clasp-src"` を使う。`projectId` は `clasp logs` / `clasp list-apis` / `clasp open-logs` に必要。
   - `.clasp-src/` は `clasp pull/push` 用の生成ディレクトリで、git管理しない。
   - 本番反映時は `clasp pull` でmanifestとファイル名を確認し、`gas.txt` を `.clasp-src/株価記録&週報作成.js` へ反映してから `clasp push -f` する。
+  - `resumeOhlcvPostRepairCleanup` の高速重複削除は Sheets API を `UrlFetchApp` から呼ぶため、`.clasp-src/appsscript.json` の `dependencies.enabledAdvancedServices` に `serviceId: "sheets"` / `version: "v4"` / `userSymbol: "Sheets"` を維持する。
 - トリガー再設定:
   - `setupAllTriggers()` を手動実行
   - OHLCV固定トリガーだけを再設定する場合は `resetOhlcvFetchTriggersOnly()` を手動実行
