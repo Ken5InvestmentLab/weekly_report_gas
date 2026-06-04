@@ -6771,6 +6771,12 @@ const OHLCV_POST_REPAIR_COMPACT_MARGIN_MS = 35000;
 // 1レンジあたりの deleteRows+flush+getLastRow が ~200ms 程度なので 10s 確保すれば
 // 中断時に状態を保存して安全に再開できる
 const OHLCV_POST_REPAIR_RANGED_DELETE_MARGIN_MS = 10 * 1000;
+// Sheets API batchUpdate(deleteDimension) で複数の非連続行レンジをまとめて削除する。
+// SpreadsheetApp.deleteRows() を60〜70回連打すると100秒超かかるため、post-repair cleanup の主経路に使う。
+// 失敗時は既存の1レンジずつ deleteRows へフォールバックする。
+const OHLCV_POST_REPAIR_BATCH_DELETE_MIN_RANGES = 4;
+const OHLCV_POST_REPAIR_BATCH_DELETE_MAX_RANGES = 250;
+const OHLCV_POST_REPAIR_BATCH_DELETE_MARGIN_MS = 20 * 1000;
 // deleteRows が no-op になった range を許容する連続失敗回数。これを超えると abort。
 // GAS の deleteRows API が稀に no-op になる現象（=シート破損ではない）を吸収しつつ、
 // API 完全停止などの異常系では暴走しないよう安全弁として機能する。
@@ -12347,6 +12353,12 @@ function scheduleOhlcvPostRepairCleanup_(quickRepairSummary) {
     deleteRangeIndex: null,
     actuallyDeleted: null,
     expectedDeletedRows: null,
+    batchDeleteActive: false,
+    batchDeleteStartIndex: null,
+    batchDeleteEndIndex: null,
+    batchDeleteExpectedRows: null,
+    batchDeleteBeforeGridRows: null,
+    batchDeleteOriginalDeleted: null,
     startedAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   };
@@ -12478,6 +12490,11 @@ function runOhlcvPostRepairCleanup_() {
             break;
           }
           state.totals.duplicateDeletedRows += r.deletedRows || 0;
+          if (r.rescan) {
+            state.updatedAt = new Date().toISOString();
+            saveOhlcvPostRepairCleanupState_(state);
+            continue;
+          }
           // 1バッチ分の delete 完了 → dateIndex を進める
           const advanced = Math.min(state.targetDates.length, state.dateIndex + OHLCV_POST_REPAIR_DEDUP_DATE_BATCH);
           state.totals.duplicateDatesProcessed = (state.totals.duplicateDatesProcessed || 0) + (advanced - state.dateIndex);
@@ -12555,6 +12572,12 @@ function runOhlcvPostRepairCleanup_() {
             break;
           }
           state.totals.duplicateDeletedRows += r.deletedRows || 0;
+          if (r.rescan) {
+            state.earlyDedupComplete = false;
+            state.updatedAt = new Date().toISOString();
+            saveOhlcvPostRepairCleanupState_(state);
+            continue;
+          }
           state.earlyDedupComplete = true;
           state.updatedAt = new Date().toISOString();
           saveOhlcvPostRepairCleanupState_(state);
@@ -13116,6 +13139,233 @@ function compressConsecutiveDescending_(sortedDesc) {
   return ranges;
 }
 
+function clearOhlcvBatchDeleteState_(state) {
+  state.batchDeleteActive = false;
+  state.batchDeleteStartIndex = null;
+  state.batchDeleteEndIndex = null;
+  state.batchDeleteExpectedRows = null;
+  state.batchDeleteBeforeGridRows = null;
+  state.batchDeleteOriginalDeleted = null;
+  state.batchDeleteRequestCount = null;
+  state.batchDeleteStartedAt = null;
+  return state;
+}
+
+function sumOhlcvDeleteRangeRows_(ranges) {
+  return (ranges || []).reduce(function(total, range) {
+    return total + Math.max(0, Number(range && range.len) || 0);
+  }, 0);
+}
+
+function getSheetGridRowsFromSpreadsheetResource_(spreadsheetResource, sheetId) {
+  const sheets = spreadsheetResource && spreadsheetResource.sheets ? spreadsheetResource.sheets : [];
+  for (let i = 0; i < sheets.length; i++) {
+    const props = sheets[i] && sheets[i].properties ? sheets[i].properties : null;
+    if (props && Number(props.sheetId) === Number(sheetId)) {
+      return props.gridProperties ? Number(props.gridProperties.rowCount) : NaN;
+    }
+  }
+  return NaN;
+}
+
+function deleteOhlcvRowRangesWithSheetsApi_(sheet, ranges) {
+  if (!sheet || !ranges || ranges.length === 0) return { ok: true, requestCount: 0 };
+  const spreadsheet = sheet.getParent();
+  const spreadsheetId = spreadsheet.getId();
+  const sheetId = sheet.getSheetId();
+  const requests = ranges.map(function(range) {
+    const startRow = Number(range.start);
+    const len = Number(range.len);
+    return {
+      deleteDimension: {
+        range: {
+          sheetId: sheetId,
+          dimension: "ROWS",
+          startIndex: startRow - 1,
+          endIndex: startRow - 1 + len
+        }
+      }
+    };
+  });
+
+  const url = "https://sheets.googleapis.com/v4/spreadsheets/" + encodeURIComponent(spreadsheetId) + ":batchUpdate";
+  const payload = {
+    requests: requests,
+    includeSpreadsheetInResponse: true,
+    responseIncludeGridData: false
+  };
+  const res = UrlFetchApp.fetch(url, {
+    method: "post",
+    contentType: "application/json",
+    headers: { Authorization: "Bearer " + ScriptApp.getOAuthToken() },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  });
+  const code = res.getResponseCode();
+  const text = res.getContentText() || "";
+  if (code < 200 || code >= 300) {
+    throw new Error("Sheets batchUpdate deleteDimension failed: HTTP " + code + " " + text.slice(0, 500));
+  }
+
+  let parsed = {};
+  try { parsed = text ? JSON.parse(text) : {}; } catch (e) {}
+  const afterGridRows = getSheetGridRowsFromSpreadsheetResource_(parsed.updatedSpreadsheet, sheetId);
+  return {
+    ok: true,
+    responseCode: code,
+    requestCount: requests.length,
+    afterGridRows: afterGridRows
+  };
+}
+
+function verifyPendingOhlcvBatchDelete_(sheet, state) {
+  if (!state || !state.batchDeleteActive) return null;
+  const beforeGridRows = Number(state.batchDeleteBeforeGridRows);
+  const expectedRows = Number(state.batchDeleteExpectedRows || 0);
+  const startIndex = Number(state.batchDeleteStartIndex || 0);
+  const endIndex = Number(state.batchDeleteEndIndex || startIndex);
+  const originalDeleted = Number(state.batchDeleteOriginalDeleted || 0);
+  const currentGridRows = Number(sheet.getMaxRows());
+  const observedDelta = Number.isFinite(beforeGridRows) ? beforeGridRows - currentGridRows : NaN;
+
+  if (Number.isFinite(observedDelta) && observedDelta === expectedRows) {
+    state.actuallyDeleted = originalDeleted + expectedRows;
+    state.deleteRangeIndex = endIndex;
+    clearOhlcvBatchDeleteState_(state);
+    saveOhlcvPostRepairCleanupState_(state);
+    writeProcessLog_("OHLCV_POST_REPAIR", "Verified pending Sheets API batch row delete after resume.", {
+      startIndex: startIndex,
+      endIndex: endIndex,
+      deletedRows: expectedRows,
+      currentGridRows: currentGridRows
+    });
+    return { verified: true, deletedRows: expectedRows };
+  }
+
+  if (Number.isFinite(observedDelta) && observedDelta > 0) {
+    state.actuallyDeleted = originalDeleted + observedDelta;
+    state.deleteRangeIndex = endIndex;
+    clearOhlcvBatchDeleteState_(state);
+    saveOhlcvPostRepairCleanupState_(state);
+    clearOhlcvDedupDeleteRows_();
+    writeProcessLog_("OHLCV_POST_REPAIR", "Sheets API batch row delete was partially observed after resume; current date will be rescanned.", {
+      startIndex: startIndex,
+      endIndex: endIndex,
+      expectedRows: expectedRows,
+      observedDelta: observedDelta,
+      currentGridRows: currentGridRows
+    });
+    return { verified: true, deletedRows: observedDelta, rescan: true };
+  }
+
+  state.deleteRangeIndex = startIndex;
+  state.actuallyDeleted = originalDeleted;
+  clearOhlcvBatchDeleteState_(state);
+  saveOhlcvPostRepairCleanupState_(state);
+  writeProcessLog_("OHLCV_POST_REPAIR", "Pending Sheets API batch row delete was not observed; retrying from the original range index.", {
+    startIndex: startIndex,
+    endIndex: endIndex,
+    expectedRows: expectedRows,
+    currentGridRows: currentGridRows
+  });
+  return { verified: false, retry: true };
+}
+
+function tryOhlcvBatchDeleteRows_(sheet, state, ranges, deadlineMs) {
+  const startIndex = Number(state.deleteRangeIndex || 0);
+  const remainingRanges = Math.max(0, ranges.length - startIndex);
+  if (remainingRanges < OHLCV_POST_REPAIR_BATCH_DELETE_MIN_RANGES) return { attempted: false, reason: "too_few_ranges" };
+  if (deadlineMs && Date.now() > deadlineMs - OHLCV_POST_REPAIR_BATCH_DELETE_MARGIN_MS) return { attempted: false, reason: "deadline" };
+
+  const endIndex = Math.min(ranges.length, startIndex + OHLCV_POST_REPAIR_BATCH_DELETE_MAX_RANGES);
+  const batchRanges = ranges.slice(startIndex, endIndex);
+  const expectedRows = sumOhlcvDeleteRangeRows_(batchRanges);
+  if (expectedRows <= 0) return { attempted: false, reason: "no_rows" };
+
+  const originalDeleted = Number(state.actuallyDeleted || 0);
+  const beforeGridRows = Number(sheet.getMaxRows());
+  state.batchDeleteActive = true;
+  state.batchDeleteStartIndex = startIndex;
+  state.batchDeleteEndIndex = endIndex;
+  state.batchDeleteExpectedRows = expectedRows;
+  state.batchDeleteBeforeGridRows = beforeGridRows;
+  state.batchDeleteOriginalDeleted = originalDeleted;
+  state.batchDeleteRequestCount = batchRanges.length;
+  state.batchDeleteStartedAt = new Date().toISOString();
+  // pre-advance: batchUpdate後にGASが落ちても同じ行番号を再削除しない。
+  state.deleteRangeIndex = endIndex;
+  saveOhlcvPostRepairCleanupState_(state);
+
+  try {
+    writeProcessLog_("OHLCV_POST_REPAIR", "Sheets API batch row delete starting.", {
+      startIndex: startIndex,
+      endIndex: endIndex,
+      requestCount: batchRanges.length,
+      expectedRows: expectedRows,
+      beforeGridRows: beforeGridRows
+    });
+    const apiResult = deleteOhlcvRowRangesWithSheetsApi_(sheet, batchRanges);
+    const afterGridRows = Number(apiResult.afterGridRows);
+    const observedDelta = Number.isFinite(afterGridRows) ? beforeGridRows - afterGridRows : expectedRows;
+
+    if (observedDelta === expectedRows) {
+      state.actuallyDeleted = originalDeleted + expectedRows;
+      clearOhlcvBatchDeleteState_(state);
+      saveOhlcvPostRepairCleanupState_(state);
+      writeProcessLog_("OHLCV_POST_REPAIR", "Sheets API batch row delete completed.", {
+        startIndex: startIndex,
+        endIndex: endIndex,
+        requestCount: batchRanges.length,
+        deletedRows: expectedRows,
+        beforeGridRows: beforeGridRows,
+        afterGridRows: afterGridRows
+      });
+      return { attempted: true, deletedRows: expectedRows };
+    }
+
+    if (Number.isFinite(observedDelta) && observedDelta > 0) {
+      state.actuallyDeleted = originalDeleted + observedDelta;
+      clearOhlcvBatchDeleteState_(state);
+      saveOhlcvPostRepairCleanupState_(state);
+      clearOhlcvDedupDeleteRows_();
+      writeProcessLog_("OHLCV_POST_REPAIR", "Sheets API batch row delete had a partial row-count delta; current date will be rescanned.", {
+        startIndex: startIndex,
+        endIndex: endIndex,
+        expectedRows: expectedRows,
+        observedDelta: observedDelta,
+        beforeGridRows: beforeGridRows,
+        afterGridRows: afterGridRows
+      });
+      return { attempted: true, deletedRows: observedDelta, rescan: true };
+    }
+
+    state.deleteRangeIndex = startIndex;
+    state.actuallyDeleted = originalDeleted;
+    clearOhlcvBatchDeleteState_(state);
+    saveOhlcvPostRepairCleanupState_(state);
+    writeProcessLog_("OHLCV_POST_REPAIR", "Sheets API batch row delete did not change row count; falling back to per-range deleteRows.", {
+      startIndex: startIndex,
+      endIndex: endIndex,
+      expectedRows: expectedRows,
+      beforeGridRows: beforeGridRows,
+      afterGridRows: afterGridRows
+    });
+    return { attempted: false, fallback: true, reason: "no_row_delta" };
+  } catch (e) {
+    state.deleteRangeIndex = startIndex;
+    state.actuallyDeleted = originalDeleted;
+    clearOhlcvBatchDeleteState_(state);
+    saveOhlcvPostRepairCleanupState_(state);
+    writeProcessLog_("OHLCV_POST_REPAIR", "Sheets API batch row delete failed; falling back to per-range deleteRows.", {
+      startIndex: startIndex,
+      endIndex: endIndex,
+      expectedRows: expectedRows,
+      message: e && e.message ? e.message : String(e)
+    });
+    return { attempted: false, fallback: true, reason: "api_error" };
+  }
+}
+
 // PSの削除行集合を「降順レンジ削除」で除去する。bulkCompactDeleteOhlcvRows_ の後継。
 //
 // 設計の根拠（2026/05/15 シート破損インシデント）:
@@ -13161,6 +13411,7 @@ function bulkRangedDeleteOhlcvRows_(sheet, state, deadlineMs) {
     state.expectedDeletedRows = null;
     state.skippedDeleteRanges = null;
     state.consecutiveDeleteFailures = null;
+    clearOhlcvBatchDeleteState_(state);
     return { done: true, deletedRows: totalDeletedEmpty };
   }
 
@@ -13190,10 +13441,32 @@ function bulkRangedDeleteOhlcvRows_(sheet, state, deadlineMs) {
     });
   }
 
+  if (state.batchDeleteActive) {
+    const verifiedBatch = verifyPendingOhlcvBatchDelete_(sheet, state);
+    if (verifiedBatch && verifiedBatch.rescan) {
+      return { done: true, deletedRows: verifiedBatch.deletedRows || 0, rescan: true };
+    }
+  }
+
   let consecutiveFailures = state.consecutiveDeleteFailures || 0;
+  let batchDeleteDisabledThisRun = false;
 
   while (state.deleteRangeIndex < ranges.length) {
     if (deadlineMs && Date.now() > deadlineMs - OHLCV_POST_REPAIR_RANGED_DELETE_MARGIN_MS) break;
+
+    if (!batchDeleteDisabledThisRun) {
+      const batchResult = tryOhlcvBatchDeleteRows_(sheet, state, ranges, deadlineMs);
+      if (batchResult && batchResult.attempted) {
+        if (batchResult.rescan) {
+          return { done: true, deletedRows: batchResult.deletedRows || 0, rescan: true };
+        }
+        consecutiveFailures = 0;
+        state.consecutiveDeleteFailures = 0;
+        continue;
+      }
+      if (batchResult && batchResult.fallback) batchDeleteDisabledThisRun = true;
+    }
+
     const range = ranges[state.deleteRangeIndex];
 
     // 【pre-advance】先に index を進めて saveState する。ハードkill 時に重複削除を防ぐ
@@ -13272,6 +13545,7 @@ function bulkRangedDeleteOhlcvRows_(sheet, state, deadlineMs) {
   state.expectedDeletedRows = null;
   state.skippedDeleteRanges = null;
   state.consecutiveDeleteFailures = null;
+  clearOhlcvBatchDeleteState_(state);
   writeProcessLog_("OHLCV_POST_REPAIR", "Ranged delete completed.", {
     deletedRows: totalDeleted,
     expectedDeletedRows: expected,
