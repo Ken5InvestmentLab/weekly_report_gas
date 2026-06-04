@@ -13410,7 +13410,6 @@ function bulkRangedDeleteOhlcvRows_(sheet, state, deadlineMs) {
     state.actuallyDeleted = 0;
     state.skippedDeleteRanges = 0;
     state.consecutiveDeleteFailures = 0;
-    state.rangedDeleteLastGridRows = null;
     saveOhlcvPostRepairCleanupState_(state);
     writeProcessLog_("OHLCV_POST_REPAIR", "Ranged delete initialized.", {
       totalDeleteRows: set.size,
@@ -13429,6 +13428,7 @@ function bulkRangedDeleteOhlcvRows_(sheet, state, deadlineMs) {
 
   let consecutiveFailures = state.consecutiveDeleteFailures || 0;
   let batchDeleteDisabledThisRun = false;
+  let usedSpreadsheetDeleteRows = false;
 
   while (state.deleteRangeIndex < ranges.length) {
     if (deadlineMs && Date.now() > deadlineMs - OHLCV_POST_REPAIR_RANGED_DELETE_MARGIN_MS) break;
@@ -13443,7 +13443,10 @@ function bulkRangedDeleteOhlcvRows_(sheet, state, deadlineMs) {
         state.consecutiveDeleteFailures = 0;
         continue;
       }
-      if (batchResult && batchResult.fallback) batchDeleteDisabledThisRun = true;
+      if (batchResult && batchResult.fallback) {
+        batchDeleteDisabledThisRun = true;
+        state.rangedDeleteLastGridRows = null;
+      }
     }
 
     const range = ranges[state.deleteRangeIndex];
@@ -13455,6 +13458,7 @@ function bulkRangedDeleteOhlcvRows_(sheet, state, deadlineMs) {
 
     const beforeLast = sheet.getLastRow();
     sheet.deleteRows(range.start, range.len);
+    usedSpreadsheetDeleteRows = true;
     SpreadsheetApp.flush();
     const afterLast = sheet.getLastRow();
     const observedDelta = beforeLast - afterLast;
@@ -13524,7 +13528,7 @@ function bulkRangedDeleteOhlcvRows_(sheet, state, deadlineMs) {
   state.expectedDeletedRows = null;
   state.skippedDeleteRanges = null;
   state.consecutiveDeleteFailures = null;
-  state.rangedDeleteLastGridRows = null;
+  if (usedSpreadsheetDeleteRows) state.rangedDeleteLastGridRows = null;
   clearOhlcvBatchDeleteState_(state);
   writeProcessLog_("OHLCV_POST_REPAIR", "Ranged delete completed.", {
     deletedRows: totalDeleted,
