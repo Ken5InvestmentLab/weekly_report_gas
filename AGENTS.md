@@ -81,6 +81,7 @@ OVERLAP_DAYS = 3
 - 投稿済み状態は `premium_worker/state/` に保存する。
 - 生成中ファイルは `premium_worker/out/` に保存する。
 - `premium_worker/state/` と `premium_worker/out/` は git 管理しない。
+- 日本語を含む `premium_worker/out/premium_reports.json` は PowerShell here-string 等で作成しない。文字化けで `?` 化することがあるため、UTF-8安全な Node 書き込みや `apply_patch` で作成・修正する。
 
 ### プレミアム投稿ログ
 
