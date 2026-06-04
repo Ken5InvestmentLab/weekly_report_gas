@@ -6425,9 +6425,11 @@ function resetAllOhlcvProperties() {
   props.deleteProperty(OHLCV_MANUAL_BUSINESS_DATE_KEY);
   props.deleteProperty(OHLCV_MANUAL_BUSINESS_EXPIRES_KEY);
   props.deleteProperty(OHLCV_POST_REPAIR_CLEANUP_STATE_KEY);
+  props.deleteProperty(OHLCV_POST_REPAIR_FINAL_SORT_STATE_KEY);
   props.deleteProperty(OHLCV_INTRADAY_STALE_SYMBOLS_KEY);
   deleteTriggersByHandler_("resumeOHLCVFetch");
   deleteTriggersByHandler_(OHLCV_POST_REPAIR_CLEANUP_HANDLER);
+  deleteTriggersByHandler_(OHLCV_POST_REPAIR_FINAL_SORT_HANDLER);
   clearMiddayOhlcvState_();
   writeProcessLog_("OHLCV", "OHLCV関連の進捗プロパティをすべてリセットしました。手動基準日の指定もクリア済みです。", {});
 }
@@ -6729,7 +6731,10 @@ const QUICK_REPAIR_SCAN_BOUNDARY_PADDING_ROWS = 500;
 const QUICK_REPAIR_CLEANUP_STATE_KEY = "QUICK_REPAIR_TAIL_CLEANUP_STATE";
 const OHLCV_POST_REPAIR_CLEANUP_STATE_KEY = "OHLCV_POST_REPAIR_CLEANUP_STATE_V1";
 const OHLCV_POST_REPAIR_CLEANUP_HANDLER = "resumeOhlcvPostRepairCleanup";
+const OHLCV_POST_REPAIR_FINAL_SORT_STATE_KEY = "OHLCV_POST_REPAIR_FINAL_SORT_STATE_V1";
+const OHLCV_POST_REPAIR_FINAL_SORT_HANDLER = "resumeOhlcvPostRepairFinalSort";
 const OHLCV_POST_REPAIR_CLEANUP_VERSION = 1;
+const OHLCV_POST_REPAIR_FINAL_SORT_VERSION = 1;
 const OHLCV_POST_REPAIR_CLEANUP_CHUNK_ROWS = 1200;
 const OHLCV_POST_REPAIR_DUP_DATE_CHUNK_ROWS = 5000;
 const OHLCV_POST_REPAIR_MAX_DUP_DATES = 90;
@@ -6741,6 +6746,8 @@ const OHLCV_POST_REPAIR_EARLY_DEDUP_LIMIT_MS = 300 * 1000;
 // earlyDedupEarlyCursor で再開できるため1チャンク分の余裕は不要。10sあれば必ず開始できる
 const OHLCV_POST_REPAIR_EARLY_SCAN_MIN_REMAINING_MS = 10 * 1000;
 const OHLCV_POST_REPAIR_RESUME_AFTER_MS = 10 * 1000;
+const OHLCV_POST_REPAIR_FINAL_SORT_AFTER_MS = 10 * 1000;
+const OHLCV_POST_REPAIR_FINAL_SORT_SAFETY_AFTER_MS = 7 * 60 * 1000;
 // Full-sheet sort is too slow around 240k rows in post-repair cleanup.
 // Large sheets use unsorted-safe scans and skip this final sort.
 const OHLCV_POST_REPAIR_SORT_MAX_ROWS = 200000;
@@ -9794,10 +9801,12 @@ function resetQuickRepairState() {
   PropertiesService.getScriptProperties().deleteProperty(QUICK_REPAIR_STATE_KEY);
   PropertiesService.getScriptProperties().deleteProperty(QUICK_REPAIR_CLEANUP_STATE_KEY);
   PropertiesService.getScriptProperties().deleteProperty(OHLCV_POST_REPAIR_CLEANUP_STATE_KEY);
+  PropertiesService.getScriptProperties().deleteProperty(OHLCV_POST_REPAIR_FINAL_SORT_STATE_KEY);
   PropertiesService.getScriptProperties().deleteProperty(QUICK_REPAIR_FAIL_COUNTS_KEY);
   deleteTriggersByHandler_("resumeQuickRepair");
   deleteTriggersByHandler_("quickRepairTrigger");
   deleteTriggersByHandler_(OHLCV_POST_REPAIR_CLEANUP_HANDLER);
+  deleteTriggersByHandler_(OHLCV_POST_REPAIR_FINAL_SORT_HANDLER);
   console.log("クイック修復の状態をリセットしました。");
 }
 
@@ -10471,9 +10480,11 @@ function scheduleQuickRepairTriggerAfterCleanup_(cleanupSummary) {
   props.deleteProperty(QUICK_REPAIR_STATE_KEY);
   props.deleteProperty(QUICK_REPAIR_CLEANUP_STATE_KEY);
   props.deleteProperty(OHLCV_POST_REPAIR_CLEANUP_STATE_KEY);
+  props.deleteProperty(OHLCV_POST_REPAIR_FINAL_SORT_STATE_KEY);
   deleteTriggersByHandler_("resumeQuickRepair");
   deleteTriggersByHandler_("quickRepairTrigger");
   deleteTriggersByHandler_(OHLCV_POST_REPAIR_CLEANUP_HANDLER);
+  deleteTriggersByHandler_(OHLCV_POST_REPAIR_FINAL_SORT_HANDLER);
 
   try {
     ScriptApp.newTrigger("quickRepairTrigger")
@@ -10663,9 +10674,11 @@ function emergencyStopQuickRepairAndCleanOhlcv() {
   deleteTriggersByHandler_("resumeQuickRepair");
   deleteTriggersByHandler_("quickRepairTrigger");
   deleteTriggersByHandler_(OHLCV_POST_REPAIR_CLEANUP_HANDLER);
+  deleteTriggersByHandler_(OHLCV_POST_REPAIR_FINAL_SORT_HANDLER);
   props.deleteProperty(QUICK_REPAIR_STATE_KEY);
   props.deleteProperty(QUICK_REPAIR_CLEANUP_STATE_KEY);
   props.deleteProperty(OHLCV_POST_REPAIR_CLEANUP_STATE_KEY);
+  props.deleteProperty(OHLCV_POST_REPAIR_FINAL_SORT_STATE_KEY);
   props.setProperty(CLEANUP_LEGACY_AUTO_QUICK_REPAIR_KEY, "1");
 
   const result = cleanupLegacyGapFailedAndEmptyTimestamps(false);
@@ -12624,18 +12637,13 @@ function runOhlcvPostRepairCleanup_() {
       }
 
       if (state.step === "SORT") {
-        writeProcessLog_("OHLCV_POST_REPAIR", "SORT step starting.", {
+        writeProcessLog_("OHLCV_POST_REPAIR", "SORT step deferred to final sort trigger.", {
           lastRow: sh.getLastRow(),
-          maxRows: OHLCV_POST_REPAIR_SORT_MAX_ROWS,
           elapsedMs: Date.now() - startedAt
         });
-        const r = tryOhlcvPostRepairSortOnce_(sh);
-        state.totals.sortAttempted = !!r.attempted;
-        state.totals.sortSkipped = !!r.skipped;
-        state.totals.sortResult = r;
-        if (r.adjacentDuplicateCleanup) {
-          state.totals.duplicateDeletedRows += r.adjacentDuplicateCleanup.deletedRows || 0;
-        }
+        state.totals.sortAttempted = false;
+        state.totals.sortSkipped = false;
+        state.totals.sortDeferredToFinalTrigger = true;
         state.step = "DONE";
         state.updatedAt = new Date().toISOString();
         saveOhlcvPostRepairCleanupState_(state);
@@ -13918,6 +13926,8 @@ function completeOhlcvPostRepairCleanup_(state) {
     targetDates: state.targetDates ? state.targetDates.length : 0
   };
 
+  summary.finalSort = scheduleOhlcvPostRepairFinalSort_(summary);
+
   clearOhlcvPostRepairCleanupState_();
   PropertiesService.getScriptProperties().deleteProperty(QUICK_REPAIR_STATE_KEY);
   PropertiesService.getScriptProperties().deleteProperty(QUICK_REPAIR_CLEANUP_STATE_KEY);
@@ -13925,13 +13935,164 @@ function completeOhlcvPostRepairCleanup_(state) {
   clearEarlyDedupTailCache_();
   clearManualOhlcvBusinessDate_();
 
-summary.githubOptimize = triggerGitHubActionsOptimize_();
-
-// post-repair cleanup完了後に、保留していたDiscord通知を送信する
-summary.discordNotice = sendPendingOhlcvCompletionNoticeAfterQuickRepair_(summary);
-
-writeProcessLog_("OHLCV_POST_REPAIR", "Post-repair cleanup completed. GitHub Actions triggered. Discord notice sent after post-repair cleanup.", summary);
+writeProcessLog_("OHLCV_POST_REPAIR", "Post-repair cleanup completed. Final sort trigger scheduled before GitHub Actions and Discord notice.", summary);
 return summary;
+}
+
+function scheduleOhlcvPostRepairFinalSort_(summary) {
+  const state = {
+    version: OHLCV_POST_REPAIR_FINAL_SORT_VERSION,
+    summary: summary || {},
+    attempts: 0,
+    sortDone: false,
+    githubDone: false,
+    discordDone: false,
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  saveOhlcvPostRepairFinalSortState_(state);
+  scheduleSingleOhlcvPostRepairFinalSortTrigger_(OHLCV_POST_REPAIR_FINAL_SORT_AFTER_MS);
+  writeProcessLog_("OHLCV_POST_REPAIR", "Final OHLCV sort trigger scheduled.", {
+    handlerName: OHLCV_POST_REPAIR_FINAL_SORT_HANDLER,
+    delayMs: OHLCV_POST_REPAIR_FINAL_SORT_AFTER_MS
+  });
+  return {
+    scheduled: true,
+    handlerName: OHLCV_POST_REPAIR_FINAL_SORT_HANDLER,
+    delayMs: OHLCV_POST_REPAIR_FINAL_SORT_AFTER_MS
+  };
+}
+
+function resumeOhlcvPostRepairFinalSort() {
+  deleteTriggersByHandler_(OHLCV_POST_REPAIR_FINAL_SORT_HANDLER);
+  return runOhlcvPostRepairFinalSort_();
+}
+
+function runOhlcvPostRepairFinalSort_() {
+  let lock = null;
+  let state = null;
+  try {
+    lock = LockService.getScriptLock();
+    lock.waitLock(30000);
+
+    state = loadOhlcvPostRepairFinalSortState_();
+    if (!state) {
+      deleteTriggersByHandler_(OHLCV_POST_REPAIR_FINAL_SORT_HANDLER);
+      writeProcessLog_("OHLCV_POST_REPAIR", "Final sort trigger skipped because no final sort state exists.", {});
+      return { ok: true, skipped: true, reason: "missing_state" };
+    }
+
+    scheduleSingleOhlcvPostRepairFinalSortTrigger_(OHLCV_POST_REPAIR_FINAL_SORT_SAFETY_AFTER_MS);
+    state.attempts = Number(state.attempts || 0) + 1;
+    state.updatedAt = new Date().toISOString();
+    saveOhlcvPostRepairFinalSortState_(state);
+
+    const app = getAppConfig_();
+    const ss = SpreadsheetApp.openById(app.spreadsheetId);
+    const sh = ss.getSheetByName(CONFIG.OHLCV_SHEET);
+    if (!sh) throw new Error("Missing sheet: " + CONFIG.OHLCV_SHEET);
+
+    if (!state.sortDone) {
+      state.sortResult = sortOhlcvSheetByTimestampForce_(sh);
+      state.sortDone = true;
+      state.updatedAt = new Date().toISOString();
+      saveOhlcvPostRepairFinalSortState_(state);
+    }
+
+    const summary = state.summary || {};
+    summary.finalSort = state.sortResult || { skipped: true, reason: "already_done_without_result" };
+
+    if (!state.githubDone) {
+      state.githubOptimize = triggerGitHubActionsOptimize_() || { attempted: true };
+      state.githubDone = true;
+      state.updatedAt = new Date().toISOString();
+      saveOhlcvPostRepairFinalSortState_(state);
+    }
+    summary.githubOptimize = state.githubOptimize;
+
+    if (!state.discordDone) {
+      state.discordNotice = sendPendingOhlcvCompletionNoticeAfterQuickRepair_(summary);
+      state.discordDone = true;
+      state.updatedAt = new Date().toISOString();
+      saveOhlcvPostRepairFinalSortState_(state);
+    }
+    summary.discordNotice = state.discordNotice;
+
+    clearOhlcvPostRepairFinalSortState_();
+    writeProcessLog_("OHLCV_POST_REPAIR", "Final OHLCV sort completed. GitHub Actions triggered and Discord notice sent after sorting.", summary);
+    return summary;
+  } catch (err) {
+    const message = err && err.message ? err.message : String(err);
+    writeProcessLog_("OHLCV_POST_REPAIR", "Final OHLCV sort/notification step failed. A retry trigger has been scheduled.", {
+      message: message,
+      attempts: state ? Number(state.attempts || 0) : null
+    });
+    debugLogToSheet_("ohlcv.post_repair_final_sort.error", {
+      message: message,
+      stack: err && err.stack ? String(err.stack) : ""
+    });
+    scheduleSingleOhlcvPostRepairFinalSortTrigger_(OHLCV_POST_REPAIR_FINAL_SORT_AFTER_MS);
+    return { ok: false, continuation: true, error: message };
+  } finally {
+    if (lock && lock.hasLock()) lock.releaseLock();
+  }
+}
+
+function sortOhlcvSheetByTimestampForce_(sheet) {
+  if (!sheet) return { attempted: false, skipped: true, reason: "missing_sheet" };
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow <= 2) return { attempted: false, skipped: true, reason: "not_enough_rows", dataRows: Math.max(0, lastRow - 1) };
+
+  const dataRows = lastRow - 1;
+  const startedAt = Date.now();
+  writeProcessLog_("OHLCV_POST_REPAIR", "Final OHLCV sort starting without row-count skip.", {
+    dataRows: dataRows
+  });
+
+  sheet.getRange(2, 1, dataRows, 8).sort([
+    { column: 1, ascending: true },
+    { column: 3, ascending: true }
+  ]);
+  SpreadsheetApp.flush();
+
+  return {
+    attempted: true,
+    skipped: false,
+    sortedRows: dataRows,
+    elapsedMs: Date.now() - startedAt
+  };
+}
+
+function loadOhlcvPostRepairFinalSortState_() {
+  try {
+    const raw = PropertiesService.getScriptProperties().getProperty(OHLCV_POST_REPAIR_FINAL_SORT_STATE_KEY);
+    if (!raw) return null;
+    const state = JSON.parse(raw);
+    if (!state || Number(state.version) !== OHLCV_POST_REPAIR_FINAL_SORT_VERSION) return null;
+    if (!state.summary) state.summary = {};
+    return state;
+  } catch (e) {
+    return null;
+  }
+}
+
+function saveOhlcvPostRepairFinalSortState_(state) {
+  state.updatedAt = new Date().toISOString();
+  PropertiesService.getScriptProperties().setProperty(OHLCV_POST_REPAIR_FINAL_SORT_STATE_KEY, JSON.stringify(state));
+}
+
+function scheduleSingleOhlcvPostRepairFinalSortTrigger_(delayMs) {
+  deleteTriggersByHandler_(OHLCV_POST_REPAIR_FINAL_SORT_HANDLER);
+  ScriptApp.newTrigger(OHLCV_POST_REPAIR_FINAL_SORT_HANDLER)
+    .timeBased()
+    .after(delayMs)
+    .create();
+}
+
+function clearOhlcvPostRepairFinalSortState_() {
+  PropertiesService.getScriptProperties().deleteProperty(OHLCV_POST_REPAIR_FINAL_SORT_STATE_KEY);
+  deleteTriggersByHandler_(OHLCV_POST_REPAIR_FINAL_SORT_HANDLER);
 }
 
 function loadOhlcvPostRepairCleanupState_() {
@@ -14055,6 +14216,7 @@ function startOhlcvPostRepairCleanupNow() {
 
 function resetOhlcvPostRepairCleanupNow() {
   clearOhlcvPostRepairCleanupState_();
+  clearOhlcvPostRepairFinalSortState_();
   clearOhlcvDedupDeleteRows_();
   clearEarlyDedupTailCache_();
   writeProcessLog_("OHLCV_POST_REPAIR", "Post-repair cleanup state and trigger were reset.", {});

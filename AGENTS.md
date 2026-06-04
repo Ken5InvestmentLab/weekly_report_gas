@@ -245,7 +245,8 @@ OVERLAP_DAYS = 3
 | `resumeOHLCVFetch` | 15:51 OHLCV本番取得の再開時 | `fetchOHLCVForNewAlerts` を再起動 |
 | `resumeDailyMaintenance` | 日次メンテナンス再開時 | `runDailyMaintenanceInternal_` を再開 |
 | `resumeQuickRepair` | GAP修復再開時 | `quickRepairRecentGaps` を再開 |
-| `resumeOhlcvPostRepairCleanup` | GAP修復後cleanup再開時 | timestamp正規化、AM保護マーキング、日付バケット重複整理、最終sortを再開 |
+| `resumeOhlcvPostRepairCleanup` | GAP修復後cleanup再開時 | timestamp正規化、AM保護マーキング、日付バケット重複整理を再開し、最後に最終sortトリガーへ委譲 |
+| `resumeOhlcvPostRepairFinalSort` | GAP修復後cleanup完了後 | `ohlcv_4h` 全体をtimestamp/symbol順にsortし、成功後にGitHub ActionsとDiscord通知へ進む |
 | `purgeOldOhlcvResumeTrigger` | OHLCV削除未完了時 | `purgeOldOhlcvDataDaily` を再開 |
 | `resumeCleanupLegacyGapFailedAndEmptyTimestamps` | 旧OHLCV残骸整理未完了時 | 空timestamp・非09:00/13:00・長期GAP_FAILED整理を再開 |
 | `resumeEvaluationOhlcvCoverageRepair` | 評価対象銘柄の120日OHLCV補填未完了時 | `repairEvaluationOhlcvCoverage120` を再開 |
@@ -348,6 +349,7 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 | `QUICK_REPAIR_STATE` | GAP修復の再開状態。v7 |
 | `QUICK_REPAIR_TAIL_CLEANUP_STATE` | GAP修復入口の末尾不正timestamp掃除状態 |
 | `OHLCV_POST_REPAIR_CLEANUP_STATE_V1` | GAP修復完了後の小分けcleanup状態 |
+| `OHLCV_POST_REPAIR_FINAL_SORT_STATE_V1` | GAP修復後cleanup完了後の最終sort・GitHub Actions・Discord通知の再開状態 |
 | `OHLCV_INTRADAY_STALE_SYMBOLS_V1` | Yahoo 1hのOHLCが対象期間で古い/nullの銘柄の一時保留リスト |
 | `RAW_ALERT_VOLUME_MAP_PROP_V1` | 15:51 PHASE1 resumeで再利用する当日 `alerts_raw` 出来高マップキャッシュ |
 | `CLEANUP_LEGACY_STATE_V1` | 旧OHLCV残骸整理の再開状態 |
@@ -501,8 +503,8 @@ refetchSymbolRange(symbols, startDate, endDate)
 - 評価日を迎えた `alerts_raw` 行を更新。
 - 5/10/20/40営業日後の評価価格、騰落率、勝敗を埋める。
 - 全チェックポイントが埋まると `status=COMPLETE`。
-- DiscordのOHLCV完了通知は、日次メンテナンス直後ではなく、`quickRepairRecentGaps` 後の `resumeOhlcvPostRepairCleanup` が完了してから送る。
-- `GITHUB_PAT` があれば `Ken5InvestmentLab/screening-bot` の `optimize.yml` を起動。
+- DiscordのOHLCV完了通知は、日次メンテナンス直後ではなく、`quickRepairRecentGaps` 後の `resumeOhlcvPostRepairCleanup` と `resumeOhlcvPostRepairFinalSort` が完了してから送る。
+- `GITHUB_PAT` があれば、最終sort完了後に `Ken5InvestmentLab/screening-bot` の `optimize.yml` を起動。
 - 完了後に `quickRepairTrigger` を10秒後に予約。
 
 ### アーカイブ・削除
@@ -540,10 +542,11 @@ refetchSymbolRange(symbols, startDate, endDate)
 - 手動補填など明示的に `GAP_FAILED` を作る経路でも、`09:00 JST` / `13:00 JST` の実timestamp以外は保存しない。
 - 空timestamp、`00:00`、Yahoo生1h足時刻をマーカーとして保存しない。
 - `quickRepairRecentGaps()` 完了時は `dedupeAndSortOhlcv_()` を直接呼ばず、`OHLCV_POST_REPAIR_CLEANUP_STATE_V1` を作って `resumeOhlcvPostRepairCleanup` に委譲する。
-- post-repair cleanupは全行timestamp正規化、保護AMマーキング、日付バケット重複整理、最終sortを小分けで進める。保護AM行は削除候補に入れない。
+- post-repair cleanupは全行timestamp正規化、保護AMマーキング、日付バケット重複整理までを小分けで進める。保護AM行は削除候補に入れない。
 - post-repair cleanupの重複行削除は、Sheets API `batchUpdate/deleteDimension` による一括削除を主経路にし、失敗時だけ `deleteRows` の降順レンジ削除へ戻す。HTTP 200の一括削除は予定削除件数で確定し、次バッチの検証用行数は直前のSheets APIレスポンスから引き継ぐ。クラッシュ再開時に誤った行番号を再削除しないよう、pre-advanceを維持する。
 - post-repair cleanupの `DEDUP_DATES` で同じ `dateIndex` が再開ログに繰り返し出る場合は、日付バッチが大きすぎて進捗保存前に時間切れになっている可能性を優先して疑う。日付単位の小さいバッチで前進させ、全日まとめて再スキャンする方向へ戻さない。
-- post-repair cleanupの最終sortは、大規模シートでは6分上限を超えるため無理に実行しない。行数が安全閾値を超える場合はsortをスキップし、後続の重複・GAP検出はunsorted-safeな日付範囲/tailスキャンで吸収する。
+- post-repair cleanup完了後は `resumeOhlcvPostRepairFinalSort` の専用ワンショットトリガーで `ohlcv_4h` 全体を `timestamp`、`symbol` 昇順にsortする。GitHub Actions起動とDiscordのOHLCV完了通知は、この最終sortが成功してから送る。
+- 最終sortが失敗・タイムアウトした場合は `OHLCV_POST_REPAIR_FINAL_SORT_STATE_V1` から再開し、sort前にGitHub ActionsやDiscord通知を先に送らない。
 
 ### 不正timestamp・GAP修復タイムアウト復旧
 
@@ -707,6 +710,7 @@ auditGapRepairCoverage(14, 2)              // GAP修復結果監査
 previewOhlcvPostRepairCleanup()            // GAP修復後cleanupのDryRun確認
 startOhlcvPostRepairCleanupNow()           // GAP修復後cleanupを手動開始
 resumeOhlcvPostRepairCleanup()             // GAP修復後cleanup再開
+resumeOhlcvPostRepairFinalSort()           // GAP修復後cleanup完了後の最終sortと通知再開
 resetOhlcvPostRepairCleanupNow()           // GAP修復後cleanup状態リセット
 
 diagOhlcvTimestamps()                      // 無効timestamp診断
