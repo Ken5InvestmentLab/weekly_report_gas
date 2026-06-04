@@ -291,7 +291,7 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 重要な保存ルール。
 
 - timestamp は `09:00 JST` または `13:00 JST`。
-- A列 timestamp の保存・表示形式は `yyyy/MM/dd HH:mm` に統一し、`yyyy/MM/dd 9:00` を混在させない。
+- A列 timestamp の保存・表示形式は `yyyy/MM/dd HH:mm:ss` に統一し、`yyyy/MM/dd 9:00` や秒なし表示を混在させない。
 - `09:00 JST` はAM代表行。
 - `13:00 JST` はPM代表行。
 - B列 `alert_id` には通常取得、`MIDDAY_yyyy-mm-dd`、`MIDDAY_LOCKED_yyyy-mm-dd`、`GAP_REPAIR` などのマーカーが入る。
@@ -658,7 +658,7 @@ GASの実行上限は約6分。長時間処理は必ず再開可能にする。
 - 13:21以外では、OHLCV追記前の `timestamp + symbol` 重複ガードをバイパスしない。既存キーがある場合は保護マーカーを優先し、必要な差分は追記ではなく既存行更新で吸収する。
 - 追記前にtimestampを `Date` に正規化し、A列へ書く前から `yyyy/MM/dd 09:00` または `yyyy/MM/dd 13:00` のゼロ埋め文字列へ変換する。
 - 通常追記はB:Hを書いた後にA列 timestamp を単独で書き、直後にA列を読み返す。空・不正・09:00/13:00以外の行は即削除し、preWrite/postWriteのtimestampサンプルをログに残す。13:21軽量MIDDAY追記では事前正規化だけを行い、readback削除は15:51側へ委譲する。
-- A列 timestamp は文字列 `yyyy/MM/dd HH:mm` として書き、readbackでは `Date`、シリアル値、文字列のすべてを正規化して判定する。
+- A列 timestamp はDateとして書き、表示形式は `yyyy/MM/dd HH:mm:ss` にする。readbackでは `Date`、シリアル値、文字列のすべてを正規化して判定する。
 - GAP修復では、readbackで実際に保存確認できたOHLCV行だけを補填成功として数える。A列timestamp保存失敗が出た場合は再開トリガーを増やさず停止する。
 - 日次チェーンの追記後はGAP修復前に `dedupeAndSortOhlcv_()` を呼ばず、timestamp readback検証と軽量ガードに留める。最終整理はGAP修復完了後の `resumeOhlcvPostRepairCleanup` で小分けに行う。
 - `cleanupOhlcvDuplicatesNow()` は6分上限に近づけない。小チャンク・短時間実行・削除数上限で分割し、未完了分は `resumeCleanupOhlcvDuplicates` に自動継続させる。

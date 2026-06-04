@@ -34,6 +34,8 @@ const CONFIG = {
   SLEEP_MS: 1000
 };
 
+const OHLCV_TIMESTAMP_NUMBER_FORMAT = "yyyy/mm/dd hh:mm:ss";
+
 const RAW_HEADERS = [
   "alert_id", "received_at", "signal_date", "signal_week_start", "signal_type",
   "timeframe", "symbol_code", "symbol_name", "entry_price", "volume", "tv_symbol",
@@ -2912,7 +2914,7 @@ function appendMiddayOhlcvRowsWithoutGuard_(sheet, rows, context) {
   const startRow = sheet.getLastRow() + 1;
   sheet.getRange(startRow, 2, validData.length, 7).setValues(validData.map(row => row.slice(1, 8)));
   const timestampRange = sheet.getRange(startRow, 1, validData.length, 1);
-  timestampRange.setNumberFormat("yyyy/mm/dd hh:mm");
+  timestampRange.setNumberFormat(OHLCV_TIMESTAMP_NUMBER_FORMAT);
   timestampRange.setValues(validData.map(row => [normalizeOhlcvTimestamp_(row[0]) || row[0]]));
   SpreadsheetApp.flush();
 
@@ -3218,7 +3220,7 @@ function writeOhlcvRowUpdates_(sheet, updateItems, context) {
       const normalized = normalizeOhlcvRowForWrite_(item.row);
       return normalized || item.row;
     });
-    sheet.getRange(startRow, 1, values.length, 1).setNumberFormat("yyyy/mm/dd hh:mm");
+    sheet.getRange(startRow, 1, values.length, 1).setNumberFormat(OHLCV_TIMESTAMP_NUMBER_FORMAT);
     sheet.getRange(startRow, 1, values.length, 8).setValues(values);
     stats.updatedRows += values.length;
     stats.rangeCount++;
@@ -5488,7 +5490,7 @@ sheet.getRange(startRow, 2, appendData.length, 7).setValues(appendData.map(row =
 const timestampDateValues = appendData.map(row => [normalizeOhlcvTimestamp_(row[0]) || row[0]]);
 const timestampRange = sheet.getRange(startRow, 1, appendData.length, 1);
 
-timestampRange.setNumberFormat("yyyy/mm/dd hh:mm");
+timestampRange.setNumberFormat(OHLCV_TIMESTAMP_NUMBER_FORMAT);
 timestampRange.setValues(timestampDateValues);
 
 SpreadsheetApp.flush();
@@ -8192,7 +8194,7 @@ function purgeInvalidOhlcvTimestampRowsInRange_(sheet, startRow, numRows, contex
 
   if (convertedRows > 0) {
     sheet.getRange(safeStartRow, 1, readRows, 1)
-      .setNumberFormat("yyyy/mm/dd hh:mm")
+      .setNumberFormat(OHLCV_TIMESTAMP_NUMBER_FORMAT)
       .setValues(timestampDateValues);
 
     SpreadsheetApp.flush();
@@ -8302,7 +8304,7 @@ function purgeInvalidOhlcvTimestampRows_(sheet, context, maxRows) {
 
   if (convertedRows > 0) {
     sheet.getRange(startRow, 1, scanRows, 1)
-      .setNumberFormat("yyyy/mm/dd hh:mm")
+      .setNumberFormat(OHLCV_TIMESTAMP_NUMBER_FORMAT)
       .setValues(timestampDateValues);
 
     SpreadsheetApp.flush();
@@ -10289,7 +10291,7 @@ function runOhlcvRecoveryTimestampNormalization_(dateKey, dryRun, reset) {
 
     if (!dryRun && convertedInChunk > 0) {
       const range = sh.getRange(state.nextRow, 1, numRows, 1);
-      range.setNumberFormat("yyyy/mm/dd hh:mm");
+      range.setNumberFormat(OHLCV_TIMESTAMP_NUMBER_FORMAT);
       range.setValues(timestampValues);
       SpreadsheetApp.flush();
     }
@@ -12132,7 +12134,7 @@ function processOhlcvTimestampCleanupChunk_(sheet, scanStartRow, cursor) {
 
   if (convertedRows > 0) {
     const timestampRange = sheet.getRange(startRow, 1, numRows, 1);
-    timestampRange.setNumberFormat("yyyy/mm/dd hh:mm");
+    timestampRange.setNumberFormat(OHLCV_TIMESTAMP_NUMBER_FORMAT);
     timestampRange.setValues(timestampValues);
     SpreadsheetApp.flush();
 

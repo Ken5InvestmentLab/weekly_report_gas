@@ -90,7 +90,7 @@ status, note, logged_at
 列: `timestamp, alert_id, symbol, open, high, low, close, volume`
 
 - timestamp は `09:00 JST`（AM代表）または `13:00 JST`（PM代表）のみ。`09:00` のゼロ埋め必須（`9:00` は不正）
-- A列 timestamp は Date オブジェクトとして書き込み、セル書式 `"yyyy/mm/dd hh:mm"` を設定する（テキスト形式 `"@"` は使わない）
+- A列 timestamp は Date オブジェクトとして書き込み、セル書式 `"yyyy/mm/dd hh:mm:ss"` を設定する（テキスト形式 `"@"` は使わない）
 - B列 `alert_id` に入るマーカー：通常取得は空文字/refresh ID、`MIDDAY_yyyy-mm-dd`（13:21先行取得）、`MIDDAY_LOCKED_yyyy-mm-dd`（AM保護行）、`PM_LOCKED_yyyy-mm-dd`（PM保護行）、`GAP_REPAIR`（ギャップ修復）、`GAP_FAILED`（取得失敗マーカー）
 - `MIDDAY_LOCKED_yyyy-mm-dd` は13:21で `alerts_raw` の出来高を転記したAM保護行。15:51本番・GAP修復・重複整理でも削除・上書き禁止
 - `PM_LOCKED_yyyy-mm-dd` は15:51本番で当日PMにBOTTOMシグナルが点灯した銘柄のPM行に付くマーカー。PM出来高=`alerts_raw` PM出来高で上書きされ、削除・上書き禁止
