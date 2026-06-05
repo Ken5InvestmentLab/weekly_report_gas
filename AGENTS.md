@@ -196,7 +196,7 @@ OVERLAP_DAYS = 3
 - POSTEDログの `Reason` は空欄にしない。
 - `Reason` には `材料インパクト` の `ラベル：根拠要約` をそのまま残し、`ファンダ要点` は追記しない。
 - Discord投稿URLが取得できた場合、プレミアムログの `Reason` は `材料インパクト` をMarkdownリンク化して記録する。
-- プレミアム投稿に銘柄別スキャンボタンを付ける場合は、`custom_id=premium_scan:<symbolCode>` / `label=🔍 <symbolCode> をスキャンする` を使い、`screening-bot` と同じDiscord Botアプリから投稿する。Webhook単体投稿では有効ボタンにならない。
+- プレミアム投稿に銘柄別スキャンボタンを付ける場合は、`custom_id=premium_scan:<symbolCode>` / `label=🔍 <symbolCode> をスキャンする` を使い、隣に `label=📊 チャートを見る` / `url=<Embedタイトルと同じTradingView URL>` のリンクボタンを置き、`screening-bot` と同じDiscord Botアプリから投稿する。Webhook単体投稿では有効ボタンにならない。
 
 ## デプロイ・実行方法
 

@@ -77,14 +77,22 @@ For safety, `PREMIUM_LOG_SPREADSHEET_ID` must be different from
 
 ---
 
-## Discord scan buttons
+## Discord premium buttons
 
-Premium posts include one Discord Button per alert when the worker can send the
-message with the screening-bot application token. The button uses:
+Premium posts include Discord Buttons per alert when the worker can send the
+message with the screening-bot application token. The scan button uses:
 
 ```text
 custom_id=premium_scan:<symbolCode>
 label=🔍 <symbolCode> をスキャンする
+```
+
+The worker also adds a URL button next to it:
+
+```text
+style=link
+label=📊 チャートを見る
+url=<same TradingView URL as the embed title link>
 ```
 
 Set `DISCORD_PREMIUM_BOT_TOKEN` to the same Discord bot token used by

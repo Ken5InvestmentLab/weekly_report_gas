@@ -39,6 +39,7 @@ const LIST_BULLET = "\u30fb";
 const DISCORD_COMPONENT_ACTION_ROW = 1;
 const DISCORD_COMPONENT_BUTTON = 2;
 const DISCORD_BUTTON_STYLE_SECONDARY = 2;
+const DISCORD_BUTTON_STYLE_LINK = 5;
 const DEFAULT_ALLOWED_HOURS = "13,15";
 const DEFAULT_ALLOWED_MINUTES_BY_HOUR = "13:00-13:10,15:30-15:40";
 const DEFAULT_SIGNAL_TYPES = "BOTTOM";
@@ -186,7 +187,7 @@ async function post(opts) {
         username: env("DISCORD_PREMIUM_USERNAME") || "天底極致 Premium Report",
         allowed_mentions: { parse: [] },
         embeds: [embed],
-        components: buildPremiumScanComponents(report, claim)
+        components: buildPremiumScanComponents(report, claim, embed.url)
       };
 
       if (dryRun) {
@@ -260,7 +261,7 @@ async function fail(opts) {
       username: env("DISCORD_PREMIUM_USERNAME") || "天底極致 Premium Report",
       allowed_mentions: { parse: [] },
       embeds: [embed],
-      components: buildPremiumScanComponents(claim, claim)
+      components: buildPremiumScanComponents(claim, claim, embed.url)
     };
     assertNoInvestmentAdvice(JSON.stringify(payload));
 
@@ -1764,24 +1765,45 @@ function assertNoInvestmentAdvice(text) {
   }
 }
 
-function buildPremiumScanComponents(report = {}, claim = {}) {
+function buildPremiumScanComponents(report = {}, claim = {}, embedUrl = "") {
+  const chartUrl = normalizeTradingViewUrl(String(embedUrl || report.url || claim.tradingViewUrl || ""));
   const symbolCode = String(
     report.symbolCode ||
     claim.symbolCode ||
-    extractSymbolCodeFromUrl(report.url || claim.tradingViewUrl || "")
+    extractSymbolCodeFromUrl(chartUrl || report.url || claim.tradingViewUrl || "")
   ).trim().toUpperCase();
 
   if (!/^\d{3,4}[A-Z]?$/.test(symbolCode)) return [];
 
+  const components = [{
+    type: DISCORD_COMPONENT_BUTTON,
+    style: DISCORD_BUTTON_STYLE_SECONDARY,
+    custom_id: `${PREMIUM_SCAN_BUTTON_PREFIX}${symbolCode}`,
+    label: `🔍 ${symbolCode} をスキャンする`
+  }];
+
+  if (isTradingViewUrl(chartUrl)) {
+    components.push({
+      type: DISCORD_COMPONENT_BUTTON,
+      style: DISCORD_BUTTON_STYLE_LINK,
+      label: "📊 チャートを見る",
+      url: chartUrl
+    });
+  }
+
   return [{
     type: DISCORD_COMPONENT_ACTION_ROW,
-    components: [{
-      type: DISCORD_COMPONENT_BUTTON,
-      style: DISCORD_BUTTON_STYLE_SECONDARY,
-      custom_id: `${PREMIUM_SCAN_BUTTON_PREFIX}${symbolCode}`,
-      label: `🔍 ${symbolCode} をスキャンする`
-    }]
+    components
   }];
+}
+
+function isTradingViewUrl(value) {
+  try {
+    const url = new URL(String(value || ""));
+    return /(^|\.)tradingview\.com$/i.test(url.hostname);
+  } catch {
+    return false;
+  }
 }
 
 function hasInteractiveComponents(payload) {
@@ -3059,12 +3081,20 @@ function selfTest() {
   assert.ok(parseReceivedAtMs("2026/05/01 23:59:59") <= cutoff);
   assert.ok(parseReceivedAtMs("2026/05/02 00:00:00") > cutoff);
   assert.equal(extractSymbolCodeFromUrl("https://www.tradingview.com/chart/?symbol=TYO%3A8285"), "8285");
-  const scanComponents = buildPremiumScanComponents({ symbolCode: "3917" });
+  const scanComponents = buildPremiumScanComponents(
+    { symbolCode: "3917" },
+    {},
+    "https://www.tradingview.com/chart/?symbol=TSE%3A3917"
+  );
   assert.equal(scanComponents[0].type, DISCORD_COMPONENT_ACTION_ROW);
   assert.equal(scanComponents[0].components[0].type, DISCORD_COMPONENT_BUTTON);
   assert.equal(scanComponents[0].components[0].style, DISCORD_BUTTON_STYLE_SECONDARY);
   assert.equal(scanComponents[0].components[0].custom_id, "premium_scan:3917");
   assert.equal(scanComponents[0].components[0].label, "🔍 3917 をスキャンする");
+  assert.equal(scanComponents[0].components[1].type, DISCORD_COMPONENT_BUTTON);
+  assert.equal(scanComponents[0].components[1].style, DISCORD_BUTTON_STYLE_LINK);
+  assert.equal(scanComponents[0].components[1].label, "📊 チャートを見る");
+  assert.equal(scanComponents[0].components[1].url, "https://www.tradingview.com/chart/?symbol=TSE%3A3917");
   assert.deepEqual(buildPremiumScanComponents({ symbolCode: "BAD" }), []);
   const yahooDisclosure = parseYahooFinanceDisclosureText(
     "Full-year earnings 5/11 15:30 TDnet PDF (348KB)",

@@ -421,14 +421,16 @@ with `--alert-id`; otherwise keep regenerating grounded reports.
 
 `node premium_worker/worker.mjs post --input premium_worker/out/premium_reports.json`
 
-The real post must preserve the worker-generated scan button component when
+The real post must preserve the worker-generated button components when
 Discord bot posting is configured. Each premium alert should show an enabled
-button with `custom_id` `premium_scan:<symbolCode>` and label
-`🔍 <symbolCode> をスキャンする`. The 13:05 and 15:36 automations use the same
-worker, so this button behavior applies to both posting windows. If the local
-environment lacks the bot token/channel settings, the worker will warn and fall
-back to webhook posting without components; fix the local configuration instead
-of treating the buttonless post as the intended premium format.
+scan button with `custom_id` `premium_scan:<symbolCode>` and label
+`🔍 <symbolCode> をスキャンする`, plus a neighboring link button labeled
+`📊 チャートを見る` whose URL matches the embed title's TradingView URL. The
+13:05 and 15:36 automations use the same worker, so this button behavior applies
+to both posting windows. If the local environment lacks the bot token/channel
+settings, the worker will warn and fall back to webhook posting without
+components; fix the local configuration instead of treating the buttonless post
+as the intended premium format.
 11. If a report cannot be grounded with at least one source URL, run the `fail`
     command to post a 様子見 stub:
 
