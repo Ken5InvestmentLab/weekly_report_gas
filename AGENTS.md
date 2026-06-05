@@ -347,7 +347,8 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 | `DAILY_MAINT_CURSOR` | 日次メンテナンス再開カーソル |
 | `DAILY_MAINT_NEW_COUNT` | 日次メンテナンス用の新規件数メタ |
 | `DAILY_MAINT_REFRESH_ID` | 日次メンテナンス用の取得IDメタ |
-| `QUICK_REPAIR_STATE` | GAP修復の再開状態。v7 |
+| `QUICK_REPAIR_STATE` | GAP修復の再開状態。v8 |
+| `QUICK_REPAIR_PENDING_GROUPS_V1_COUNT` / `QUICK_REPAIR_PENDING_GROUPS_V1_CHUNK_*` | GAP修復の初回スキャン済み補填候補グループ。resume時の全体再スキャン防止用 |
 | `QUICK_REPAIR_TAIL_CLEANUP_STATE` | GAP修復入口の末尾不正timestamp掃除状態 |
 | `OHLCV_POST_REPAIR_CLEANUP_STATE_V1` | GAP修復完了後の小分けcleanup状態 |
 | `OHLCV_POST_REPAIR_FINAL_SORT_STATE_V1` | GAP修復後cleanup完了後の最終sort・GitHub Actions・Discord通知の再開状態 |
@@ -533,9 +534,10 @@ refetchSymbolRange(symbols, startDate, endDate)
 - `quickScanMissingSessions()` で未処理のセッション不足だけを抽出する。
 - 対象銘柄・対象日付グループだけ Yahoo Finance から再取得する。
 - 取得は `UrlFetchApp.fetchAll` を使う。
-- 進捗は `QUICK_REPAIR_STATE` v7 に保存する。
+- 進捗は `QUICK_REPAIR_STATE` v8 に保存する。
+- 初回スキャンで得た補填候補グループは `QUICK_REPAIR_PENDING_GROUPS_V1_*` に分割保存し、`resumeQuickRepair` は保存済み候補から再開する。タイムアウト再開ごとに908銘柄級の直近全体スキャンへ戻さない。
 - 再開位置は、実際に処理を通過した銘柄グループの `lastProcessedSymbol` を使う。
-- 再開時は直近スキャンをやり直し、既に埋まったグループやマーカー付き未充足日は再取得対象から外す。
+- 補填バッチ直前に、処理対象の銘柄・日付だけ `buildRecentSessionInfoForTasks_()` で再確認し、既に埋まったグループやマーカー付き未充足日は再取得対象から外す。
 - 修復行はB列に `GAP_REPAIR` を入れる。
 - 自動GAP修復でYahooから十分な1h足が返らない日は、原則として `GAP_FAILED` を作らずログに残して次回以降の正規再取得対象にする。
 - GAP修復の日足フォールバックでは、AM/PM別出来高を50/50や差分で推定しない。日足出来高が既存片側で説明できる場合、または日足出来高0の場合だけ欠損側を `volume=0` で補完し、正の出来高をどちらのセッションに置くか判断できない場合は欠損側に `GAP_FAILED` を置く。
@@ -667,7 +669,7 @@ GASの実行上限は約6分。長時間処理は必ず再開可能にする。
 - Do not run `sortOhlcvSheetByTimestampSafe_()` from the full-sheet cleanup initializer; rely on the existing A-column sort invariant and reserve explicit sorts for dedicated repair/final cleanup paths.
 - Keep full-sheet duplicate cleanup batches small and well under the GAS limit; before scheduling the next `resumeCleanupOhlcvDuplicates` trigger, delete existing triggers for that same handler to avoid hitting the Apps Script trigger cap.
 - Use `cleanupOhlcvDuplicateResumeTriggersOnly()` to remove stuck duplicate-cleanup resume triggers while preserving the current cleanup state.
-- GAP修復・監査はA列 timestamp 昇順を前提に末尾から直近分だけを読む。
+- GAP修復の初回候補スキャン・監査はA列 timestamp 昇順を前提に末尾から直近分だけを読む。GAP修復resume中の補填バッチ確認は、保存済み候補の対象日付レンジと末尾保険だけを読む。
 - `getRange(2, 1, lastRow - 1, ...)` の全行読みをGAP系に追加しない。
 - 株式分割調整で `ohlcv_4h` を更新する場合は、C列 `symbol` を `TextFinder` などで絞って対象銘柄の行だけ処理する。
 - 過去OHLCV全履歴補正のような大規模修復でも、実行冒頭に `ohlcv_4h` 全行を読んで対象マップを作らない。行チャンク単位で読み、チャンク内の銘柄を小分けfetchし、進捗をスクリプトプロパティに保存する。

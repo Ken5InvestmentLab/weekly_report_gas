@@ -6429,6 +6429,7 @@ function resetAllOhlcvProperties() {
   props.deleteProperty(OHLCV_POST_REPAIR_CLEANUP_STATE_KEY);
   props.deleteProperty(OHLCV_POST_REPAIR_FINAL_SORT_STATE_KEY);
   props.deleteProperty(OHLCV_INTRADAY_STALE_SYMBOLS_KEY);
+  clearQuickRepairPendingGroups_(props);
   deleteTriggersByHandler_("resumeOHLCVFetch");
   deleteTriggersByHandler_(OHLCV_POST_REPAIR_CLEANUP_HANDLER);
   deleteTriggersByHandler_(OHLCV_POST_REPAIR_FINAL_SORT_HANDLER);
@@ -6528,8 +6529,10 @@ function repairEmptyTimestampRows(dryRun) {
     setOhlcvRepairSymbols_(repairSymbols);
     console.log(`[repair] ${repairSymbols.length}銘柄を OHLCV_REPAIR_SYMBOLS に記録しました`);
   }
-  PropertiesService.getScriptProperties().deleteProperty(QUICK_REPAIR_STATE_KEY);
-  PropertiesService.getScriptProperties().deleteProperty(QUICK_REPAIR_CLEANUP_STATE_KEY);
+  const props = PropertiesService.getScriptProperties();
+  props.deleteProperty(QUICK_REPAIR_STATE_KEY);
+  props.deleteProperty(QUICK_REPAIR_CLEANUP_STATE_KEY);
+  clearQuickRepairPendingGroups_(props);
 
   console.log(`[repair] 完了`);
   return summary;
@@ -6710,6 +6713,9 @@ function refetchSymbolRange(options) {
 // ============================================================
 
 const QUICK_REPAIR_STATE_KEY = "QUICK_REPAIR_STATE";
+const QUICK_REPAIR_PENDING_GROUPS_COUNT_KEY = "QUICK_REPAIR_PENDING_GROUPS_V1_COUNT";
+const QUICK_REPAIR_PENDING_GROUPS_PREFIX = "QUICK_REPAIR_PENDING_GROUPS_V1_CHUNK_";
+const QUICK_REPAIR_PENDING_GROUPS_CHUNK_CHARS = 7000;
 const QUICK_REPAIR_FAIL_COUNTS_KEY = "QUICK_REPAIR_FAIL_COUNTS_V1";
 // 同じ symbol|date が連続でこの回数 0 行返却となったら GAP_FAILED を書き込み、ループを断つ
 const QUICK_REPAIR_FAIL_THRESHOLD = 3;
@@ -6720,7 +6726,7 @@ const QUICK_REPAIR_MAX_RUN_MS = 3.5 * 60 * 1000;
 const QUICK_REPAIR_RESUME_AFTER_MS = 10 * 1000;
 const QUICK_REPAIR_SAFETY_AFTER_MS = 7 * 60 * 1000;
 const QUICK_REPAIR_LOCK_WAIT_MS = 5000;
-const QUICK_REPAIR_STATE_VERSION = 7;
+const QUICK_REPAIR_STATE_VERSION = 8;
 const QUICK_REPAIR_SCAN_BUDGET_MS = 75 * 1000;
 const QUICK_REPAIR_SCAN_ROWS_PER_SYMBOL_DAY = 5;
 const QUICK_REPAIR_SCAN_MIN_ROWS = 25000;
@@ -7790,7 +7796,7 @@ function quickScanMissingSessions(daysBack = 14, minSessions = 2, options) {
   symbols.forEach(sym => symbolLookup[sym] = true);
 
   // ohlcv_4h はA列(timestamp)昇順に整列している前提。直近分だけを末尾から読む。
-  const values = readRecentOhlcvRowsByTimestamp_(sh, cutoffDateKey, nowDateKey, 8, {
+  const values = readRecentOhlcvRowsByTimestamp_(sh, cutoffDateKey, nowDateKey, 3, {
     deadlineMs: opts.deadlineMs || 0,
     maxRows: opts.maxRows || getQuickRepairRecentScanMaxRows_(symbols.length, daysBack)
   });
@@ -7837,7 +7843,7 @@ function quickScanMissingSessions(daysBack = 14, minSessions = 2, options) {
     if (!period) continue;
     if (!periodMap[key]) periodMap[key] = {};
     periodMap[key][period] = true;
-    addOhlcvSessionDetail_(detailMap, key, row);
+    if (row.length >= 8) addOhlcvSessionDetail_(detailMap, key, row);
     countMap[key] = Object.keys(periodMap[key]).length;
     if (alertId === "GAP_REPAIR") {
       hasGapMarker[key] = true;
@@ -8064,6 +8070,81 @@ function countQuickRepairGroupTasks_(groups) {
   return (groups || []).reduce((sum, g) => sum + (g.dates ? g.dates.length : 0), 0);
 }
 
+function normalizeQuickRepairPendingGroups_(groups) {
+  const normalized = [];
+  (groups || []).forEach(group => {
+    const symbol = String(group && group.symbol || "").trim();
+    if (!symbol) return;
+    const seenDates = {};
+    (group.dates || []).forEach(dateStr => {
+      const normalizedDate = normalizeDateStrSlash_(dateStr);
+      if (normalizedDate) seenDates[normalizedDate] = true;
+    });
+    const dates = Object.keys(seenDates).sort();
+    if (dates.length > 0) normalized.push({ symbol: symbol, dates: dates });
+  });
+  return normalized.sort((a, b) => {
+    const as = String(a.symbol);
+    const bs = String(b.symbol);
+    if (as < bs) return -1;
+    if (as > bs) return 1;
+    return 0;
+  });
+}
+
+function clearQuickRepairPendingGroups_(props) {
+  const p = props || PropertiesService.getScriptProperties();
+  try {
+    const all = p.getProperties();
+    Object.keys(all || {}).forEach(key => {
+      if (key === QUICK_REPAIR_PENDING_GROUPS_COUNT_KEY || key.indexOf(QUICK_REPAIR_PENDING_GROUPS_PREFIX) === 0) {
+        p.deleteProperty(key);
+      }
+    });
+  } catch (e) {
+    p.deleteProperty(QUICK_REPAIR_PENDING_GROUPS_COUNT_KEY);
+  }
+}
+
+function writeQuickRepairPendingGroups_(props, groups) {
+  const p = props || PropertiesService.getScriptProperties();
+  const normalized = normalizeQuickRepairPendingGroups_(groups);
+  clearQuickRepairPendingGroups_(p);
+  if (normalized.length === 0) {
+    return { groups: 0, tasks: 0, chunks: 0, chars: 0 };
+  }
+  const raw = JSON.stringify(normalized);
+  const chunkSize = Math.max(1000, QUICK_REPAIR_PENDING_GROUPS_CHUNK_CHARS);
+  const chunkCount = Math.ceil(raw.length / chunkSize);
+  for (let i = 0; i < chunkCount; i++) {
+    p.setProperty(QUICK_REPAIR_PENDING_GROUPS_PREFIX + i, raw.slice(i * chunkSize, (i + 1) * chunkSize));
+  }
+  p.setProperty(QUICK_REPAIR_PENDING_GROUPS_COUNT_KEY, String(chunkCount));
+  return {
+    groups: normalized.length,
+    tasks: countQuickRepairGroupTasks_(normalized),
+    chunks: chunkCount,
+    chars: raw.length
+  };
+}
+
+function readQuickRepairPendingGroups_(props) {
+  const p = props || PropertiesService.getScriptProperties();
+  const chunkCount = Math.max(0, Number(p.getProperty(QUICK_REPAIR_PENDING_GROUPS_COUNT_KEY)) || 0);
+  if (chunkCount <= 0) return null;
+  let raw = "";
+  for (let i = 0; i < chunkCount; i++) {
+    const chunk = p.getProperty(QUICK_REPAIR_PENDING_GROUPS_PREFIX + i);
+    if (chunk == null) return null;
+    raw += chunk;
+  }
+  try {
+    return normalizeQuickRepairPendingGroups_(JSON.parse(raw));
+  } catch (e) {
+    return null;
+  }
+}
+
 function createQuickRepairState_(version, businessDate, daysBack, minSessions) {
   return {
     version: version,
@@ -8086,6 +8167,11 @@ function createQuickRepairState_(version, businessDate, daysBack, minSessions) {
     batches: 0,
     lastScanSymbols: 0,
     lastScanTasks: 0,
+    pendingGroupsReady: false,
+    pendingGroupCount: 0,
+    pendingTaskCount: 0,
+    pendingGroupsChunks: 0,
+    pendingGroupsChars: 0,
     lastProcessedSymbol: "",
     startedAt: new Date().toISOString()
   };
@@ -9599,8 +9685,11 @@ function quickRepairRecentGaps(options) {
     const ohlcvSh = ss.getSheetByName(CONFIG.OHLCV_SHEET);
     if (!ohlcvSh) throw new Error("ohlcv_4h シートが見つかりません");
 
-    const state = loadQuickRepairResumeState_(props, STATE_VERSION, businessDateKey, daysBack, minSessions)
-      || createQuickRepairState_(STATE_VERSION, businessDateKey, daysBack, minSessions);
+    let state = loadQuickRepairResumeState_(props, STATE_VERSION, businessDateKey, daysBack, minSessions);
+    if (!state) {
+      clearQuickRepairPendingGroups_(props);
+      state = createQuickRepairState_(STATE_VERSION, businessDateKey, daysBack, minSessions);
+    }
     props.setProperty(QUICK_REPAIR_STATE_KEY, JSON.stringify(state));
     const totalRowsAtRunStart = Number(state.totalRows || 0);
 
@@ -9609,33 +9698,72 @@ function quickRepairRecentGaps(options) {
       startTime + QUICK_REPAIR_SCAN_BUDGET_MS,
       startTime + QUICK_REPAIR_MAX_RUN_MS - DEDUPE_GUARD_MS
     );
-    const entryCleanup = maybePurgeInvalidOhlcvTimestampRows_(ohlcvSh, "quickRepairRecentGaps.entry", QUICK_REPAIR_ENTRY_CLEANUP_ROWS, businessDateKey);
-    if ((entryCleanup.deletedRows || 0) > 0) {
-      writeProcessLog_("ギャップ修復", "入口で空・無効timestamp行を削除したため、今回のスキャンはクリーンな状態で続行します。", entryCleanup);
+    let groups = null;
+    let tasks = [];
+    let usingSavedGroups = false;
+    if (state.pendingGroupsReady === true) {
+      groups = readQuickRepairPendingGroups_(props);
+      if (groups && groups.length > 0) {
+        usingSavedGroups = true;
+        tasks = flattenQuickRepairGroupsToTasks_(groups);
+        writeProcessLog_("ギャップ修復", "保存済みの補填候補からGAP修復を再開します。全体スキャンはスキップします。", {
+          pendingGroups: groups.length,
+          pendingTasks: tasks.length,
+          chunks: state.pendingGroupsChunks || 0,
+          lastProcessedSymbol: state.lastProcessedSymbol || ""
+        });
+      } else {
+        clearQuickRepairPendingGroups_(props);
+        state.pendingGroupsReady = false;
+        state.pendingGroupCount = 0;
+        state.pendingTaskCount = 0;
+        state.pendingGroupsChunks = 0;
+        state.pendingGroupsChars = 0;
+        state.updatedAt = new Date().toISOString();
+        props.setProperty(QUICK_REPAIR_STATE_KEY, JSON.stringify(state));
+        writeProcessLog_("ギャップ修復", "保存済みの補填候補を読めなかったため、候補スキャンからやり直します。", {
+          businessDate: businessDateKey
+        });
+      }
     }
-    const scan = quickScanMissingSessions(daysBack, minSessions, { deadlineMs: scanDeadlineMs });
-    if (scan.incomplete) {
-      state.deferredDates += 1;
+
+    if (!groups) {
+      const entryCleanup = maybePurgeInvalidOhlcvTimestampRows_(ohlcvSh, "quickRepairRecentGaps.entry", QUICK_REPAIR_ENTRY_CLEANUP_ROWS, businessDateKey);
+      if ((entryCleanup.deletedRows || 0) > 0) {
+        writeProcessLog_("ギャップ修復", "入口で空・無効timestamp行を削除したため、今回のスキャンはクリーンな状態で続行します。", entryCleanup);
+      }
+      const scan = quickScanMissingSessions(daysBack, minSessions, { deadlineMs: scanDeadlineMs });
+      if (scan.incomplete) {
+        state.deferredDates += 1;
+        state.updatedAt = new Date().toISOString();
+        props.setProperty(QUICK_REPAIR_STATE_KEY, JSON.stringify(state));
+        scheduleQuickRepairResume_(QUICK_REPAIR_RESUME_AFTER_MS);
+        return {
+          ok: true,
+          incomplete: true,
+          reason: scan.reason || "scan_incomplete",
+          scanStats: scan.scanStats || {}
+        };
+      }
+      tasks = flattenMissingTasks_(scan.details);
+      groups = groupQuickRepairTasksBySymbol_(tasks);
+      const pendingWrite = writeQuickRepairPendingGroups_(props, groups);
+      state.lastScanSymbols = scan.count;
+      state.lastScanTasks = tasks.length;
+      state.pendingGroupsReady = groups.length > 0;
+      state.pendingGroupCount = groups.length;
+      state.pendingTaskCount = tasks.length;
+      state.pendingGroupsChunks = pendingWrite.chunks || 0;
+      state.pendingGroupsChars = pendingWrite.chars || 0;
       state.updatedAt = new Date().toISOString();
       props.setProperty(QUICK_REPAIR_STATE_KEY, JSON.stringify(state));
-      scheduleQuickRepairResume_(QUICK_REPAIR_RESUME_AFTER_MS);
-      return {
-        ok: true,
-        incomplete: true,
-        reason: scan.reason || "scan_incomplete",
-        scanStats: scan.scanStats || {}
-      };
+      writeProcessLog_("ギャップ修復", `補填候補をスキャンしました。対象銘柄グループは ${groups.length}、対象日数は ${tasks.length} です。`, {
+        groups: groups.length,
+        tasks: tasks.length,
+        pendingGroupChunks: pendingWrite.chunks || 0,
+        pendingGroupChars: pendingWrite.chars || 0
+      });
     }
-    const tasks = flattenMissingTasks_(scan.details);
-    const groups = groupQuickRepairTasksBySymbol_(tasks);
-    state.lastScanSymbols = scan.count;
-    state.lastScanTasks = tasks.length;
-    state.updatedAt = new Date().toISOString();
-    props.setProperty(QUICK_REPAIR_STATE_KEY, JSON.stringify(state));
-    writeProcessLog_("ギャップ修復", `補填候補をスキャンしました。対象銘柄グループは ${groups.length}、対象日数は ${tasks.length} です。`, {
-      groups: groups.length,
-      tasks: tasks.length
-    });
 
     if (groups.length === 0) {
       writeProcessLog_("GAP_REPAIR", "No gap rows needed. Scheduling post-repair cleanup instead of inline full dedupe/sort.", { rowsAddedThisRun: state.totalRows });
@@ -9648,9 +9776,8 @@ function quickRepairRecentGaps(options) {
       });
     }
 
-    const sessionInfo = scan.sessionInfo || { countMap: {}, periodMap: {}, markerMap: {} };
     let groupIndex = findQuickRepairStartGroupIndex_(groups, state.lastProcessedSymbol);
-    if (groupIndex > 0) {
+    if (groupIndex > 0 || usingSavedGroups) {
       writeProcessLog_("ギャップ修復", "保存済みの再開位置からGAP修復を続行します。", {
         lastProcessedSymbol: state.lastProcessedSymbol || "",
         resumeGroupIndex: groupIndex,
@@ -9662,6 +9789,21 @@ function quickRepairRecentGaps(options) {
 
       const batchGroups = groups.slice(groupIndex, groupIndex + batchSymbols);
       const batchTasks = flattenQuickRepairGroupsToTasks_(batchGroups);
+      const sessionInfo = buildRecentSessionInfoForTasks_(ohlcvSh, batchTasks, daysBack, {
+        deadlineMs: startTime + QUICK_REPAIR_MAX_RUN_MS - DEDUPE_GUARD_MS
+      });
+      if (sessionInfo.incomplete) {
+        state.stopReason = "session_info_scan_incomplete";
+        state.updatedAt = new Date().toISOString();
+        props.setProperty(QUICK_REPAIR_STATE_KEY, JSON.stringify(state));
+        scheduleQuickRepairResume_(QUICK_REPAIR_RESUME_AFTER_MS);
+        writeProcessLog_("ギャップ修復", "補填バッチの既存セッション確認が時間内に終わらなかったため、保存済み候補のまま次回へ回します。", {
+          groupIndex: groupIndex,
+          totalGroups: groups.length,
+          scanStats: sessionInfo.scanStats || {}
+        });
+        return { ok: true, incomplete: true, reason: "session_info_scan_incomplete", groupIndex: groupIndex, totalGroups: groups.length };
+      }
       writeProcessLog_("ギャップ修復", `不足セッションを補填中です。銘柄グループ ${groupIndex + 1}〜${groupIndex + batchGroups.length} / ${groups.length} を処理します。`, {
         tasks: batchTasks.length
       });
@@ -9800,11 +9942,13 @@ function resumeQuickRepair() {
  * クイック修復の進捗状態をリセットする（手動用）
  */
 function resetQuickRepairState() {
-  PropertiesService.getScriptProperties().deleteProperty(QUICK_REPAIR_STATE_KEY);
-  PropertiesService.getScriptProperties().deleteProperty(QUICK_REPAIR_CLEANUP_STATE_KEY);
-  PropertiesService.getScriptProperties().deleteProperty(OHLCV_POST_REPAIR_CLEANUP_STATE_KEY);
-  PropertiesService.getScriptProperties().deleteProperty(OHLCV_POST_REPAIR_FINAL_SORT_STATE_KEY);
-  PropertiesService.getScriptProperties().deleteProperty(QUICK_REPAIR_FAIL_COUNTS_KEY);
+  const props = PropertiesService.getScriptProperties();
+  props.deleteProperty(QUICK_REPAIR_STATE_KEY);
+  props.deleteProperty(QUICK_REPAIR_CLEANUP_STATE_KEY);
+  props.deleteProperty(OHLCV_POST_REPAIR_CLEANUP_STATE_KEY);
+  props.deleteProperty(OHLCV_POST_REPAIR_FINAL_SORT_STATE_KEY);
+  props.deleteProperty(QUICK_REPAIR_FAIL_COUNTS_KEY);
+  clearQuickRepairPendingGroups_(props);
   deleteTriggersByHandler_("resumeQuickRepair");
   deleteTriggersByHandler_("quickRepairTrigger");
   deleteTriggersByHandler_(OHLCV_POST_REPAIR_CLEANUP_HANDLER);
@@ -10109,44 +10253,86 @@ function buildRecentSessionInfoForTasks_(sheet, tasks, daysBack, options) {
   tasks.forEach(t => {
     targetSymbols[t.symbol] = true;
     const dayKey = toJstDayKeyFromDateStr_(t.dateStr);
-    if (dayKey !== null) targetDayToDateStr[dayKey] = t.dateStr;
+    if (dayKey !== null) targetDayToDateStr[dayKey] = normalizeDateStrSlash_(t.dateStr);
   });
 
-  const now = getOhlcvBusinessDate_();
-  const cutoff = new Date(now.getTime() - daysBack * 24 * 60 * 60 * 1000);
-  const cutoffDateKey = Utilities.formatDate(cutoff, CONFIG.TIMEZONE, "yyyy/MM/dd");
-  const nowDateKey = Utilities.formatDate(now, CONFIG.TIMEZONE, "yyyy/MM/dd");
-  const values = readRecentOhlcvRowsByTimestamp_(sheet, cutoffDateKey, nowDateKey, 8, {
-    deadlineMs: opts.deadlineMs || 0,
-    maxRows: opts.maxRows || getQuickRepairRecentScanMaxRows_(Object.keys(targetSymbols).length, daysBack)
-  });
-  const scanStats = values.scanStats || {};
-  if (scanStats.complete === false) {
-    info.incomplete = true;
-    info.scanStats = scanStats;
-    return info;
-  }
+  const addRowsToInfo = rows => {
+    for (const row of rows || []) {
+      const ts = normalizeOhlcvTimestamp_(row[0]);
+      const alertId = String(row[1] || "").trim();
+      const sym = String(row[2] || "").trim();
+      if (!isValidOhlcvTimestamp_(ts) || !sym || !targetSymbols[sym]) continue;
 
-  for (const row of values) {
-const ts = normalizeOhlcvTimestamp_(row[0]);
-const alertId = String(row[1] || "").trim();
-const sym = String(row[2] || "").trim();
-if (!isValidOhlcvTimestamp_(ts) || !sym || !targetSymbols[sym]) continue;
+      const rowDateStr = targetDayToDateStr[toJstDayKeyFromDate_(ts)];
+      if (!rowDateStr) continue;
+      const key = sym + "|" + rowDateStr;
 
-    const rowDateStr = targetDayToDateStr[toJstDayKeyFromDate_(ts)];
-    if (!rowDateStr) continue;
-    const key = sym + "|" + rowDateStr;
+      if (alertId === "GAP_FAILED") {
+        info.markerMap[key] = true;
+        continue;
+      }
+      if (alertId === "GAP_REPAIR") info.markerMap[key] = true;
 
-    if (alertId === "GAP_FAILED") {
-      info.markerMap[key] = true;
-      continue;
+      addSessionPeriod_(info.periodMap, key, getOhlcvSessionName_(ts));
+      addOhlcvSessionDetail_(info.detailMap, key, row);
+      info.countMap[key] = countSessionPeriods_(info.periodMap, key);
     }
-    if (alertId === "GAP_REPAIR") info.markerMap[key] = true;
+  };
 
-    addSessionPeriod_(info.periodMap, key, getOhlcvSessionName_(ts));
-    addOhlcvSessionDetail_(info.detailMap, key, row);
-    info.countMap[key] = countSessionPeriods_(info.periodMap, key);
+  const lastRow = sheet ? sheet.getLastRow() : 0;
+  const deadlineMs = Math.max(0, Number(opts.deadlineMs) || 0);
+  const stats = {
+    complete: true,
+    scannedRows: 0,
+    rangeCount: 0,
+    targetDates: Object.keys(targetDayToDateStr).length,
+    mode: "date_bucket_with_tail",
+    stoppedBy: ""
+  };
+
+  const dayKeys = Object.keys(targetDayToDateStr).sort((a, b) => Number(a) - Number(b));
+  for (let i = 0; i < dayKeys.length; i++) {
+    if (deadlineMs && deadlineMs - Date.now() < QUICK_REPAIR_MIN_READ_REMAINING_MS) {
+      info.incomplete = true;
+      stats.complete = false;
+      stats.stoppedBy = "deadline";
+      info.scanStats = stats;
+      return info;
+    }
+    const range = getOhlcvDateRangeRows_(sheet, targetDayToDateStr[dayKeys[i]], lastRow, deadlineMs);
+    if (range.incomplete) {
+      info.incomplete = true;
+      stats.complete = false;
+      stats.stoppedBy = range.stoppedBy || "deadline";
+      info.scanStats = stats;
+      return info;
+    }
+    if (range.numRows <= 0) continue;
+    const values = sheet.getRange(range.startRow, 1, range.numRows, 8).getValues();
+    stats.scannedRows += range.numRows;
+    stats.rangeCount++;
+    addRowsToInfo(values);
   }
+
+  const fallbackTailRows = Math.max(0, Number(opts.fallbackTailRows) || OHLCV_APPEND_GUARD_FALLBACK_TAIL_ROWS);
+  const tailRows = Math.min(fallbackTailRows, Math.max(0, lastRow - 1));
+  if (tailRows > 0) {
+    if (deadlineMs && deadlineMs - Date.now() < QUICK_REPAIR_MIN_READ_REMAINING_MS) {
+      info.incomplete = true;
+      stats.complete = false;
+      stats.stoppedBy = "deadline";
+      info.scanStats = stats;
+      return info;
+    }
+    const tailStart = lastRow - tailRows + 1;
+    const tailValues = sheet.getRange(tailStart, 1, tailRows, 8).getValues();
+    stats.scannedRows += tailRows;
+    stats.rangeCount++;
+    stats.tailRows = tailRows;
+    addRowsToInfo(tailValues);
+  }
+
+  info.scanStats = stats;
   return info;
 }
 
@@ -10483,6 +10669,7 @@ function scheduleQuickRepairTriggerAfterCleanup_(cleanupSummary) {
   props.deleteProperty(QUICK_REPAIR_CLEANUP_STATE_KEY);
   props.deleteProperty(OHLCV_POST_REPAIR_CLEANUP_STATE_KEY);
   props.deleteProperty(OHLCV_POST_REPAIR_FINAL_SORT_STATE_KEY);
+  clearQuickRepairPendingGroups_(props);
   deleteTriggersByHandler_("resumeQuickRepair");
   deleteTriggersByHandler_("quickRepairTrigger");
   deleteTriggersByHandler_(OHLCV_POST_REPAIR_CLEANUP_HANDLER);
@@ -10584,6 +10771,7 @@ function cleanupLegacyGapFailedAndEmptyTimestamps(dryRun) {
         SpreadsheetApp.flush();
         PropertiesService.getScriptProperties().deleteProperty(QUICK_REPAIR_STATE_KEY);
         PropertiesService.getScriptProperties().deleteProperty(QUICK_REPAIR_CLEANUP_STATE_KEY);
+        clearQuickRepairPendingGroups_(PropertiesService.getScriptProperties());
       }
       if (!isDryRun) {
         summary.autoQuickRepair = scheduleQuickRepairTriggerAfterCleanup_(summary);
@@ -10681,6 +10869,7 @@ function emergencyStopQuickRepairAndCleanOhlcv() {
   props.deleteProperty(QUICK_REPAIR_CLEANUP_STATE_KEY);
   props.deleteProperty(OHLCV_POST_REPAIR_CLEANUP_STATE_KEY);
   props.deleteProperty(OHLCV_POST_REPAIR_FINAL_SORT_STATE_KEY);
+  clearQuickRepairPendingGroups_(props);
   props.setProperty(CLEANUP_LEGACY_AUTO_QUICK_REPAIR_KEY, "1");
 
   const result = cleanupLegacyGapFailedAndEmptyTimestamps(false);
@@ -13933,6 +14122,7 @@ function completeOhlcvPostRepairCleanup_(state) {
   clearOhlcvPostRepairCleanupState_();
   PropertiesService.getScriptProperties().deleteProperty(QUICK_REPAIR_STATE_KEY);
   PropertiesService.getScriptProperties().deleteProperty(QUICK_REPAIR_CLEANUP_STATE_KEY);
+  clearQuickRepairPendingGroups_(PropertiesService.getScriptProperties());
   deleteTriggersByHandler_("resumeQuickRepair");
   clearEarlyDedupTailCache_();
   clearManualOhlcvBusinessDate_();
@@ -14186,6 +14376,7 @@ function clearOhlcvPostRepairCleanupState_() {
 function finalizeQuickRepairWithPostCleanup_(props, state, completeSummary) {
   props.deleteProperty(QUICK_REPAIR_STATE_KEY);
   props.deleteProperty(QUICK_REPAIR_CLEANUP_STATE_KEY);
+  clearQuickRepairPendingGroups_(props);
   deleteTriggersByHandler_("resumeQuickRepair");
 
   const scheduled = scheduleOhlcvPostRepairCleanup_(completeSummary);
