@@ -223,14 +223,17 @@ If the disclosure file cannot be opened or the content cannot be verified, use
    KPIs, such as store sales, order backlog, utilization, ARR, churn, funding
    terms, or dilution/exercise pace.
    Do not use boilerplate that could be copied across symbols. `事業概要`
-   must name the actual business model, core product/service, customer segment,
-   or revenue driver for that company. Never write a company overview like
+   must only name the actual business, core product/service, operating format,
+   or customer segment for that company. Do not include revenue drivers, KPIs,
+   monthly sales, visitor count, unit price, margins, utilization, order backlog,
+   funding, shareholder returns, or phrases such as `収益を左右します` /
+   `業績を左右します` here; put those in `ファンダ要点`.
+   Never write a company overview like
    "開示資料で確認できる主要サービス・製品を中心に事業を展開する上場企業"
    or "直近の材料は、売上成長、利益率、資本政策、事業提携のどれに効くか".
    Also never write a company overview like `直近開示で示された事業領域を軸に`
    or `開示タイトルからは...材料になります`; that is not a business
-   description. Name the actual operation, product, customer, and revenue
-   driver.
+   description. Name only the actual operation, product, service, and customer.
    `足元材料` must explain why the selected
    disclosure matters for that specific company, such as SaaS ARR, store
    profitability, financing dilution, facility utilization, order backlog,
