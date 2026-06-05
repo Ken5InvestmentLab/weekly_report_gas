@@ -211,6 +211,12 @@ If the disclosure file cannot be opened or the content cannot be verified, use
    generic placeholder phrases such as `確認対象です`, `確認する局面です`,
    `確認したい局面です`, or `次回進捗待ちです` as the main
    content of `材料インパクト`, `足元材料`, `ファンダ要点`, or `注意点`.
+   Also do not use research-plan wording such as `今回の開示では...具体的に追います`,
+   `どこに効くか`, `見る必要があります`, `見ます`, `確認していきます`,
+   `確認したい`, `確認する局面`, `見たい`, `見極めたい`, `見極めが必要`,
+   or filler lead-ins such as
+   `読み取れる結果は`. The field name already tells
+   the reader this is analysis; write the conclusion directly.
    Instead, state what the disclosure means now: positive/negative/mixed
    effect, which KPI or risk moved, and what unresolved item remains.
    You may use `確認軸` only when it is attached to concrete company-specific
