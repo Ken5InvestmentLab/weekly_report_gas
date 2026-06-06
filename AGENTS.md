@@ -511,7 +511,7 @@ refetchSymbolRange(symbols, startDate, endDate)
 
 ### アーカイブ・削除
 
-- BOTTOMの `COMPLETE` 行は `BOTTOM_COMPLETED_RETENTION_DAYS = 7` 日後に `signals_archive` へ退避し、`alerts_raw` から削除する。
+- BOTTOMの `COMPLETE` 行は `eval_date_40bd` から `BOTTOM_ARCHIVE_AFTER_40BD_BUSINESS_DAYS = 5` 営業日後に `signals_archive` へ退避し、`alerts_raw` から削除する。
 - TOPの `COMPLETE` 行は `TOP_COMPLETED_RETENTION_DAYS = 30` 日後に退避する。
 - `signals_archive` は `SIGNAL_ARCHIVE_RETENTION_DAYS = 365` 日保持。
 - `ohlcv_4h` は365日超の古い行を `purgeOldOhlcvDataDaily()` で削除する。

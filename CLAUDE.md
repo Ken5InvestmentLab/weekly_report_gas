@@ -271,7 +271,7 @@ PHASE4: 重い重複削除を行わず取得フロー完了 → runDailyMaintena
 
 | 対象 | 保持期間 |
 |---|---|
-| BOTTOMの `COMPLETE` 行 | 完了後7日で `signals_archive` へ退避 |
+| BOTTOMの `COMPLETE` 行 | 40営業日後の評価日から5営業日後に `signals_archive` へ退避 |
 | TOPの `COMPLETE` 行 | 完了後30日で `signals_archive` へ退避 |
 | `signals_archive` | 365日 |
 | `ohlcv_4h` | 365日 |

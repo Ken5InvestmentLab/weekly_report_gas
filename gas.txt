@@ -6,7 +6,7 @@ const CONFIG = {
 
   SIGNAL_ARCHIVE_SHEET: "signals_archive",
   SIGNAL_ARCHIVE_RETENTION_DAYS: 365,
-  BOTTOM_COMPLETED_RETENTION_DAYS: 7,
+  BOTTOM_ARCHIVE_AFTER_40BD_BUSINESS_DAYS: 5,
 
   SIGN_VERSION: "v1",
   MAX_CLOCK_SKEW_MS: 4.5 * 60 * 1000,
@@ -1215,17 +1215,10 @@ function purgeArchivedRawRows_(sh) {
 
       const status = String(row[RAW_IDX.status] || "").trim();
       const signalType = String(row[RAW_IDX.signal_type] || "").trim().toUpperCase();
-      const loggedAt = row[RAW_IDX.logged_at] instanceof Date ? row[RAW_IDX.logged_at] : null;
 
       // 完了していないものは raw に残す
-      if (status !== "COMPLETE" || !loggedAt) continue;
-
-      const retentionDays = signalType === "TOP"
-        ? CONFIG.TOP_COMPLETED_RETENTION_DAYS
-        : CONFIG.BOTTOM_COMPLETED_RETENTION_DAYS;
-
-      const diffDays = (now.getTime() - loggedAt.getTime()) / (1000 * 60 * 60 * 24);
-      if (diffDays < retentionDays) continue;
+      if (status !== "COMPLETE") continue;
+      if (!isRawRowReadyForSignalsArchive_(row, signalType, now)) continue;
 
       const alertId = String(row[RAW_IDX.alert_id] || "").trim();
       if (!alertId) continue;
@@ -1277,6 +1270,20 @@ function purgeArchivedRawRows_(sh) {
       error: err && err.message ? err.message : String(err)
     };
   }
+}
+
+function isRawRowReadyForSignalsArchive_(row, signalType, now) {
+  if (signalType === "TOP") {
+    const loggedAt = row[RAW_IDX.logged_at] instanceof Date ? row[RAW_IDX.logged_at] : null;
+    if (!loggedAt) return false;
+    const diffDays = (now.getTime() - loggedAt.getTime()) / (1000 * 60 * 60 * 24);
+    return diffDays >= CONFIG.TOP_COMPLETED_RETENTION_DAYS;
+  }
+
+  const evalDate40bd = row[RAW_IDX.eval_date_40bd] instanceof Date ? row[RAW_IDX.eval_date_40bd] : null;
+  if (!evalDate40bd) return false;
+  const archiveDate = addBusinessDaysJst_(evalDate40bd, CONFIG.BOTTOM_ARCHIVE_AFTER_40BD_BUSINESS_DAYS);
+  return formatYmd_(now) >= formatYmd_(archiveDate);
 }
 
 function getExistingArchiveAlertIdSet_(archiveSh) {
