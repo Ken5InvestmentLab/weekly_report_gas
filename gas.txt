@@ -877,6 +877,45 @@ function triggerGitHubActionsOptimize_() {
   }
 }
 
+function triggerGitHubActionsMegaValidationReport_(context) {
+  const props = PropertiesService.getScriptProperties();
+  const token = props.getProperty("GITHUB_PAT");
+  const payloadContext = context || {};
+  if (!token) {
+    const skipped = { skipped: true, reason: "GITHUB_PAT未設定", context: payloadContext };
+    debugLogToSheet_("triggerMegaReport.skip", skipped);
+    return skipped;
+  }
+  const repo = "Ken5InvestmentLab/screening-bot";
+  const workflow = "mega-validation-report.yml";
+  const url = `https://api.github.com/repos/${repo}/actions/workflows/${workflow}/dispatches`;
+  try {
+    const res = UrlFetchApp.fetch(url, {
+      method: "post",
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28"
+      },
+      contentType: "application/json",
+      payload: JSON.stringify({ ref: "main" }),
+      muteHttpExceptions: true
+    });
+    const result = { status: res.getResponseCode(), workflow: workflow, context: payloadContext };
+    debugLogToSheet_("triggerMegaReport.result", result);
+    writeProcessLog_("GitHub Actions", "mega-validation-report.yml dispatch requested.", result);
+    return result;
+  } catch (err) {
+    const failed = {
+      error: err && err.message ? err.message : String(err),
+      workflow: workflow,
+      context: payloadContext
+    };
+    debugLogToSheet_("triggerMegaReport.error", failed);
+    return failed;
+  }
+}
+
 // =====================================
 // 【修正1】finalizeDueEvaluationsChunked_
 // 変更した行だけを個別に書き戻す（全行setValuesをやめる）
@@ -2744,6 +2783,12 @@ const appended = appendedRowsThisRun + appendAndNormalizeMiddayOhlcvRows_(ohlcvS
 clearMiddayOhlcvState_();
 
 sendCompletionNotice_(String(newAlertCount), "0", "AM");
+const reportDispatch = triggerGitHubActionsMegaValidationReport_({
+  source: "midday_ohlcv",
+  refreshId: refreshId,
+  fetchedSymbols: newAlertCount,
+  appendedRows: appended
+});
 
 writeProcessLog_("OHLCV-AM", appended > 0
   ? "13:21先行取得が完了しました。重複整理・GAP修復・広範囲timestamp掃除は15:51本番側へ委譲します。"
@@ -2752,10 +2797,11 @@ writeProcessLog_("OHLCV-AM", appended > 0
     appendedRows: appended,
     refreshId: refreshId,
     elapsedMs: Date.now() - startTime,
-    postprocessScheduled: false
+    postprocessScheduled: false,
+    megaReport: reportDispatch
   });
 
-return { ok: true, complete: true, fetchedSymbols: newAlertCount, appendedRows: appended };
+return { ok: true, complete: true, fetchedSymbols: newAlertCount, appendedRows: appended, megaReport: reportDispatch };
 }
 
 function collectAllRawSymbolsFromRaw_(rawSheet) {

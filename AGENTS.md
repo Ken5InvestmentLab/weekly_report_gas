@@ -226,7 +226,7 @@ OVERLAP_DAYS = 3
 |---|---:|---|
 | `buildAndSendWeeklyReport` | 土曜 9:05 JST | 週次レポート送信 |
 | `syncMarketHolidays` | 毎月1日 3:10 JST | 内閣府祝日CSV + JPX年末年始休場日を同期 |
-| `fetchOHLCVForNewAlertsMidday` | 毎日 13:21 JST | 当日AM分までのOHLCV先行取得。後続チェーンなし |
+| `fetchOHLCVForNewAlertsMidday` | 毎日 13:21 JST | 当日AM分までのOHLCV先行取得。完了時に `mega-validation-report.yml` だけ起動し、optimizerは起動しない |
 | `fetchOHLCVForNewAlerts` | 毎日 15:51 JST | OHLCV本番取得 → 日次メンテ → GAP修復チェーン |
 | `purgeOldOhlcvDataDaily` | 毎日 2:00 JST | 365日超の古いOHLCV削除 |
 | `purgeOldSignalArchiveRowsDaily` | 毎日 2:10 JST | `signals_archive` の保持期限超過データ削除 |
@@ -417,7 +417,8 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 - 13:21取得の入口では、タイムアウト保険として `resumeOHLCVFetchMidday` を6.5分後に必ず予約する。通常の自前pause/resumeと重なっても、次回起動時に同じ入口で安全トリガーを張り直す。
 - 13:21取得結果は実行末尾までメモリに溜めず、Yahoo取得バッチごとに `ohlcv_4h` へ追記し、直後にカーソル・銘柄別最終timestamp・120日取得対象を保存する。タイムアウトや15:51引き継ぎ時に、未永続化の取得済み行を失わないようにする。
 - 同じ13:21取得カーソルでタイムアウトが続く場合は、次回実行でYahoo取得バッチを縮小し、単一銘柄でも詰まる場合だけ修復キューへ逃がして全体を止めない。
-- 日次メンテナンス、GitHub Actions、GAP修復には進まない。
+- 日次メンテナンス、optimizer、GAP修復には進まない。
+- 完了時に `mega-validation-report.yml` をGitHub Actionsへdispatchし、HTMLレポートだけを再生成する。
 - 完了通知のみ送る。
 
 #### 15:51: `fetchOHLCVForNewAlerts`
