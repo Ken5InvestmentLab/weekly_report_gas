@@ -349,6 +349,7 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 | `DAILY_MAINT_REFRESH_ID` | 日次メンテナンス用の取得IDメタ |
 | `QUICK_REPAIR_STATE` | GAP修復の再開状態。v8 |
 | `QUICK_REPAIR_PENDING_GROUPS_V1_COUNT` / `QUICK_REPAIR_PENDING_GROUPS_V1_CHUNK_*` | GAP修復の初回スキャン済み補填候補グループ。resume時の全体再スキャン防止用 |
+| `QUICK_REPAIR_TARGET_SYMBOLS_V1_COUNT` / `QUICK_REPAIR_TARGET_SYMBOLS_V1_CHUNK_*` | GAP修復の対象銘柄一覧キャッシュ。候補グループ作成前にresumeしても `alerts_raw` 全体読み直しへ戻らないための保険 |
 | `QUICK_REPAIR_TAIL_CLEANUP_STATE` | GAP修復入口の末尾不正timestamp掃除状態 |
 | `OHLCV_POST_REPAIR_CLEANUP_STATE_V1` | GAP修復完了後の小分けcleanup状態 |
 | `OHLCV_POST_REPAIR_FINAL_SORT_STATE_V1` | GAP修復後cleanup完了後の最終sort・GitHub Actions・Discord通知の再開状態 |
@@ -537,6 +538,7 @@ refetchSymbolRange(symbols, startDate, endDate)
 - 取得は `UrlFetchApp.fetchAll` を使う。
 - 進捗は `QUICK_REPAIR_STATE` v8 に保存する。
 - 初回スキャンで得た補填候補グループは `QUICK_REPAIR_PENDING_GROUPS_V1_*` に分割保存し、`resumeQuickRepair` は保存済み候補から再開する。タイムアウト再開ごとに908銘柄級の直近全体スキャンへ戻さない。
+- 補填候補グループ作成前の対象銘柄一覧も `QUICK_REPAIR_TARGET_SYMBOLS_V1_*` に分割保存し、`resumeQuickRepair` で `alerts_raw` 全体読み直しを繰り返さない。
 - 再開位置は、実際に処理を通過した銘柄グループの `lastProcessedSymbol` を使う。
 - 補填バッチ直前に、処理対象の銘柄・日付だけ `buildRecentSessionInfoForTasks_()` で再確認し、既に埋まったグループやマーカー付き未充足日は再取得対象から外す。
 - 修復行はB列に `GAP_REPAIR` を入れる。

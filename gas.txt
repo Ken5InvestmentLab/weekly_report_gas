@@ -6769,6 +6769,10 @@ const QUICK_REPAIR_STATE_KEY = "QUICK_REPAIR_STATE";
 const QUICK_REPAIR_PENDING_GROUPS_COUNT_KEY = "QUICK_REPAIR_PENDING_GROUPS_V1_COUNT";
 const QUICK_REPAIR_PENDING_GROUPS_PREFIX = "QUICK_REPAIR_PENDING_GROUPS_V1_CHUNK_";
 const QUICK_REPAIR_PENDING_GROUPS_CHUNK_CHARS = 7000;
+const QUICK_REPAIR_TARGET_SYMBOLS_COUNT_KEY = "QUICK_REPAIR_TARGET_SYMBOLS_V1_COUNT";
+const QUICK_REPAIR_TARGET_SYMBOLS_PREFIX = "QUICK_REPAIR_TARGET_SYMBOLS_V1_CHUNK_";
+const QUICK_REPAIR_TARGET_SYMBOLS_CHUNK_CHARS = 7000;
+const QUICK_REPAIR_TARGET_SYMBOL_SCAN_CHUNK_ROWS = 1500;
 const QUICK_REPAIR_FAIL_COUNTS_KEY = "QUICK_REPAIR_FAIL_COUNTS_V1";
 // 同じ symbol|date が連続でこの回数 0 行返却となったら GAP_FAILED を書き込み、ループを断つ
 const QUICK_REPAIR_FAIL_THRESHOLD = 3;
@@ -7827,10 +7831,10 @@ function buildHistoricalAlertsRawVolumeSummary_(state, alertsMapSize, mapStats, 
  */
 function quickScanMissingSessions(daysBack = 14, minSessions = 2, options) {
   const opts = options || {};
-  const ss = SpreadsheetApp.openById(
+  const ss = opts.spreadsheet || SpreadsheetApp.openById(
     PropertiesService.getScriptProperties().getProperty("SPREADSHEET_ID")
   );
-  const sh = ss.getSheetByName(CONFIG.OHLCV_SHEET);
+  const sh = opts.sheet || ss.getSheetByName(CONFIG.OHLCV_SHEET);
   if (!sh) throw new Error("ohlcv_4h シートが見つかりません");
 
   const now = getOhlcvBusinessDate_();
@@ -7842,9 +7846,11 @@ function quickScanMissingSessions(daysBack = 14, minSessions = 2, options) {
   if (lastRow < 2) return { count: 0, details: {} };
 
   // 休場日セットを取得
-  const holidaySet = getMarketHolidaySet_();
+  const holidaySet = opts.holidaySet || getMarketHolidaySet_();
 
-  const symbols = getQuickRepairTargetSymbols_(ss);
+  const symbols = Array.isArray(opts.targetSymbols)
+    ? normalizeQuickRepairTargetSymbols_(opts.targetSymbols)
+    : getQuickRepairTargetSymbols_(ss);
   const symbolLookup = {};
   symbols.forEach(sym => symbolLookup[sym] = true);
 
@@ -8145,17 +8151,85 @@ function normalizeQuickRepairPendingGroups_(groups) {
   });
 }
 
+function normalizeQuickRepairTargetSymbols_(symbols) {
+  const set = {};
+  (symbols || []).forEach(symbol => {
+    const s = String(symbol || "").trim();
+    if (s) set[s] = true;
+  });
+  return Object.keys(set).sort();
+}
+
+function clearQuickRepairTargetSymbols_(props) {
+  const p = props || PropertiesService.getScriptProperties();
+  try {
+    const all = p.getProperties();
+    Object.keys(all || {}).forEach(key => {
+      if (key === QUICK_REPAIR_TARGET_SYMBOLS_COUNT_KEY || key.indexOf(QUICK_REPAIR_TARGET_SYMBOLS_PREFIX) === 0) {
+        p.deleteProperty(key);
+      }
+    });
+  } catch (e) {
+    p.deleteProperty(QUICK_REPAIR_TARGET_SYMBOLS_COUNT_KEY);
+  }
+}
+
+function writeQuickRepairTargetSymbols_(props, symbols) {
+  const p = props || PropertiesService.getScriptProperties();
+  const normalized = normalizeQuickRepairTargetSymbols_(symbols);
+  clearQuickRepairTargetSymbols_(p);
+  if (normalized.length === 0) {
+    return { symbols: 0, chunks: 0, chars: 0 };
+  }
+  const raw = JSON.stringify(normalized);
+  const chunkSize = Math.max(1000, QUICK_REPAIR_TARGET_SYMBOLS_CHUNK_CHARS);
+  const chunkCount = Math.ceil(raw.length / chunkSize);
+  for (let i = 0; i < chunkCount; i++) {
+    p.setProperty(QUICK_REPAIR_TARGET_SYMBOLS_PREFIX + i, raw.slice(i * chunkSize, (i + 1) * chunkSize));
+  }
+  p.setProperty(QUICK_REPAIR_TARGET_SYMBOLS_COUNT_KEY, String(chunkCount));
+  return {
+    symbols: normalized.length,
+    chunks: chunkCount,
+    chars: raw.length
+  };
+}
+
+function readQuickRepairTargetSymbols_(props, expectedCount) {
+  const p = props || PropertiesService.getScriptProperties();
+  const chunkCount = Math.max(0, Number(p.getProperty(QUICK_REPAIR_TARGET_SYMBOLS_COUNT_KEY)) || 0);
+  const expected = Math.max(0, Number(expectedCount) || 0);
+  if (chunkCount <= 0) return expected === 0 ? [] : null;
+  let raw = "";
+  for (let i = 0; i < chunkCount; i++) {
+    const chunk = p.getProperty(QUICK_REPAIR_TARGET_SYMBOLS_PREFIX + i);
+    if (chunk == null) return null;
+    raw += chunk;
+  }
+  try {
+    const symbols = normalizeQuickRepairTargetSymbols_(JSON.parse(raw));
+    if (expected > 0 && symbols.length !== expected) return null;
+    return symbols;
+  } catch (e) {
+    return null;
+  }
+}
+
 function clearQuickRepairPendingGroups_(props) {
   const p = props || PropertiesService.getScriptProperties();
   try {
     const all = p.getProperties();
     Object.keys(all || {}).forEach(key => {
-      if (key === QUICK_REPAIR_PENDING_GROUPS_COUNT_KEY || key.indexOf(QUICK_REPAIR_PENDING_GROUPS_PREFIX) === 0) {
+      if (key === QUICK_REPAIR_PENDING_GROUPS_COUNT_KEY ||
+          key.indexOf(QUICK_REPAIR_PENDING_GROUPS_PREFIX) === 0 ||
+          key === QUICK_REPAIR_TARGET_SYMBOLS_COUNT_KEY ||
+          key.indexOf(QUICK_REPAIR_TARGET_SYMBOLS_PREFIX) === 0) {
         p.deleteProperty(key);
       }
     });
   } catch (e) {
     p.deleteProperty(QUICK_REPAIR_PENDING_GROUPS_COUNT_KEY);
+    p.deleteProperty(QUICK_REPAIR_TARGET_SYMBOLS_COUNT_KEY);
   }
 }
 
@@ -8220,6 +8294,12 @@ function createQuickRepairState_(version, businessDate, daysBack, minSessions) {
     batches: 0,
     lastScanSymbols: 0,
     lastScanTasks: 0,
+    targetSymbolsReady: false,
+    targetSymbolCount: 0,
+    targetSymbolChunks: 0,
+    targetSymbolChars: 0,
+    targetSymbolScanNextRow: 0,
+    targetSymbolScanLastRow: 0,
     pendingGroupsReady: false,
     pendingGroupCount: 0,
     pendingTaskCount: 0,
@@ -9394,36 +9474,36 @@ function buildQuickRepairStaleRecord_(meta, metaOut) {
   };
 }
 
-function getQuickRepairTargetSymbols_(ss) {
-  const rawSh = ss.getSheetByName(CONFIG.RAW_SHEET);
-  if (!rawSh) return [];
-  const lastRow = rawSh.getLastRow();
-  if (lastRow < dataStartRow_()) return [];
-
-  const rowCount = lastRow - dataStartRow_() + 1;
+function getQuickRepairTargetSymbolColumnSpec_() {
   const signalTypeCol = RAW_IDX.signal_type + 1;
   const symbolCodeCol = RAW_IDX.symbol_code + 1;
   const tvSymbolCol = RAW_IDX.tv_symbol + 1;
   const firstCol = Math.min(signalTypeCol, symbolCodeCol, tvSymbolCol);
   const lastCol = Math.max(signalTypeCol, symbolCodeCol, tvSymbolCol);
-  const values = rawSh.getRange(dataStartRow_(), firstCol, rowCount, lastCol - firstCol + 1).getValues();
-  const signalTypeOffset = signalTypeCol - firstCol;
-  const symbolCodeOffset = symbolCodeCol - firstCol;
-  const tvSymbolOffset = tvSymbolCol - firstCol;
-  const set = {};
+  return {
+    firstCol: firstCol,
+    width: lastCol - firstCol + 1,
+    signalTypeOffset: signalTypeCol - firstCol,
+    symbolCodeOffset: symbolCodeCol - firstCol,
+    tvSymbolOffset: tvSymbolCol - firstCol
+  };
+}
 
-  values.forEach(row => {
-    const signalType = String(row[signalTypeOffset] || "").trim().toUpperCase();
+function addQuickRepairTargetSymbolsFromRawRows_(set, values, spec) {
+  (values || []).forEach(row => {
+    const signalType = String(row[spec.signalTypeOffset] || "").trim().toUpperCase();
     if (signalType !== "BOTTOM") return;
-    const symbolCode = String(row[symbolCodeOffset] || "").trim();
-    const tvSymbol = String(row[tvSymbolOffset] || "").trim();
+    const symbolCode = String(row[spec.symbolCodeOffset] || "").trim();
+    const tvSymbol = String(row[spec.tvSymbolOffset] || "").trim();
     const sym = symbolCode || tvSymbol;
     if (sym) set[sym] = true;
   });
+}
 
+function finalizeQuickRepairTargetSymbolSet_(set, businessDateKey) {
   readOhlcvRepairSymbols_().forEach(sym => { if (sym) set[sym] = true; });
 
-  const staleSet = getActiveIntradayStaleSymbolSet_(getOhlcvBusinessDateKey_());
+  const staleSet = getActiveIntradayStaleSymbolSet_(businessDateKey || getOhlcvBusinessDateKey_());
   const symbols = Object.keys(set).filter(sym => !staleSet.has(sym)).sort();
   if (staleSet.size > 0) {
     writeProcessLog_("GAP_REPAIR", "Skipping symbols whose Yahoo 1h OHLC is stale for this business date.", {
@@ -9433,6 +9513,21 @@ function getQuickRepairTargetSymbols_(ss) {
     });
   }
   return symbols;
+}
+
+function getQuickRepairTargetSymbols_(ss) {
+  const rawSh = ss.getSheetByName(CONFIG.RAW_SHEET);
+  if (!rawSh) return [];
+  const lastRow = rawSh.getLastRow();
+  if (lastRow < dataStartRow_()) return [];
+
+  const rowCount = lastRow - dataStartRow_() + 1;
+  const spec = getQuickRepairTargetSymbolColumnSpec_();
+  const values = rawSh.getRange(dataStartRow_(), spec.firstCol, rowCount, spec.width).getValues();
+  const set = {};
+
+  addQuickRepairTargetSymbolsFromRawRows_(set, values, spec);
+  return finalizeQuickRepairTargetSymbolSet_(set, getOhlcvBusinessDateKey_());
 }
 
 
@@ -9781,11 +9876,32 @@ function quickRepairRecentGaps(options) {
     }
 
     if (!groups) {
+      const targetResult = ensureQuickRepairTargetSymbolsForState_(ss, props, state, scanDeadlineMs, businessDateKey);
+      if (targetResult.incomplete) {
+        state.stopReason = targetResult.reason || "target_symbols_scan_incomplete";
+        state.updatedAt = new Date().toISOString();
+        props.setProperty(QUICK_REPAIR_STATE_KEY, JSON.stringify(state));
+        scheduleQuickRepairResume_(QUICK_REPAIR_RESUME_AFTER_MS);
+        return {
+          ok: true,
+          incomplete: true,
+          reason: targetResult.reason || "target_symbols_scan_incomplete",
+          targetSymbols: targetResult.symbols || 0,
+          nextRow: targetResult.nextRow || 0,
+          lastRow: targetResult.lastRow || 0
+        };
+      }
+      const targetSymbols = targetResult.symbols || [];
       const entryCleanup = maybePurgeInvalidOhlcvTimestampRows_(ohlcvSh, "quickRepairRecentGaps.entry", QUICK_REPAIR_ENTRY_CLEANUP_ROWS, businessDateKey);
       if ((entryCleanup.deletedRows || 0) > 0) {
         writeProcessLog_("ギャップ修復", "入口で空・無効timestamp行を削除したため、今回のスキャンはクリーンな状態で続行します。", entryCleanup);
       }
-      const scan = quickScanMissingSessions(daysBack, minSessions, { deadlineMs: scanDeadlineMs });
+      const scan = quickScanMissingSessions(daysBack, minSessions, {
+        deadlineMs: scanDeadlineMs,
+        spreadsheet: ss,
+        sheet: ohlcvSh,
+        targetSymbols: targetSymbols
+      });
       if (scan.incomplete) {
         state.deferredDates += 1;
         state.updatedAt = new Date().toISOString();
@@ -9801,6 +9917,7 @@ function quickRepairRecentGaps(options) {
       tasks = flattenMissingTasks_(scan.details);
       groups = groupQuickRepairTasksBySymbol_(tasks);
       const pendingWrite = writeQuickRepairPendingGroups_(props, groups);
+      resetQuickRepairTargetSymbolState_(state);
       state.lastScanSymbols = scan.count;
       state.lastScanTasks = tasks.length;
       state.pendingGroupsReady = groups.length > 0;
@@ -11054,6 +11171,113 @@ function loadCachedRawAlertVolumeMap_(businessDateKey) {
   } catch (e) {
     return null;
   }
+}
+
+function resetQuickRepairTargetSymbolState_(state) {
+  state.targetSymbolsReady = false;
+  state.targetSymbolCount = 0;
+  state.targetSymbolChunks = 0;
+  state.targetSymbolChars = 0;
+  state.targetSymbolScanNextRow = 0;
+  state.targetSymbolScanLastRow = 0;
+  return state;
+}
+
+function saveQuickRepairTargetSymbolScanState_(props, state, symbols, cursor, lastRow, complete) {
+  const write = writeQuickRepairTargetSymbols_(props, symbols);
+  state.targetSymbolsReady = complete === true;
+  state.targetSymbolCount = write.symbols || 0;
+  state.targetSymbolChunks = write.chunks || 0;
+  state.targetSymbolChars = write.chars || 0;
+  state.targetSymbolScanNextRow = complete === true ? 0 : Math.max(dataStartRow_(), Number(cursor) || dataStartRow_());
+  state.targetSymbolScanLastRow = complete === true ? 0 : Math.max(0, Number(lastRow) || 0);
+  state.updatedAt = new Date().toISOString();
+  props.setProperty(QUICK_REPAIR_STATE_KEY, JSON.stringify(state));
+  return write;
+}
+
+function ensureQuickRepairTargetSymbolsForState_(ss, props, state, deadlineMs, businessDateKey) {
+  if (state.targetSymbolsReady === true) {
+    const cached = readQuickRepairTargetSymbols_(props, state.targetSymbolCount);
+    if (cached !== null) {
+      writeProcessLog_("ギャップ修復", "保存済みの対象銘柄一覧を使ってGAP修復スキャンを再開します。", {
+        targetSymbols: cached.length,
+        chunks: state.targetSymbolChunks || 0
+      });
+      return { complete: true, symbols: cached, fromCache: true };
+    }
+    clearQuickRepairTargetSymbols_(props);
+    resetQuickRepairTargetSymbolState_(state);
+    state.updatedAt = new Date().toISOString();
+    props.setProperty(QUICK_REPAIR_STATE_KEY, JSON.stringify(state));
+    writeProcessLog_("ギャップ修復", "保存済みの対象銘柄一覧を読めなかったため、対象銘柄スキャンからやり直します。", {
+      businessDate: businessDateKey || ""
+    });
+  }
+
+  const rawSh = ss.getSheetByName(CONFIG.RAW_SHEET);
+  const partialSymbols = readQuickRepairTargetSymbols_(props) || [];
+  const set = {};
+  partialSymbols.forEach(sym => { if (sym) set[sym] = true; });
+
+  if (!rawSh) {
+    const noSheetSymbols = finalizeQuickRepairTargetSymbolSet_(set, businessDateKey);
+    saveQuickRepairTargetSymbolScanState_(props, state, noSheetSymbols, 0, 0, true);
+    return { complete: true, symbols: noSheetSymbols, fromCache: false };
+  }
+
+  const lastRow = rawSh.getLastRow();
+  if (lastRow < dataStartRow_()) {
+    const emptySymbols = finalizeQuickRepairTargetSymbolSet_(set, businessDateKey);
+    saveQuickRepairTargetSymbolScanState_(props, state, emptySymbols, 0, lastRow, true);
+    return { complete: true, symbols: emptySymbols, fromCache: false };
+  }
+
+  const spec = getQuickRepairTargetSymbolColumnSpec_();
+  let cursor = Math.max(dataStartRow_(), Number(state.targetSymbolScanNextRow) || dataStartRow_());
+  if (cursor > lastRow + 1) cursor = dataStartRow_();
+  let scannedRows = 0;
+
+  while (cursor <= lastRow) {
+    if (deadlineMs && deadlineMs - Date.now() < QUICK_REPAIR_MIN_READ_REMAINING_MS) {
+      saveQuickRepairTargetSymbolScanState_(props, state, Object.keys(set), cursor, lastRow, false);
+      writeProcessLog_("ギャップ修復", "対象銘柄一覧の作成が時間内に終わらなかったため、途中状態を保存して次回へ回します。", {
+        nextRow: cursor,
+        lastRow: lastRow,
+        scannedRows: scannedRows,
+        collectedSymbols: Object.keys(set).length
+      });
+      return { complete: false, incomplete: true, reason: "target_symbols_scan_incomplete", symbols: Object.keys(set).length, nextRow: cursor, lastRow: lastRow };
+    }
+
+    const numRows = Math.min(QUICK_REPAIR_TARGET_SYMBOL_SCAN_CHUNK_ROWS, lastRow - cursor + 1);
+    const values = rawSh.getRange(cursor, spec.firstCol, numRows, spec.width).getValues();
+    addQuickRepairTargetSymbolsFromRawRows_(set, values, spec);
+    scannedRows += numRows;
+    cursor += numRows;
+    saveQuickRepairTargetSymbolScanState_(props, state, Object.keys(set), cursor, lastRow, false);
+
+    if (deadlineMs && deadlineMs - Date.now() < QUICK_REPAIR_MIN_READ_REMAINING_MS) {
+      writeProcessLog_("ギャップ修復", "対象銘柄一覧の作成が時間内に終わらなかったため、途中状態を保存して次回へ回します。", {
+        nextRow: cursor,
+        lastRow: lastRow,
+        scannedRows: scannedRows,
+        collectedSymbols: Object.keys(set).length
+      });
+      return { complete: false, incomplete: true, reason: "target_symbols_scan_incomplete", symbols: Object.keys(set).length, nextRow: cursor, lastRow: lastRow };
+    }
+  }
+
+  const symbols = finalizeQuickRepairTargetSymbolSet_(set, businessDateKey);
+  const write = saveQuickRepairTargetSymbolScanState_(props, state, symbols, 0, lastRow, true);
+  writeProcessLog_("ギャップ修復", "GAP修復の対象銘柄一覧を保存しました。以後の再開では alerts_raw 全体読み取りをスキップします。", {
+    targetSymbols: symbols.length,
+    chunks: write.chunks || 0,
+    chars: write.chars || 0,
+    scannedRows: scannedRows,
+    lastRow: lastRow
+  });
+  return { complete: true, symbols: symbols, fromCache: false };
 }
 
 function saveCachedRawAlertVolumeMap_(businessDateKey, result) {
