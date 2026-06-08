@@ -6273,7 +6273,7 @@ function sendCompletionNotice_(newCount, totalCount, tag) {
     fields: [
       {
         name: "🤖 スコアリングBot",
-        value: "最新の分析結果は `/scan` でご確認いただけます。",
+        value: "最新の分析結果は `/scan` または [ブラウザ](https://scoring-bot-report.ipo-ken5-5489.workers.dev/) にてご確認いただけます。",
         inline: false
       }
     ],
