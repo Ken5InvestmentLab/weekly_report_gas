@@ -2450,8 +2450,8 @@ writeProcessLog_("OHLCV-AM", "alerts_raw のvolumeを13:21先行取得の出来�
 if (symbols.length === 0) {
   const todaySymbols = collectTodayRawSymbols_(rawSheet, todayKey);
 
-  // alerts_raw に登場した全銘柄を候補にする
-  const allRawSymbols = collectAllRawSymbolsFromRaw_(rawSheet)
+  // alerts_raw と signals_archive に登場した全銘柄を候補にする
+  const allRawSymbols = collectAllOhlcvTargetSymbolsFromSheets_(ss)
     .map(s => String(s || "").trim())
     .filter(Boolean);
 
@@ -2804,15 +2804,13 @@ writeProcessLog_("OHLCV-AM", appended > 0
 return { ok: true, complete: true, fetchedSymbols: newAlertCount, appendedRows: appended, megaReport: reportDispatch };
 }
 
-function collectAllRawSymbolsFromRaw_(rawSheet) {
-  const lastRow = rawSheet.getLastRow();
-  if (lastRow < dataStartRow_()) return [];
-
-  const numRows = lastRow - dataStartRow_() + 1;
-  const values = rawSheet.getRange(dataStartRow_(), 1, numRows, RAW_HEADERS.length).getValues();
-
+function collectBottomSymbolsFromAlertSheet_(sheet, startRow) {
+  if (!sheet) return [];
+  const lastRow = sheet.getLastRow();
+  if (lastRow < startRow) return [];
+  const numRows = lastRow - startRow + 1;
+  const values = sheet.getRange(startRow, 1, numRows, RAW_HEADERS.length).getValues();
   const set = new Set();
-
   values.forEach(r => {
     const signalType = String(r[RAW_IDX.signal_type] || "").trim().toUpperCase();
     if (signalType !== "BOTTOM") return;
@@ -2820,6 +2818,21 @@ function collectAllRawSymbolsFromRaw_(rawSheet) {
     if (sym) set.add(sym);
   });
 
+  return Array.from(set).sort();
+}
+
+function collectAllRawSymbolsFromRaw_(rawSheet) {
+  return collectBottomSymbolsFromAlertSheet_(rawSheet, dataStartRow_());
+}
+
+function collectAllArchiveSymbolsFromArchive_(archiveSheet) {
+  return collectBottomSymbolsFromAlertSheet_(archiveSheet, 2);
+}
+
+function collectAllOhlcvTargetSymbolsFromSheets_(ss) {
+  const set = new Set();
+  collectAllRawSymbolsFromRaw_(ss && ss.getSheetByName(CONFIG.RAW_SHEET)).forEach(sym => set.add(sym));
+  collectAllArchiveSymbolsFromArchive_(ss && ss.getSheetByName(CONFIG.SIGNAL_ARCHIVE_SHEET)).forEach(sym => set.add(sym));
   return Array.from(set).sort();
 }
 
@@ -3595,7 +3608,7 @@ function repairOhlcvAmForDateOnly_(dateKey, dryRun) {
 
   const existingRowMap = buildOhlcvAmRowMapForDate_(ohlcvSheet, targetDateKey);
   const symbolSet = new Set();
-  collectAllRawSymbolsFromRaw_(rawSheet).forEach(sym => {
+  collectAllOhlcvTargetSymbolsFromSheets_(ss).forEach(sym => {
     const s = String(sym || "").trim();
     if (s) symbolSet.add(s);
   });
@@ -4359,6 +4372,10 @@ if (phase === "PHASE1") {
   const todaySet = new Set();
 
   const businessDateKey = getOhlcvBusinessDateKey_();
+  collectAllOhlcvTargetSymbolsFromSheets_(ss).forEach(sym => {
+    const s = String(sym || "").trim();
+    if (s) uniqueSymbols.add(s);
+  });
 
   rawData.forEach(r => {
     const signalType = String(r[RAW_IDX.signal_type] || "").trim().toUpperCase();
@@ -9500,6 +9517,16 @@ function addQuickRepairTargetSymbolsFromRawRows_(set, values, spec) {
   });
 }
 
+function addQuickRepairTargetSymbolsFromSheet_(set, sheet, startRow, spec) {
+  if (!sheet) return 0;
+  const lastRow = sheet.getLastRow();
+  if (lastRow < startRow) return 0;
+  const rowCount = lastRow - startRow + 1;
+  const values = sheet.getRange(startRow, spec.firstCol, rowCount, spec.width).getValues();
+  addQuickRepairTargetSymbolsFromRawRows_(set, values, spec);
+  return rowCount;
+}
+
 function finalizeQuickRepairTargetSymbolSet_(set, businessDateKey) {
   readOhlcvRepairSymbols_().forEach(sym => { if (sym) set[sym] = true; });
 
@@ -9516,17 +9543,11 @@ function finalizeQuickRepairTargetSymbolSet_(set, businessDateKey) {
 }
 
 function getQuickRepairTargetSymbols_(ss) {
-  const rawSh = ss.getSheetByName(CONFIG.RAW_SHEET);
-  if (!rawSh) return [];
-  const lastRow = rawSh.getLastRow();
-  if (lastRow < dataStartRow_()) return [];
-
-  const rowCount = lastRow - dataStartRow_() + 1;
   const spec = getQuickRepairTargetSymbolColumnSpec_();
-  const values = rawSh.getRange(dataStartRow_(), spec.firstCol, rowCount, spec.width).getValues();
   const set = {};
 
-  addQuickRepairTargetSymbolsFromRawRows_(set, values, spec);
+  addQuickRepairTargetSymbolsFromSheet_(set, ss.getSheetByName(CONFIG.RAW_SHEET), dataStartRow_(), spec);
+  addQuickRepairTargetSymbolsFromSheet_(set, ss.getSheetByName(CONFIG.SIGNAL_ARCHIVE_SHEET), 2, spec);
   return finalizeQuickRepairTargetSymbolSet_(set, getOhlcvBusinessDateKey_());
 }
 
@@ -11219,8 +11240,10 @@ function ensureQuickRepairTargetSymbolsForState_(ss, props, state, deadlineMs, b
   const partialSymbols = readQuickRepairTargetSymbols_(props) || [];
   const set = {};
   partialSymbols.forEach(sym => { if (sym) set[sym] = true; });
+  const spec = getQuickRepairTargetSymbolColumnSpec_();
 
   if (!rawSh) {
+    addQuickRepairTargetSymbolsFromSheet_(set, ss.getSheetByName(CONFIG.SIGNAL_ARCHIVE_SHEET), 2, spec);
     const noSheetSymbols = finalizeQuickRepairTargetSymbolSet_(set, businessDateKey);
     saveQuickRepairTargetSymbolScanState_(props, state, noSheetSymbols, 0, 0, true);
     return { complete: true, symbols: noSheetSymbols, fromCache: false };
@@ -11228,12 +11251,12 @@ function ensureQuickRepairTargetSymbolsForState_(ss, props, state, deadlineMs, b
 
   const lastRow = rawSh.getLastRow();
   if (lastRow < dataStartRow_()) {
+    addQuickRepairTargetSymbolsFromSheet_(set, ss.getSheetByName(CONFIG.SIGNAL_ARCHIVE_SHEET), 2, spec);
     const emptySymbols = finalizeQuickRepairTargetSymbolSet_(set, businessDateKey);
     saveQuickRepairTargetSymbolScanState_(props, state, emptySymbols, 0, lastRow, true);
     return { complete: true, symbols: emptySymbols, fromCache: false };
   }
 
-  const spec = getQuickRepairTargetSymbolColumnSpec_();
   let cursor = Math.max(dataStartRow_(), Number(state.targetSymbolScanNextRow) || dataStartRow_());
   if (cursor > lastRow + 1) cursor = dataStartRow_();
   let scannedRows = 0;
@@ -11268,13 +11291,15 @@ function ensureQuickRepairTargetSymbolsForState_(ss, props, state, deadlineMs, b
     }
   }
 
+  const archiveRows = addQuickRepairTargetSymbolsFromSheet_(set, ss.getSheetByName(CONFIG.SIGNAL_ARCHIVE_SHEET), 2, spec);
   const symbols = finalizeQuickRepairTargetSymbolSet_(set, businessDateKey);
   const write = saveQuickRepairTargetSymbolScanState_(props, state, symbols, 0, lastRow, true);
-  writeProcessLog_("ギャップ修復", "GAP修復の対象銘柄一覧を保存しました。以後の再開では alerts_raw 全体読み取りをスキップします。", {
+  writeProcessLog_("ギャップ修復", "GAP修復の対象銘柄一覧を保存しました。以後の再開では alerts_raw / signals_archive 全体読み取りをスキップします。", {
     targetSymbols: symbols.length,
     chunks: write.chunks || 0,
     chars: write.chars || 0,
     scannedRows: scannedRows,
+    archiveRows: archiveRows,
     lastRow: lastRow
   });
   return { complete: true, symbols: symbols, fromCache: false };
