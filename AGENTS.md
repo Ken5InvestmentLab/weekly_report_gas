@@ -419,7 +419,7 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 - 13:21取得結果は実行末尾までメモリに溜めず、Yahoo取得バッチごとに `ohlcv_4h` へ追記し、直後にカーソル・銘柄別最終timestamp・120日取得対象を保存する。タイムアウトや15:51引き継ぎ時に、未永続化の取得済み行を失わないようにする。
 - 同じ13:21取得カーソルでタイムアウトが続く場合は、次回実行でYahoo取得バッチを縮小し、単一銘柄でも詰まる場合だけ修復キューへ逃がして全体を止めない。
 - 日次メンテナンス、optimizer、GAP修復には進まない。
-- 完了時に `mega-validation-report.yml` をGitHub Actionsへdispatchし、HTMLレポートだけを再生成する。
+- 完了時に `mega-validation-report.yml` をGitHub Actionsへdispatchし、HTMLレポートだけを再生成する。今日のBOTTOMシグナルがある場合は、既に当日AMのOHLCVがあり新規取得不要で早期終了するときもdispatchを省略しない。
 - 完了通知のみ送る。
 
 #### 15:51: `fetchOHLCVForNewAlerts`
