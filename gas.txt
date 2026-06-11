@@ -901,7 +901,17 @@ function triggerGitHubActionsMegaValidationReport_(context) {
       payload: JSON.stringify({ ref: "main" }),
       muteHttpExceptions: true
     });
-    const result = { status: res.getResponseCode(), workflow: workflow, context: payloadContext };
+    const status = res.getResponseCode();
+    const body = String(res.getContentText() || "");
+    const result = {
+      status: status,
+      ok: status >= 200 && status < 300,
+      workflow: workflow,
+      context: payloadContext
+    };
+    if (!result.ok) {
+      result.body = body.slice(0, 500);
+    }
     debugLogToSheet_("triggerMegaReport.result", result);
     writeProcessLog_("GitHub Actions", "mega-validation-report.yml dispatch requested.", result);
     return result;
@@ -914,6 +924,22 @@ function triggerGitHubActionsMegaValidationReport_(context) {
     debugLogToSheet_("triggerMegaReport.error", failed);
     return failed;
   }
+}
+
+function triggerMiddayMegaReportIfTodaySignals_(todaySymbols, context) {
+  const count = Array.isArray(todaySymbols) ? todaySymbols.length : 0;
+  if (count <= 0) {
+    return { skipped: true, reason: "no_today_signals", context: context || {} };
+  }
+  const payload = Object.assign(
+    {
+      source: "midday_ohlcv",
+      fetchedSymbols: count,
+      appendedRows: 0
+    },
+    context || {}
+  );
+  return triggerGitHubActionsMegaValidationReport_(payload);
 }
 
 // =====================================
@@ -2460,12 +2486,18 @@ if (symbols.length === 0) {
 
   // alerts_raw に銘柄が1つも無い場合だけスキップ
   if (symbols.length === 0) {
+    const reportDispatch = triggerMiddayMegaReportIfTodaySignals_(todaySymbols, {
+      refreshId: refreshId,
+      reason: "no_target_symbols"
+    });
     writeProcessLog_("OHLCV-AM", "13:21先行取得の対象銘柄がないためスキップします。", {
       businessDate: todayKey,
-      todaySymbols: todaySymbols.length
+      todaySymbols: todaySymbols.length,
+      megaReport: reportDispatch
     });
     clearMiddayOhlcvState_();
-    return { ok: true, skipped: true, reason: "no_target_symbols" };
+    if (todaySymbols.length > 0) sendCompletionNotice_(String(todaySymbols.length), "0", "AM");
+    return { ok: true, skipped: true, reason: "no_target_symbols", megaReport: reportDispatch };
   }
 
   lastTsMap = buildLastTsMapFromOhlcv_(ohlcvSheet, symbols, new Set());
@@ -2494,14 +2526,22 @@ if (symbols.length === 0) {
   fullBackfillSet = new Set(fullBackfillSymbols);
 
   if (symbols.length === 0) {
+    const reportDispatch = triggerMiddayMegaReportIfTodaySignals_(todaySymbols, {
+      refreshId: refreshId,
+      reason: "no_midday_fetch_needed",
+      totalCandidateSymbols: totalCandidateSymbols,
+      skippedAlreadyHasTodayAm: skippedAlreadyHasTodayAm
+    });
     writeProcessLog_("OHLCV-AM", "13:21先行取得で新規120日取得または当日AM取得が必要な銘柄がないためスキップします。", {
       businessDate: todayKey,
       totalCandidateSymbols: totalCandidateSymbols,
       skippedAlreadyHasTodayAm: skippedAlreadyHasTodayAm,
-      todaySignalSymbols: todaySymbols.length
+      todaySignalSymbols: todaySymbols.length,
+      megaReport: reportDispatch
     });
     clearMiddayOhlcvState_();
-    return { ok: true, skipped: true, reason: "no_midday_fetch_needed" };
+    if (todaySymbols.length > 0) sendCompletionNotice_(String(todaySymbols.length), "0", "AM");
+    return { ok: true, skipped: true, reason: "no_midday_fetch_needed", megaReport: reportDispatch };
   }
 
   writeProcessLog_("OHLCV-AM", "13:21先行取得の対象銘柄を軽量取得型に初期化しました。OHLCV未取得銘柄は120日分、既存OHLCV銘柄は当日AM分だけ取得します。", {
