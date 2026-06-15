@@ -2483,9 +2483,44 @@ function pruneExpiredClaims(state, now) {
 }
 
 function normalizeReports(data) {
-  if (Array.isArray(data)) return data;
-  if (Array.isArray(data.reports)) return data.reports;
+  const reports = Array.isArray(data) ? data : (Array.isArray(data.reports) ? data.reports : null);
+  if (reports) {
+    assertNoRepeatedNarrativeTemplates(reports);
+    return reports;
+  }
   throw new Error("report file must be an array or { reports: [...] }");
+}
+
+function assertNoRepeatedNarrativeTemplates(reports) {
+  const narrativeFields = ["足元材料", "ファンダ要点", "注意点"];
+  const genericTemplatePatterns = [
+    /決算・還元・提携などが収益性、資本効率、事業進捗へ与える実質影響が焦点/,
+    /株主還元や資本効率方針はROE、PBR、総還元性向/,
+    /決算開示では売上高、営業利益、粗利率、受注・販売数量/,
+    /月次データは稼働人数、稼働率、既存店・販売数量/,
+    /提携・M&A・資産関連の材料は、売上貢献時期、利益率、資金負担/,
+    /還元策は短期的な需給支えになります/
+  ];
+
+  const seen = new Map();
+  for (const report of reports || []) {
+    const symbol = String(report.symbolCode || report.alertId || "unknown");
+    for (const fieldName of narrativeFields) {
+      const value = String((report.fields || []).find(field => field.name === fieldName)?.value || "").trim();
+      if (!value) continue;
+      const genericHit = genericTemplatePatterns.find(pattern => pattern.test(value));
+      if (genericHit) {
+        throw new Error(`report ${report.alertId || symbol} field ${fieldName} uses a generic repeated template: ${genericHit}`);
+      }
+      if (value.length < 40) continue;
+      const key = `${fieldName}\n${value}`;
+      const previous = seen.get(key);
+      if (previous) {
+        throw new Error(`reports ${previous} and ${symbol} reuse the same ${fieldName}; write company-specific analysis`);
+      }
+      seen.set(key, symbol);
+    }
+  }
 }
 
 function loadDotEnv(filePath) {
@@ -2679,6 +2714,10 @@ function selfTest() {
     { alertId: "p", materialImpact: "ポジティブ材料" },
     { alertId: "w", materialImpact: "様子見" }
   ]).map(report => report.alertId), ["p", "w", "n"]);
+  assert.throws(() => normalizeReports({ reports: [
+    { alertId: "dup1", symbolCode: "1111", fields: [{ name: "ファンダ要点", value: "株主還元や資本効率方針はROE、PBR、総還元性向、手元資金の配分を左右します。本業利益の伸びを伴う還元なら評価しやすい一方、利益が弱い局面では持続性が焦点です。" }] },
+    { alertId: "dup2", symbolCode: "2222", fields: [{ name: "ファンダ要点", value: "株主還元や資本効率方針はROE、PBR、総還元性向、手元資金の配分を左右します。本業利益の伸びを伴う還元なら評価しやすい一方、利益が弱い局面では持続性が焦点です。" }] }
+  ] }), /generic repeated template|reuse the same/);
   assert.throws(() => buildEmbed({
     alertId: "a2",
     fields: REQUIRED_FIELDS.map(name => ({ name, value: name === "Sources" ? "no source" : "x" }))

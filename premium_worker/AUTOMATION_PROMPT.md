@@ -212,6 +212,11 @@ If the disclosure file cannot be opened or the content cannot be verified, use
    sentences, with source-grounded figures, dates, business drivers, or
    confirmation points where available. Avoid one-line generic summaries, but
    stay concise enough for Discord embeds.
+   Do not reuse the same `足元材料`, `ファンダ要点`, or `注意点` text across
+   multiple reports in a batch. Generic bucket summaries such as `決算・還元・提携
+   などが収益性、資本効率、事業進捗へ与える実質影響が焦点`, `株主還元や
+   資本効率方針はROE`, or broad M&A/monthly/disclosure templates are invalid;
+   write the actual KPI and risk for that company.
    Before writing reports, skim `premium_worker/FUNDAMENTAL_EXAMPLES.md`.
    Treat those examples as quality calibration, not a rigid template: follow
    their specificity around actual business, event dates, figures, KPIs, and
