@@ -141,6 +141,12 @@ phrases such as `開示は...を含み`, `...に関するを含み`, `...なら�
 or title fragments ending in `に関する` / `について` are invalid; rewrite the
 business effect in natural Japanese.
 
+The summary must read like the previous good reports: `material/event + business
+effect or risk`. Do not end with vague conclusions such as `...が支えです`,
+`...が焦点です`, or `...が重いです`; state what changed for sales, margin,
+dilution, cash flow, orders, utilization, returns, or another company-specific
+driver.
+
 Keep the summary short: aim for 45-80 Japanese characters after the label, and
 never exceed 90 characters. Do not put procedural research wording here, such as
 `PDF本文でも確認`, `主要損益項目を確認`, broad checklist phrases, or

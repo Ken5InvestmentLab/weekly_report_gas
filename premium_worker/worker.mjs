@@ -43,6 +43,11 @@ const MATERIAL_IMPACT_AWKWARD_PATTERNS = [
   /に関する$/,
   /について$/
 ];
+const MATERIAL_IMPACT_WEAK_SUMMARY_PATTERNS = [
+  /が支えです。?$/,
+  /が焦点です。?$/,
+  /が重いです。?$/
+];
 const REQUIRED_FIELDS = [IMPACT_FIELD, "事業概要", "足元材料", "ファンダ要点", "注意点", "開示リンク", "Sources"];
 const OPTIONAL_FIELDS = [];
 const PREMIUM_SCAN_BUTTON_PREFIX = "premium_scan:";
@@ -647,6 +652,13 @@ function assertConciseMaterialImpact(alertId, value) {
     if (pattern.test(summary)) {
       throw new Error(
         `report ${alertId} field ${IMPACT_FIELD} summary has awkward Japanese from a truncated disclosure title: ${pattern}`
+      );
+    }
+  }
+  for (const pattern of MATERIAL_IMPACT_WEAK_SUMMARY_PATTERNS) {
+    if (pattern.test(summary)) {
+      throw new Error(
+        `report ${alertId} field ${IMPACT_FIELD} summary is too vague; summarize the material and business effect: ${pattern}`
       );
     }
   }
@@ -2933,6 +2945,10 @@ function selfTest() {
     "a10c4awkward",
     "ポジティブ材料：2026-05-12開示は2026年3月期決算説明資料、中期経営計画の数値目標の見直しに関するを含み、還元や事業進捗の支えになる。"
   ), /awkward Japanese/);
+  assert.throws(() => assertConciseMaterialImpact(
+    "a10c4weak",
+    "ポジティブ材料：2026-05-12の決算説明資料と中計見直しで、仮設機材事業の収益改善が支えです。"
+  ), /too vague/);
   assert.throws(() => buildEmbed({
     alertId: "a10c4b",
     url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
