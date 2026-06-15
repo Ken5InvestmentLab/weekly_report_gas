@@ -32,6 +32,17 @@ const MATERIAL_IMPACT_PROCEDURAL_FRAGMENTS = [
   "売上・利益進捗、会社予想、セグメント動向を確認",
   "開示内容を確認"
 ];
+const MATERIAL_IMPACT_AWKWARD_PATTERNS = [
+  /開示は.+を含み/,
+  /に関するを/,
+  /ならびを/,
+  /第[0-9０-９一二三四]四半期を/,
+  /の特を/,
+  /お知を/,
+  /にを含み/,
+  /に関する$/,
+  /について$/
+];
 const REQUIRED_FIELDS = [IMPACT_FIELD, "事業概要", "足元材料", "ファンダ要点", "注意点", "開示リンク", "Sources"];
 const OPTIONAL_FIELDS = [];
 const PREMIUM_SCAN_BUTTON_PREFIX = "premium_scan:";
@@ -629,6 +640,13 @@ function assertConciseMaterialImpact(alertId, value) {
     if (summary.includes(fragment)) {
       throw new Error(
         `report ${alertId} field ${IMPACT_FIELD} summary is too procedural: ${fragment}`
+      );
+    }
+  }
+  for (const pattern of MATERIAL_IMPACT_AWKWARD_PATTERNS) {
+    if (pattern.test(summary)) {
+      throw new Error(
+        `report ${alertId} field ${IMPACT_FIELD} summary has awkward Japanese from a truncated disclosure title: ${pattern}`
       );
     }
   }
@@ -2911,6 +2929,10 @@ function selfTest() {
       { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
     ]
   }), /procedural placeholder language|too procedural/);
+  assert.throws(() => assertConciseMaterialImpact(
+    "a10c4awkward",
+    "ポジティブ材料：2026-05-12開示は2026年3月期決算説明資料、中期経営計画の数値目標の見直しに関するを含み、還元や事業進捗の支えになる。"
+  ), /awkward Japanese/);
   assert.throws(() => buildEmbed({
     alertId: "a10c4b",
     url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",

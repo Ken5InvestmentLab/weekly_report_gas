@@ -136,6 +136,10 @@ The `材料インパクト` field must not be only the label. Write it as
 `ラベル：根拠要約`, using a full-width colon and one concise source-grounded
 sentence. The summary should mention the disclosure substance, figures, timing,
 or business effect that justifies the label.
+Do not build this summary by truncating or joining disclosure titles. Awkward
+phrases such as `開示は...を含み`, `...に関するを含み`, `...ならびを含み`,
+or title fragments ending in `に関する` / `について` are invalid; rewrite the
+business effect in natural Japanese.
 
 Keep the summary short: aim for 45-80 Japanese characters after the label, and
 never exceed 90 characters. Do not put procedural research wording here, such as
