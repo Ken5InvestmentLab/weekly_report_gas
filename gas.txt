@@ -4512,9 +4512,10 @@ newAlertCount = todaySet.size;
 let allFetchedData = [];
 let phase1AppendedRows = 0;
 let batchNo = 0;
+const remainingSymbolsForVolumeMap = startIndex > 0 ? symbols.slice(startIndex) : symbols;
 const todayAmVolumeMap = buildTodayOhlcvSessionVolumeMap_(
   ohlcvSheet,
-  symbols,
+  remainingSymbolsForVolumeMap,
   todayKey,
   "AM",
   OHLCV_LAST_TS_SCAN_MAX_ROWS
