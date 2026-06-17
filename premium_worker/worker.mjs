@@ -541,6 +541,7 @@ function buildEmbed(report) {
   assertSourceLinksAreReferencePages(alertId, fieldMap);
   assertDescriptiveLinkLabels(alertId, fieldMap);
   assertJapaneseNarrativeFields(alertId, fieldMap);
+  assertNoSymbolCodeInCaution(alertId, report, fieldMap);
   assertConciseMaterialNarrative(alertId, fieldMap);
   assertNoGenericNarrativeTemplates(alertId, fieldMap);
   assertNoProceduralAnalysisLanguage(alertId, fieldMap);
@@ -550,6 +551,7 @@ function buildEmbed(report) {
   assertNoStaleSingleMaterialSummary(alertId, fieldMap);
   assertNoStaleDisclosureProxyLabels(alertId, fieldMap);
   assertMaterialImpact(alertId, fieldMap);
+  assertPreferredDateStyle(alertId, fieldMap);
   const title = buildEmbedTitle(report);
 
   const fieldNames = [
@@ -813,6 +815,28 @@ function assertJapaneseNarrativeFields(alertId, fieldMap) {
 
 function hasJapaneseText(value) {
   return /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/u.test(String(value || ""));
+}
+
+function assertNoSymbolCodeInCaution(alertId, report, fieldMap) {
+  const symbolCode = String(report.symbolCode || extractSymbolCodeFromUrl(report.url || "") || "").trim();
+  if (!symbolCode) return;
+
+  const caution = normalizeSpaces(String(fieldMap.get("注意点") || ""));
+  if (caution.startsWith(symbolCode)) {
+    throw new Error(`report ${alertId} field 注意点 must not start with the symbol code; the embed title already identifies the symbol`);
+  }
+}
+
+function assertPreferredDateStyle(alertId, fieldMap) {
+  const materialImpact = String(fieldMap.get(IMPACT_FIELD) || "");
+  if (/\b20\d{2}-\d{2}-\d{2}\b/.test(materialImpact)) {
+    throw new Error(`report ${alertId} field ${IMPACT_FIELD} should omit calendar dates; keep it to the material and business impact`);
+  }
+
+  const currentMaterials = String(fieldMap.get("足元材料") || "");
+  if (/\b20\d{2}-\d{2}-\d{2}\b/.test(currentMaterials)) {
+    throw new Error(`report ${alertId} field 足元材料 should use M月D日 style instead of YYYY-MM-DD for calendar dates`);
+  }
 }
 
 function assertNoMojibakeText(alertId, report, fieldMap) {
@@ -2757,6 +2781,54 @@ function selfTest() {
     alertId: "a2",
     fields: REQUIRED_FIELDS.map(name => ({ name, value: name === "Sources" ? "no source" : "x" }))
   }), /Sources/);
+  assert.throws(() => buildEmbed({
+    alertId: "symbol-code-caution",
+    title: "テスト（1234）｜Premium Snapshot",
+    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    symbolCode: "1234",
+    symbolName: "テスト",
+    fields: [
+      { name: "材料インパクト", value: "様子見：会社開示は売上への寄与がまだ限定的で、受注と粗利率の継続確認が必要です。" },
+      { name: "事業概要", value: "精密部品を扱う製造業で、国内外の顧客向けに加工品と関連サービスを提供する会社です。" },
+      { name: "足元材料", value: "直近決算では売上と利益の推移が確認材料。受注環境、原材料価格、固定費吸収の状況に加え、会社予想との進捗差が材料です。継続性が利益評価を左右します。" },
+      { name: "ファンダ要点", value: "増収要因が数量増なのか価格転嫁なのかで評価が変わる。利益率、在庫、キャッシュフローの改善継続が評価を左右します。会社予想との進捗差も重要になる。" },
+      { name: "注意点", value: "1234では需要変動、為替、原材料価格、顧客集中に注意し、単発利益の有無もリスクです。短期の株価材料と中期の業績改善は分けて確認する。" },
+      { name: "開示リンク", value: "開示リンク未確認" },
+      { name: "Sources", value: "[株主・投資家情報｜テスト株式会社](https://example.com/ir)" }
+    ]
+  }), /field 注意点 must not start with the symbol code/);
+  assert.throws(() => buildEmbed({
+    alertId: "impact-date-style",
+    title: "テスト（1234）｜Premium Snapshot",
+    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    symbolCode: "1234",
+    symbolName: "テスト",
+    fields: [
+      { name: "材料インパクト", value: "様子見：2026-05-08の会社開示は売上への寄与がまだ限定的で、受注と粗利率の継続確認が必要です。" },
+      { name: "事業概要", value: "精密部品を扱う製造業で、国内外の顧客向けに加工品と関連サービスを提供する会社です。" },
+      { name: "足元材料", value: "5月8日に決算と通期計画を開示しました。受注環境、原材料価格、固定費吸収の状況に加え、会社予想との進捗差が材料です。数量増と価格転嫁の継続性が利益評価を左右します。" },
+      { name: "ファンダ要点", value: "増収要因が数量増なのか価格転嫁なのかで評価が変わる。利益率、在庫、キャッシュフローの改善継続が評価を左右します。会社予想との進捗差も重要になる。" },
+      { name: "注意点", value: "需要変動、為替、原材料価格、顧客集中に注意し、単発利益の有無もリスクです。短期の株価材料と中期の業績改善は分けて確認する。" },
+      { name: "開示リンク", value: "開示リンク未確認" },
+      { name: "Sources", value: "[株主・投資家情報｜テスト株式会社](https://example.com/ir)" }
+    ]
+  }), /field 材料インパクト should omit calendar dates/);
+  assert.throws(() => buildEmbed({
+    alertId: "current-material-date-style",
+    title: "テスト（1234）｜Premium Snapshot",
+    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    symbolCode: "1234",
+    symbolName: "テスト",
+    fields: [
+      { name: "材料インパクト", value: "様子見：会社開示は売上への寄与がまだ限定的で、受注と粗利率の継続確認が必要です。" },
+      { name: "事業概要", value: "精密部品を扱う製造業で、国内外の顧客向けに加工品と関連サービスを提供する会社です。" },
+      { name: "足元材料", value: "2026-05-08に決算と通期計画を開示しました。受注環境、原材料価格、固定費吸収の状況に加え、会社予想との進捗差が材料です。数量増と価格転嫁の継続性が利益評価を左右します。" },
+      { name: "ファンダ要点", value: "増収要因が数量増なのか価格転嫁なのかで評価が変わる。利益率、在庫、キャッシュフローの改善継続が評価を左右します。会社予想との進捗差も重要になる。" },
+      { name: "注意点", value: "需要変動、為替、原材料価格、顧客集中に注意し、単発利益の有無もリスクです。短期の株価材料と中期の業績改善は分けて確認する。" },
+      { name: "開示リンク", value: "開示リンク未確認" },
+      { name: "Sources", value: "[株主・投資家情報｜テスト株式会社](https://example.com/ir)" }
+    ]
+  }), /field 足元材料 should use M月D日 style/);
   assert.throws(() => buildEmbed({
     alertId: "a3",
     url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",

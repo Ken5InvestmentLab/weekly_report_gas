@@ -466,6 +466,8 @@ characters, and never exceed 90 characters. Do not include procedural wording
 such as `PDF本文でも確認`, `主要損益項目を確認`, broad checklist phrases, or
 `次回開示で確認する局面`; those details belong in `足元材料`, `ファンダ要点`, and
 `開示リンク`.
+Do not include `YYYY-MM-DD` calendar dates in this field; the date belongs in
+`足元材料` and `開示リンク`. Start from the material/event and business effect.
 
 Example:
 
@@ -516,6 +518,10 @@ key figure where available
 why it matters for that company
 ```
 
+When writing calendar dates in `足元材料`, use `M月D日` style such as `5月8日`,
+not `YYYY-MM-DD`. Fiscal periods such as `2026年3月期` and `開示リンク` labels using
+`YYYY-MM-DD 開示タイトル(hh:mm)` remain acceptable.
+
 Do not lead with:
 
 ```text
@@ -541,6 +547,9 @@ Examples:
 - sales volume, material spread, inventory valuation, and plant utilization for manufacturers
 
 `注意点` must name the company-specific uncertainty.
+Do not start `注意点` with the stock code, such as `1234では...`; the embed title
+already identifies the symbol, so start directly with the risk, KPI, or
+unresolved disclosure item.
 
 Do not rely on generic caveats such as:
 

@@ -152,6 +152,9 @@ never exceed 90 characters. Do not put procedural research wording here, such as
 `PDF本文でも確認`, `主要損益項目を確認`, broad checklist phrases, or
 `次回開示で確認する局面`. Put document titles, multiple figures, and detailed
 confirmation points in `足元材料` / `ファンダ要点` / `開示リンク` instead.
+Do not include `YYYY-MM-DD` calendar dates in `材料インパクト`; the date belongs in
+`足元材料` and `開示リンク`. Start the summary from the material/event and business
+effect, such as `中計見直しで回復目標は示された一方...`.
 
 Do not default to `混在/要確認`. Use it only when positive and negative or
 uncertain elements truly coexist. Do not force label diversity either: if every
@@ -177,6 +180,9 @@ Guidance:
 
 The first sentence of `足元材料` should mention the disclosure content that
 supports the impact label, not just the disclosure title.
+When writing calendar dates in `足元材料`, use `M月D日` style such as `5月8日`,
+not `YYYY-MM-DD`. Fiscal periods such as `2026年3月期` and `開示リンク` labels using
+`YYYY-MM-DD 開示タイトル(hh:mm)` remain acceptable.
 
 Examples:
 
@@ -264,6 +270,9 @@ If the disclosure file cannot be opened or the content cannot be verified, use
    caveats such as "開示単体では金額、契約期間、希薄化、一過性の区別が十分に
    読み切れない" unless the sentence immediately explains which of those
    issues applies and why.
+   Do not start `注意点` with the stock code, such as `1234では...`; the embed
+   title already identifies the symbol. Start directly with the risk, KPI, or
+   unresolved disclosure item.
    `足元材料` should read like a concise event timeline, not a research log:
    lead with the newest fundamentally material disclosure date, material event, and figures
    where available, then add one sentence connecting it to the business
