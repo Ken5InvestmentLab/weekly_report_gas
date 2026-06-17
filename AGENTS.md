@@ -424,7 +424,7 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 - 同じ13:21取得カーソルでタイムアウトが続く場合は、次回実行でYahoo取得バッチを縮小し、単一銘柄でも詰まる場合だけ修復キューへ逃がして全体を止めない。
 - 日次メンテナンス、optimizer、GAP修復には進まない。
 - 完了時に `mega-validation-report.yml` をGitHub Actionsへdispatchし、HTMLレポートだけを再生成する。今日のBOTTOMシグナルがある場合は、既に当日AMのOHLCVがあり新規取得不要で早期終了するときもdispatchを省略しない。
-- 完了通知のみ送る。
+- `/scan` / ブラウザ確認を案内するDiscord通知はGASから送らない。HTML生成後の通知は `screening-bot` の `mega-validation-report.yml` が `DISCORD_REPORT_WEBHOOK_URL` で送る。
 
 #### 15:51: `fetchOHLCVForNewAlerts`
 
@@ -511,7 +511,7 @@ refetchSymbolRange(symbols, startDate, endDate)
 - 評価日を迎えた `alerts_raw` 行を更新。
 - 5/10/20/40営業日後の評価価格、騰落率、勝敗を埋める。
 - 全チェックポイントが埋まると `status=COMPLETE`。
-- DiscordのOHLCV完了通知は、日次メンテナンス直後ではなく、`quickRepairRecentGaps` 後の `resumeOhlcvPostRepairCleanup` と `resumeOhlcvPostRepairFinalSort` が完了してから送る。
+- GASの `sendCompletionNotice_()` はDiscordへ送信しない。HTMLレポート生成完了通知は `screening-bot` のGitHub Actions側で送る。
 - `GITHUB_PAT` があれば、最終sort完了後に `Ken5InvestmentLab/screening-bot` の `optimize.yml` を起動。
 - 完了後に `quickRepairTrigger` を10秒後に予約。
 
@@ -555,9 +555,9 @@ refetchSymbolRange(symbols, startDate, endDate)
 - post-repair cleanupは全行timestamp正規化、保護AMマーキング、日付バケット重複整理までを小分けで進める。保護AM行は削除候補に入れない。
 - post-repair cleanupの重複行削除は、Sheets API `batchUpdate/deleteDimension` による一括削除を主経路にし、失敗時だけ `deleteRows` の降順レンジ削除へ戻す。HTTP 200の一括削除は予定削除件数で確定し、次バッチの検証用行数は直前のSheets APIレスポンスから引き継ぐ。クラッシュ再開時に誤った行番号を再削除しないよう、pre-advanceを維持する。
 - post-repair cleanupの `DEDUP_DATES` で同じ `dateIndex` が再開ログに繰り返し出る場合は、日付バッチが大きすぎて進捗保存前に時間切れになっている可能性を優先して疑う。日付単位の小さいバッチで前進させ、全日まとめて再スキャンする方向へ戻さない。
-- post-repair cleanup完了後は `resumeOhlcvPostRepairFinalSort` の専用ワンショットトリガーで `ohlcv_4h` 全体を `timestamp`、`symbol` 昇順にsortする。GitHub Actions起動とDiscordのOHLCV完了通知は、この最終sortが成功してから送る。
-- 最終sortが失敗・タイムアウトした場合は `OHLCV_POST_REPAIR_FINAL_SORT_STATE_V1` から再開し、sort前にGitHub ActionsやDiscord通知を先に送らない。
-- `testOhlcvPostRepairFinalSortOnly()` は最終sortのタイムアウト確認専用。GitHub ActionsとDiscord通知をskipし、pending Discord通知を消費しない。
+- post-repair cleanup完了後は `resumeOhlcvPostRepairFinalSort` の専用ワンショットトリガーで `ohlcv_4h` 全体を `timestamp`、`symbol` 昇順にsortする。GitHub Actions起動は、この最終sortが成功してから行う。
+- 最終sortが失敗・タイムアウトした場合は `OHLCV_POST_REPAIR_FINAL_SORT_STATE_V1` から再開し、sort前にGitHub Actionsを先に起動しない。
+- `testOhlcvPostRepairFinalSortOnly()` は最終sortのタイムアウト確認専用。GitHub Actionsをskipし、pending GAS通知状態を消費しない。
 
 ### 不正timestamp・GAP修復タイムアウト復旧
 

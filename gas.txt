@@ -6368,6 +6368,14 @@ function convertToYahooSymbol(tvSymbol) {
 // 通知系
 // ========================================
 function sendCompletionNotice_(newCount, totalCount, tag) {
+  // Report-ready Discord notice moved to screening-bot's Mega Validation Report workflow.
+  console.log("sendCompletionNotice_ skipped; report-ready notice is handled by GitHub Actions.", JSON.stringify({
+    newCount: String(newCount == null ? "0" : newCount),
+    totalCount: String(totalCount == null ? "0" : totalCount),
+    tag: String(tag || "AUTO")
+  }));
+  return;
+
   const webhookUrl = PropertiesService.getScriptProperties().getProperty("DISCORD_WEBHOOK");
   if (!webhookUrl) return;
 
