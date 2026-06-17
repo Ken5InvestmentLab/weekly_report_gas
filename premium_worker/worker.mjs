@@ -260,6 +260,7 @@ async function fail(opts) {
   }
 
   assertFailCommandScope(failures, opts, Boolean(inputPath));
+  assertFailStateScope(failures, opts, state, new Date());
 
   const dryRun = opts["dry-run"] === true;
   const webhookUrl = dryRun ? "" : requiredEnv("DISCORD_PREMIUM_WEBHOOK_URL");
@@ -318,10 +319,10 @@ async function fail(opts) {
 }
 
 function assertFailCommandScope(failures, opts = {}, isInputBatch = false) {
-  const allowMassFail = opts["allow-mass-fail"] === true || /^(1|true|yes)$/i.test(env("PREMIUM_ALLOW_MASS_FAIL_STUBS"));
+  const allowMassFail = isMassFailOverrideEnabled(opts);
   if (allowMassFail) return;
 
-  const insufficient = failures.filter(item => /insufficient\s+verified\s+sources/i.test(String(item.reason || "")));
+  const insufficient = failures.filter(item => isInsufficientSourceReason(item.reason));
   if (!insufficient.length) return;
 
   if (isInputBatch) {
@@ -918,6 +919,40 @@ function assertNoGenericNarrativeTemplates(alertId, fieldMap) {
       }
     }
   }
+}
+
+function assertFailStateScope(failures, opts = {}, state = {}, now = new Date()) {
+  if (isMassFailOverrideEnabled(opts)) return;
+
+  const insufficient = failures.filter(item => isInsufficientSourceReason(item.reason));
+  if (!insufficient.length) return;
+
+  const maxRecentFails = positiveInt(env("PREMIUM_MAX_INSUFFICIENT_FAILS_PER_WINDOW"), 3);
+  const windowMinutes = positiveInt(env("PREMIUM_INSUFFICIENT_FAIL_WINDOW_MINUTES"), 60);
+  const cutoffMs = now.getTime() - windowMinutes * 60 * 1000;
+  let recent = 0;
+
+  for (const posted of Object.values(state.posted || {})) {
+    if (posted?.source !== "samayomi_stub") continue;
+    if (!isInsufficientSourceReason(posted.reason)) continue;
+    const postedMs = Date.parse(posted.postedAt || "");
+    if (Number.isFinite(postedMs) && postedMs >= cutoffMs) recent++;
+  }
+
+  const total = recent + insufficient.length;
+  if (total > maxRecentFails) {
+    throw new Error(
+      `too many recent insufficient-source fail stubs (${total}/${maxRecentFails}) in ${windowMinutes} minutes; repair grounded reports or set PREMIUM_ALLOW_MASS_FAIL_STUBS=true for a deliberate manual override`
+    );
+  }
+}
+
+function isMassFailOverrideEnabled(opts = {}) {
+  return opts["allow-mass-fail"] === true || /^(1|true|yes)$/i.test(env("PREMIUM_ALLOW_MASS_FAIL_STUBS"));
+}
+
+function isInsufficientSourceReason(reason) {
+  return /insufficient\s+verified\s+sources/i.test(String(reason || ""));
 }
 
 function assertNoProceduralAnalysisLanguage(alertId, fieldMap) {
@@ -3194,6 +3229,28 @@ function selfTest() {
     { alertId: "f1", reason: "insufficient verified sources" },
     { alertId: "f2", reason: "insufficient verified sources" }
   ], { "allow-mass-fail": true, input: "failures.json" }, true));
+  const oldWindowMax = process.env.PREMIUM_MAX_INSUFFICIENT_FAILS_PER_WINDOW;
+  const oldWindowMinutes = process.env.PREMIUM_INSUFFICIENT_FAIL_WINDOW_MINUTES;
+  process.env.PREMIUM_MAX_INSUFFICIENT_FAILS_PER_WINDOW = "3";
+  process.env.PREMIUM_INSUFFICIENT_FAIL_WINDOW_MINUTES = "60";
+  const recentStubState = {
+    posted: {
+      f1: { source: "samayomi_stub", reason: "insufficient verified sources", postedAt: "2026-06-17T04:00:00.000Z" },
+      f2: { source: "samayomi_stub", reason: "insufficient verified sources", postedAt: "2026-06-17T04:01:00.000Z" },
+      f3: { source: "samayomi_stub", reason: "insufficient verified sources", postedAt: "2026-06-17T04:02:00.000Z" }
+    }
+  };
+  assert.doesNotThrow(() => assertFailStateScope([
+    { alertId: "f4", reason: "insufficient verified sources" }
+  ], { "allow-mass-fail": true }, recentStubState, new Date("2026-06-17T04:30:00.000Z")));
+  assert.throws(() => assertFailStateScope([
+    { alertId: "f4", reason: "insufficient verified sources" }
+  ], { "alert-id": "f4" }, recentStubState, new Date("2026-06-17T04:30:00.000Z")), /too many recent insufficient-source fail stubs/);
+  assert.doesNotThrow(() => assertFailStateScope([
+    { alertId: "f4", reason: "insufficient verified sources" }
+  ], { "alert-id": "f4" }, recentStubState, new Date("2026-06-17T05:30:00.000Z")));
+  restoreEnv("PREMIUM_MAX_INSUFFICIENT_FAILS_PER_WINDOW", oldWindowMax);
+  restoreEnv("PREMIUM_INSUFFICIENT_FAIL_WINDOW_MINUTES", oldWindowMinutes);
   console.log(JSON.stringify({ ok: true, selfTest: "passed" }, null, 2));
 }
 

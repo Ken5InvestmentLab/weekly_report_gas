@@ -429,8 +429,11 @@ not for a report that still needs validation repair.
 Do not use `fail --input` to convert a whole batch into insufficient-source
 stubs. `insufficient verified sources` is an alert-by-alert conclusion after
 checking that symbol's company IR/news pages, IRBANK, and a TDnet/JPX-equivalent
-disclosure source. If several alerts look weak, verify and fail them one by one
-with `--alert-id`; otherwise keep regenerating grounded reports.
+disclosure source. Do not loop `fail --alert-id` across many alerts as a
+workaround for the batch guard; the worker rejects repeated insufficient-source
+stubs in a rolling time window unless an explicit manual mass-fail override is
+set. If several alerts look weak, keep regenerating or isolating the grounded
+reports and fail only the truly source-insufficient alert.
 
 10. Only after the dry-run succeeds, run the real post:
 
@@ -454,7 +457,8 @@ as the intended premium format.
     The worker posts a 様子見 Discord embed and records the alert as POSTED.
     Do NOT skip the alert or leave it unposted.
     Batch insufficient-source fail input is rejected by default and requires
-    an explicit manual override; normal automation must not use that override.
+    an explicit manual override; repeated per-alert insufficient-source stubs
+    are also rejected by default. Normal automation must not use that override.
 
 If `PREMIUM_LOG_SPREADSHEET_ID` is configured, the worker records all post
 events (including 様子見 stubs) in that separate spreadsheet. If the spreadsheet

@@ -275,6 +275,12 @@ requires an explicit manual override with `--allow-mass-fail` or
 `PREMIUM_ALLOW_MASS_FAIL_STUBS=true`, and should be treated as an exceptional
 operator action, not normal automation behavior.
 
+The same guard also applies across consecutive `fail --alert-id` commands. By
+default, more than 3 insufficient-source stubs within 60 minutes are rejected
+unless the same explicit mass-fail override is set. If several alerts fail
+validation, repair or isolate the grounded reports instead of looping fail
+commands.
+
 ---
 
 ## Fundamentally material disclosure policy
