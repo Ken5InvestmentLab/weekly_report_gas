@@ -117,6 +117,7 @@ OVERLAP_DAYS = 3
 
 - TradingViewリンクはJPX銘柄でも `TSE:{code}` を使う。`TYO:` は開けない銘柄がある。
 - タイトルはチャートリンクだと分かる文言にする。
+- プレミアムEmbedのタイトルは必ず `銘柄名 (code) | TradingView チャート` 形式にし、`Premium Snapshot` のフォールバックタイトルのままdry-run通過・投稿させない。reportに `url` / `symbolName` がなくても、active claim の `tradingViewUrl` / `symbolName` / `symbolCode` を合流してタイトルとEmbed URLを作る。
 - プレミアム分析は決算だけに限定しない。
 - 対象材料:
   - 業績修正

@@ -196,37 +196,38 @@ async function post(opts) {
         continue;
       }
 
-      await assertNoNewerIrbankDisclosureMiss(report, claim);
-      await resolveIrbankPdfDisclosureLinks(report);
-      const embed = buildEmbed(report);
+      const reportWithClaim = hydrateReportWithClaim(report, claim);
+      await assertNoNewerIrbankDisclosureMiss(reportWithClaim, claim);
+      await resolveIrbankPdfDisclosureLinks(reportWithClaim);
+      const embed = buildEmbed(reportWithClaim);
       const payload = {
         username: env("DISCORD_PREMIUM_USERNAME") || "天底極致 Premium Report",
         allowed_mentions: { parse: [] },
         embeds: [embed],
-        components: buildPremiumScanComponents(report, claim, embed.url)
+        components: buildPremiumScanComponents(reportWithClaim, claim, embed.url)
       };
 
       if (dryRun) {
-        results.push({ alertId: report.alertId, dryRun: true, payload });
+        results.push({ alertId: reportWithClaim.alertId, dryRun: true, payload });
         continue;
       }
 
       const discordMessage = await postPremiumDiscord(payload, webhookUrl);
       const discordMessageUrl = buildDiscordMessageUrl(discordMessage);
-      const symbolCode = String(report.symbolCode || claim.symbolCode || extractSymbolCodeFromUrl(embed.url) || "").trim();
-      state.posted[report.alertId] = {
+      const symbolCode = String(reportWithClaim.symbolCode || claim?.symbolCode || extractSymbolCodeFromUrl(embed.url) || "").trim();
+      state.posted[reportWithClaim.alertId] = {
         postedAt: new Date().toISOString(),
         symbolCode,
-        symbolName: String(report.symbolName || claim.symbolName || ""),
+        symbolName: String(reportWithClaim.symbolName || claim?.symbolName || ""),
         title: embed.title,
         url: embed.url || "",
         discordMessageUrl,
         sourceCount: countUrls(JSON.stringify(embed))
       };
-      delete state.claims[report.alertId];
-      delete state.failed[report.alertId];
-      results.push({ alertId: report.alertId, posted: true, discordMessageUrl });
-      postLogEvents.push(buildPostLogEvent(report, embed, claim, discordMessageUrl));
+      delete state.claims[reportWithClaim.alertId];
+      delete state.failed[reportWithClaim.alertId];
+      results.push({ alertId: reportWithClaim.alertId, posted: true, discordMessageUrl });
+      postLogEvents.push(buildPostLogEvent(reportWithClaim, embed, claim, discordMessageUrl));
       saveState(statePath, state);
     }
   } finally {
@@ -506,6 +507,32 @@ function allowedSignalTypes() {
   const raw = env("PREMIUM_SIGNAL_TYPES") || DEFAULT_SIGNAL_TYPES;
   const items = raw.split(",").map(normalizeSignalType).filter(Boolean);
   return new Set(items.length ? items : [DEFAULT_SIGNAL_TYPES]);
+}
+
+function hydrateReportWithClaim(report, claim) {
+  const merged = { ...(report || {}) };
+  const claimTradingViewUrl = String(claim?.tradingViewUrl || "").trim();
+
+  if (!String(merged.symbolCode || "").trim() && claim?.symbolCode) {
+    merged.symbolCode = claim.symbolCode;
+  }
+  if (!String(merged.symbolName || "").trim() && claim?.symbolName) {
+    merged.symbolName = claim.symbolName;
+  }
+  if (!String(merged.signalType || "").trim() && claim?.signalType) {
+    merged.signalType = claim.signalType;
+  }
+  if (!String(merged.url || "").trim() && claimTradingViewUrl) {
+    merged.url = claimTradingViewUrl;
+  }
+
+  const url = String(merged.url || "").trim();
+  if (!String(merged.symbolCode || "").trim()) {
+    const symbolCode = extractSymbolCodeFromUrl(url);
+    if (symbolCode) merged.symbolCode = symbolCode;
+  }
+
+  return merged;
 }
 
 function buildEmbed(report) {
@@ -2768,6 +2795,18 @@ function selfTest() {
   assert.equal(embed.color, 0x2E7D32);
   assert.equal(embed.fields[0].name, "材料インパクト");
   assert.equal(embed.fields.find(f => f.name === "開示リンク").value, "開示リンク未確認");
+  const claimHydratedEmbed = buildEmbed(hydrateReportWithClaim({
+    alertId: "claim-title",
+    symbolCode: "4321",
+    fields: embed.fields
+  }, {
+    symbolCode: "4321",
+    symbolName: "ClaimName",
+    tradingViewUrl: "https://www.tradingview.com/chart/?symbol=TSE%3A4321"
+  }));
+  assert.equal(claimHydratedEmbed.title.startsWith("ClaimName (4321) | TradingView"), true);
+  assert.notEqual(claimHydratedEmbed.title, "Premium Snapshot");
+  assert.equal(claimHydratedEmbed.url, "https://www.tradingview.com/chart/?symbol=TSE%3A4321");
   assert.deepEqual(sortReportsByImpact([
     { alertId: "n", materialImpact: "ネガティブ材料" },
     { alertId: "p", materialImpact: "ポジティブ材料" },
