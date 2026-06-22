@@ -1336,7 +1336,6 @@ function isUnavailableDisclosureStatus(status) {
 }
 
 async function assertNoNewerIrbankDisclosureMiss(report, claim) {
-  const alertId = String(report.alertId || "").trim();
   const symbolCode = String(report.symbolCode || claim?.symbolCode || "").trim();
   if (!symbolCode) return;
 
@@ -1350,15 +1349,22 @@ async function assertNoNewerIrbankDisclosureMiss(report, claim) {
     ...(await fetchYahooFinanceDisclosureCandidates(symbolCode))
   ]);
 
-  const fundamentalCandidates = candidates
+  assertNoNewerDisclosureCandidatesAccounted(report, claim, candidates, cutoffMs);
+}
+
+function assertNoNewerDisclosureCandidatesAccounted(report, claim, candidates, cutoffMs) {
+  const alertId = String(report.alertId || "").trim();
+  const symbolCode = String(report.symbolCode || claim?.symbolCode || "").trim();
+  if (!symbolCode) return;
+
+  const reviewedCandidates = dedupeDisclosureCandidates(candidates || [])
     .filter(item => item.disclosedAtMs >= cutoffMs)
-    .filter(item => isFundamentalDisclosureTitle(item.title))
     .sort((a, b) => b.disclosedAtMs - a.disclosedAtMs);
 
-  if (!fundamentalCandidates.length) return;
+  if (!reviewedCandidates.length) return;
 
-  const newest = fundamentalCandidates[0];
-  const sameTimeNewest = fundamentalCandidates.filter(item => item.disclosedAtMs === newest.disclosedAtMs);
+  const newest = reviewedCandidates[0];
+  const sameTimeNewest = reviewedCandidates.filter(item => item.disclosedAtMs === newest.disclosedAtMs);
 
   const reportText = getReportAllText(report);
   const disclosureText = getReportFieldValue(report, "開示リンク");
@@ -1376,7 +1382,7 @@ async function assertNoNewerIrbankDisclosureMiss(report, claim) {
       return `${item.dateText} ${item.timeText || ""} ${item.title}${source}`;
     }).join(" / ");
     throw new Error(
-      `report ${alertId} may be stale: newer fundamentally material disclosure exists for ${symbolCode}: ${list}`
+      `report ${alertId} may be stale: newer disclosure exists for ${symbolCode} and must be read/accounted for: ${list}`
     );
   }
 
@@ -1385,7 +1391,7 @@ async function assertNoNewerIrbankDisclosureMiss(report, claim) {
 
   if (reportMaxDateMs && reportMaxDateMs < newestDateMs) {
     throw new Error(
-      `report ${alertId} uses an older disclosure while newer fundamentally material disclosure exists for ${symbolCode}: ${newest.dateText} ${newest.title}`
+      `report ${alertId} uses an older disclosure while newer disclosure exists for ${symbolCode}: ${newest.dateText} ${newest.title}; read the newer disclosure and mention its effect or why older material remains primary`
     );
   }
 }
@@ -1589,53 +1595,6 @@ function extractDisclosureDateInfo(text) {
     timeText: time ? `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}` : "",
     disclosedAtMs
   };
-}
-
-function isFundamentalDisclosureTitle(title) {
-  return classifyDisclosureTitle(title) === "fundamental";
-}
-
-function isRoutineDisclosureTitle(title) {
-  return classifyDisclosureTitle(title) === "routine";
-}
-
-function classifyDisclosureTitle(title) {
-  const text = String(title || "");
-
-  // 1. ファンダとして必ず優先したい開示
-  if (
-    /決算短信|四半期決算|決算説明資料|決算補足説明資料/.test(text) ||
-    /業績予想|業績修正|上方修正|下方修正|通期予想|連結予想/.test(text) ||
-    /配当|増配|減配|復配|無配|剰余金|自己株式|自社株|株主還元/.test(text) ||
-    /資本コスト|株価を意識|PBR|ROE|資本政策|資本効率/.test(text) ||
-    /中期経営|中計|経営計画|事業計画/.test(text) ||
-    /月次|受注|売上速報|販売状況|稼働率/.test(text) ||
-    /買収|譲渡|取得|売却|合併|会社分割|事業譲受|事業譲渡/.test(text) ||
-    /提携|資本業務|業務提携|共同開発|大型受注|契約締結/.test(text) ||
-    /固定資産|特別利益|特別損失|減損|貸倒|投資有価証券/.test(text) ||
-    /新株予約権|第三者割当|公募増資|CB|MSワラント|希薄化/.test(text)
-  ) {
-    return "fundamental";
-  }
-
-  // 2. 人事でも、ファンダ/ガバナンス上重要になりやすいもの
-  if (
-    /代表取締役|社長交代|CEO|CFO|会長交代/.test(text) ||
-    /監査法人|会計監査人|不適切会計|不正|調査委員会|特別調査/.test(text) ||
-    /訴訟|行政処分|規制|上場維持|改善報告|監理銘柄|特設注意市場/.test(text)
-  ) {
-    return "fundamental";
-  }
-
-  // 3. 原則スルーでよい通常開示
-  if (
-    /人事異動|役員人事|執行役員|組織変更|定款一部変更|支配株主等に関する事項/.test(text) ||
-    /株主総会|招集通知|独立役員届出|コーポレート・ガバナンス報告書/.test(text)
-  ) {
-    return "routine";
-  }
-
-  return "other";
 }
 
 function getReportFieldValue(report, fieldName) {
@@ -3240,6 +3199,31 @@ function selfTest() {
   assert.equal(linkedLogEvent.reason, "[混在/要確認：利益改善余地はあるが、投資負担と継続性の確認が必要。](https://discord.com/channels/1/2/3)");
   assert.equal(extractIrbankPdfUrlFromHtml('<a href="https://f.irbank.net/pr/20260401/140120260326590425.pdf">PDF</a>', "140120260326590425"), "https://f.irbank.net/pr/20260401/140120260326590425.pdf");
   assert.equal(extractIrbankPdfUrlFromHtml('<a href="https://f.irbank.net/pdf/20260430/140120260430514206.pdf">PDF</a>', "140120260430514206"), "https://f.irbank.net/pdf/20260430/140120260430514206.pdf");
+  const perovskiteDisclosure = {
+    dateText: "2026-06-19",
+    timeText: "15:40",
+    title: "ペロブスカイト太陽電池事業に関するプロジェクト投資枠組み協定書の締結及び30万USDの前受金受領のお知らせ",
+    url: "https://f.irbank.net/pdf/20260619/140120260619574294.pdf",
+    documentId: "140120260619574294",
+    sourceName: "IRBANK",
+    disclosedAtMs: Date.UTC(2026, 5, 19, 6, 40, 0)
+  };
+  assert.throws(() => assertNoNewerDisclosureCandidatesAccounted({
+    alertId: "stale-5216",
+    symbolCode: "5216",
+    fields: [
+      { name: "足元材料", value: "6月15日の新株予約権と資金使途変更を中心に、希薄化と資金繰りを整理しています。" },
+      { name: "開示リンク", value: "[2026-06-15 第三者割当による新株式発行に関するお知らせ(16:00)](https://f.irbank.net/pdf/20260615/140120260615570766.pdf)" }
+    ]
+  }, { symbolCode: "5216" }, [perovskiteDisclosure], Date.UTC(2026, 4, 8, 0, 0, 0)), /newer disclosure exists/);
+  assert.doesNotThrow(() => assertNoNewerDisclosureCandidatesAccounted({
+    alertId: "reviewed-5216",
+    symbolCode: "5216",
+    fields: [
+      { name: "足元材料", value: "6月19日に投資枠組み協定と30万USDの前受金受領を開示し、正式契約・出資転換・返還可否は未確定です。" },
+      { name: "開示リンク", value: "[2026-06-19 ペロブスカイト太陽電池事業に関するプロジェクト投資枠組み協定書の締結及び30万USDの前受金受領のお知らせ(15:40)](https://f.irbank.net/pdf/20260619/140120260619574294.pdf)" }
+    ]
+  }, { symbolCode: "5216" }, [perovskiteDisclosure], Date.UTC(2026, 4, 8, 0, 0, 0)));
   assert.equal(getPostSkipReason("posted-alert", { posted: { "posted-alert": {} }, claims: {} }, null), "already posted");
   assert.equal(getPostSkipReason("unclaimed-alert", { posted: {}, claims: {} }, null), "no active claim");
   assert.equal(getPostSkipReason("claimed-alert", { posted: {}, claims: { "claimed-alert": { claimId: "c1" } } }, { claimId: "c1" }), "");
