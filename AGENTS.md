@@ -430,7 +430,7 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 - 同じ13:21取得カーソルでタイムアウトが続く場合は、次回実行でYahoo取得バッチを縮小し、単一銘柄でも詰まる場合だけ修復キューへ逃がして全体を止めない。
 - 日次メンテナンス、optimizer、GAP修復には進まない。
 - 完了時に `mega-validation-report.yml` をGitHub Actionsへdispatchし、HTMLレポートだけを再生成する。今日のBOTTOMシグナルがある場合は、既に当日AMのOHLCVがあり新規取得不要で早期終了するときもdispatchを省略しない。
-- `/scan` / ブラウザ確認を案内するDiscord通知はGASから送らない。HTML生成後の通知は `screening-bot` の `mega-validation-report.yml` が `DISCORD_REPORT_WEBHOOK_URL` で送る。
+- `/scan` / ブラウザ確認を案内するDiscord通知はGASから送らない。13:21のmidday dispatchでは `mega-validation-report.yml` に `notify_discord=true` を渡し、HTML生成後の通知は `screening-bot` の `mega-validation-report.yml` が `DISCORD_REPORT_WEBHOOK_URL` で送る。
 
 #### 15:51: `fetchOHLCVForNewAlerts`
 

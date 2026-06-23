@@ -890,6 +890,10 @@ function triggerGitHubActionsMegaValidationReport_(context) {
   const workflow = "mega-validation-report.yml";
   const url = `https://api.github.com/repos/${repo}/actions/workflows/${workflow}/dispatches`;
   try {
+    const dispatchPayload = { ref: "main" };
+    if (payloadContext.notifyDiscord === true) {
+      dispatchPayload.inputs = { notify_discord: "true" };
+    }
     const res = UrlFetchApp.fetch(url, {
       method: "post",
       headers: {
@@ -898,7 +902,7 @@ function triggerGitHubActionsMegaValidationReport_(context) {
         "X-GitHub-Api-Version": "2022-11-28"
       },
       contentType: "application/json",
-      payload: JSON.stringify({ ref: "main" }),
+      payload: JSON.stringify(dispatchPayload),
       muteHttpExceptions: true
     });
     const status = res.getResponseCode();
@@ -935,7 +939,8 @@ function triggerMiddayMegaReportIfTodaySignals_(todaySymbols, context) {
     {
       source: "midday_ohlcv",
       fetchedSymbols: count,
-      appendedRows: 0
+      appendedRows: 0,
+      notifyDiscord: true
     },
     context || {}
   );
@@ -2827,7 +2832,8 @@ const reportDispatch = triggerGitHubActionsMegaValidationReport_({
   source: "midday_ohlcv",
   refreshId: refreshId,
   fetchedSymbols: newAlertCount,
-  appendedRows: appended
+  appendedRows: appended,
+  notifyDiscord: true
 });
 
 writeProcessLog_("OHLCV-AM", appended > 0
