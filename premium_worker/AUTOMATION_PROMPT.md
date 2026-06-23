@@ -321,6 +321,14 @@ Keep this as a source-grounded material impact label, not a trading action.
    `開示リンク`, but do not omit a verified direct disclosure merely because one
    stronger disclosure is already linked.
 
+   If `足元材料`, `ファンダ要点`, or `注意点` mentions an IR/disclosure title,
+   event, or official press release, the corresponding disclosure must also
+   appear in `開示リンク`. This includes secondary but explicitly discussed
+   items such as industry-award press releases, governance notices, shareholder
+   meeting notices, dividend notices, or social-media/account launch notices.
+   If there is no direct PDF but an official company/PR detail page exists, put
+   that detail page in `開示リンク` with the same timestamped label.
+
    Every `開示リンク` label MUST be formatted as:
 
    `YYYY-MM-DD 開示タイトル(hh:mm)`

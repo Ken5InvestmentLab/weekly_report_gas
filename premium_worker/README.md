@@ -645,6 +645,14 @@ Include every recent important disclosure used to write:
 注意点
 ```
 
+If one of those fields mentions an IR/disclosure title, event, or official press
+release, include that same disclosure in `開示リンク`. Do not discuss an
+industry-award press release, governance notice, shareholder meeting notice,
+dividend notice, social-media/account launch notice, or similar IR item in the
+analysis while linking only the main earnings release. If no direct PDF exists
+but an official company/PR detail page exists, put that detail page in
+`開示リンク` with the same timestamped label.
+
 For example, include all of these when they are used:
 
 - quarterly result

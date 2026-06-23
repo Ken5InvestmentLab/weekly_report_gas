@@ -567,6 +567,7 @@ function buildEmbed(report) {
   assertNoDuplicateDisclosureLinks(alertId, fieldMap);
   assertSourceLinksAreReferencePages(alertId, fieldMap);
   assertDescriptiveLinkLabels(alertId, fieldMap);
+  assertNarrativeMentionedDisclosuresAreLinked(alertId, fieldMap);
   assertJapaneseNarrativeFields(alertId, fieldMap);
   assertNoSymbolCodeInCaution(alertId, report, fieldMap);
   assertConciseMaterialNarrative(alertId, fieldMap);
@@ -1216,6 +1217,33 @@ function assertDisclosureLinksAreDirectDisclosures(alertId, fieldMap) {
   }
 }
 
+function assertNarrativeMentionedDisclosuresAreLinked(alertId, fieldMap) {
+  const disclosureText = String(fieldMap.get("開示リンク") || "");
+  if (!hasUrl(disclosureText)) return;
+
+  const narrativeText = ["足元材料", "ファンダ要点", "注意点"]
+    .map(name => String(fieldMap.get(name) || ""))
+    .join("\n");
+
+  for (const title of extractQuotedDisclosureTitles(narrativeText)) {
+    if (!isDisclosureLikeTitle(title)) continue;
+    if (!looseTitleIncluded(disclosureText, title)) {
+      throw new Error(`report ${alertId} mentions disclosure in narrative but omits it from 開示リンク: ${title}`);
+    }
+  }
+}
+
+function extractQuotedDisclosureTitles(text) {
+  return [...String(text || "").matchAll(/「([^」]{12,180})」/g)]
+    .map(match => normalizeSpaces(match[1]))
+    .filter(Boolean);
+}
+
+function isDisclosureLikeTitle(title) {
+  const text = String(title || "");
+  return /お知らせ|決算|短信|説明資料|招集通知|電子提供|NOTICE|MATERIALS|Training Industry|トップ・トレーニング|配当|自己株|株式|制度|選出|開示|報告|計画|予想|差異|資料/.test(text);
+}
+
 function isTimestampedDisclosureLabel(label) {
   return /^20\d{2}-\d{2}-\d{2}\s+\S.+\((?:[01]?\d|2[0-3]):[0-5]\d\)$/.test(normalizeDisclosureLabelForDisplay(label));
 }
@@ -1367,7 +1395,23 @@ function assertNoNewerDisclosureCandidatesAccounted(report, claim, candidates, c
   const sameTimeNewest = reviewedCandidates.filter(item => item.disclosedAtMs === newest.disclosedAtMs);
 
   const reportText = getReportAllText(report);
+  const narrativeText = getReportNarrativeText(report);
   const disclosureText = getReportFieldValue(report, "開示リンク");
+
+  const mentionedButUnlinked = reviewedCandidates.filter(item => {
+    const titleMentioned = narrativeText.includes(item.title) || looseTitleIncluded(narrativeText, item.title);
+    if (!titleMentioned) return false;
+    const titleLinked = disclosureText.includes(item.title) || looseTitleIncluded(disclosureText, item.title);
+    const urlLinked = disclosureText.includes(item.url) || disclosureText.includes(item.documentId);
+    return !(titleLinked || urlLinked);
+  });
+
+  if (mentionedButUnlinked.length) {
+    const list = mentionedButUnlinked.map(item => `${item.dateText} ${item.timeText || ""} ${item.title}`).join(" / ");
+    throw new Error(
+      `report ${alertId} mentions disclosure in narrative but omits it from 開示リンク: ${list}`
+    );
+  }
 
   const missing = sameTimeNewest.filter(item => {
     const titleHit = reportText.includes(item.title) || looseTitleIncluded(reportText, item.title);
@@ -1611,6 +1655,13 @@ function getReportAllText(report) {
   ].join("\n");
 }
 
+function getReportNarrativeText(report) {
+  return (report.fields || [])
+    .filter(field => ["足元材料", "ファンダ要点", "注意点"].includes(String(field.name || "").trim()))
+    .map(field => `${field.name || ""}\n${field.value || ""}`)
+    .join("\n");
+}
+
 function looseTitleIncluded(reportText, title) {
   const a = normalizeTitleForCompare(reportText);
   const b = normalizeTitleForCompare(title);
@@ -1784,10 +1835,19 @@ function isDisclosureDetailPageUrl(url) {
     if (host === "irbank.net" && /^\/[0-9A-Z]{4,5}\/[0-9]{12,}\/?$/i.test(pathname)) return true;
     if (host === "irbank.net" && /^\/E[0-9A-Z]+\/[0-9]{12,}\/?$/i.test(pathname)) return true;
     if (host === "prtimes.jp" && /^\/main\/html\/rd\/p\/[0-9.]+\.html$/i.test(pathname)) return true;
+    if (isCompanyDisclosureDetailPath(pathname)) return true;
   } catch {
     return false;
   }
   return false;
+}
+
+function isCompanyDisclosureDetailPath(pathname) {
+  const text = String(pathname || "");
+  if (/\.(?:css|js|png|jpe?g|gif|svg|webp|ico)(?:$|[?#])/i.test(text)) return false;
+  if (/\/(?:ir|news|press|release|releases|resources|results|library)\/?$/i.test(text)) return false;
+  if (/\/(?:ir|news|press|release|releases|resources|results|library)\.(?:html?|php|aspx)$/i.test(text)) return false;
+  return /\/(?:ir|news|press|release|releases|resources)\//i.test(text);
 }
 
 function resolveEmbedColor(report, fieldMap) {
@@ -2882,7 +2942,7 @@ function selfTest() {
       { name: "開示リンク", value: "[2026-04-01 子会社化完了に関するお知らせ(15:00)](https://example.com/disclosure.pdf)" },
       { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
     ]
-  }), /disclosure title lists/);
+  }), /mentions disclosure in narrative but omits it from 開示リンク/);
   assert.throws(() => buildEmbed({
     alertId: "a4c",
     url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
@@ -3199,6 +3259,36 @@ function selfTest() {
   assert.equal(linkedLogEvent.reason, "[混在/要確認：利益改善余地はあるが、投資負担と継続性の確認が必要。](https://discord.com/channels/1/2/3)");
   assert.equal(extractIrbankPdfUrlFromHtml('<a href="https://f.irbank.net/pr/20260401/140120260326590425.pdf">PDF</a>', "140120260326590425"), "https://f.irbank.net/pr/20260401/140120260326590425.pdf");
   assert.equal(extractIrbankPdfUrlFromHtml('<a href="https://f.irbank.net/pdf/20260430/140120260430514206.pdf">PDF</a>', "140120260430514206"), "https://f.irbank.net/pdf/20260430/140120260430514206.pdf");
+  assert.throws(() => buildEmbed({
+    alertId: "mentioned-disclosure-unlinked",
+    url: "https://www.tradingview.com/chart/?symbol=TSE%3A9610",
+    symbolCode: "9610",
+    symbolName: "ウィルソン",
+    fields: [
+      { name: "材料インパクト", value: "混在/要確認：赤字は縮小したが、資本増強と受注回復の確認が必要です。" },
+      { name: "事業概要", value: "法人向け研修、組織開発、リーダーシップ育成を提供する教育研修会社です。" },
+      { name: "足元材料", value: "5月15日の通期決算では経常損失が続きましたが、前年より赤字幅は縮小しています。新株発行と新株予約権行使が資本を下支えしており、営業回復だけではまだ弱い状態です。" },
+      { name: "ファンダ要点", value: "2026年6月2日の「トップ・トレーニングサービス企業 20 社」は営業面の信用材料ですが、法人研修の受注額、講師稼働率、海外子会社の採算が戻らなければ売上転換は限定的です。" },
+      { name: "注意点", value: "新株発行による希薄化と研修需要の回復時期が利益回復を左右します。表彰は案件獲得の補助材料であり、粗利率と継続受注が改善しない場合は赤字縮小が止まりやすいです。" },
+      { name: "開示リンク", value: "[2026-05-15 2026年3月期決算短信〔日本基準〕(連結)(15:30)](https://f.irbank.net/pdf/20260515/140120260515537096.pdf)" },
+      { name: "Sources", value: "[ウィルソン・ラーニング IR情報](https://www.wlw.co.jp/ir/)" }
+    ]
+  }), /mentions disclosure in narrative but omits it from 開示リンク/);
+  assert.doesNotThrow(() => buildEmbed({
+    alertId: "mentioned-disclosure-linked",
+    url: "https://www.tradingview.com/chart/?symbol=TSE%3A9610",
+    symbolCode: "9610",
+    symbolName: "ウィルソン",
+    fields: [
+      { name: "材料インパクト", value: "混在/要確認：赤字は縮小したが、資本増強と受注回復の確認が必要です。" },
+      { name: "事業概要", value: "法人向け研修、組織開発、リーダーシップ育成を提供する教育研修会社です。" },
+      { name: "足元材料", value: "5月15日の通期決算では経常損失が続きましたが、前年より赤字幅は縮小しています。新株発行と新株予約権行使が資本を下支えしており、営業回復だけではまだ弱い状態です。" },
+      { name: "ファンダ要点", value: "2026年6月2日の「トップ・トレーニングサービス企業 20 社」は営業面の信用材料ですが、法人研修の受注額、講師稼働率、海外子会社の採算が戻らなければ売上転換は限定的です。" },
+      { name: "注意点", value: "新株発行による希薄化と研修需要の回復時期が利益回復を左右します。表彰は案件獲得の補助材料であり、粗利率と継続受注が改善しない場合は赤字縮小が止まりやすいです。" },
+      { name: "開示リンク", value: "[2026-06-02 人材開発情報大手Training Industryの「トップ・トレーニングサービス企業 20 社」に5年連続で選出(11:00)](https://japan.wilsonlearning.com/resources/pr-260602_0/)\n[2026-05-15 2026年3月期決算短信〔日本基準〕(連結)(15:30)](https://f.irbank.net/pdf/20260515/140120260515537096.pdf)" },
+      { name: "Sources", value: "[ウィルソン・ラーニング IR情報](https://www.wlw.co.jp/ir/)" }
+    ]
+  }));
   const perovskiteDisclosure = {
     dateText: "2026-06-19",
     timeText: "15:40",
@@ -3224,6 +3314,31 @@ function selfTest() {
       { name: "開示リンク", value: "[2026-06-19 ペロブスカイト太陽電池事業に関するプロジェクト投資枠組み協定書の締結及び30万USDの前受金受領のお知らせ(15:40)](https://f.irbank.net/pdf/20260619/140120260619574294.pdf)" }
     ]
   }, { symbolCode: "5216" }, [perovskiteDisclosure], Date.UTC(2026, 4, 8, 0, 0, 0)));
+  const governanceDisclosure = {
+    dateText: "2026-05-22",
+    timeText: "11:00",
+    title: "役員退職慰労金制度の廃止に関するお知らせ",
+    url: "https://www2.jpx.co.jp/disc/52870/140120260521543824.pdf",
+    documentId: "140120260521543824",
+    sourceName: "Yahoo Finance O",
+    disclosedAtMs: Date.UTC(2026, 4, 22, 2, 0, 0)
+  };
+  assert.throws(() => assertNoNewerDisclosureCandidatesAccounted({
+    alertId: "unlinked-5287",
+    symbolCode: "5287",
+    fields: [
+      { name: "注意点", value: "5月22日の役員退職慰労金制度の廃止に関するお知らせは報酬体系見直しのガバナンス材料です。" },
+      { name: "開示リンク", value: "[2026-05-15 2026年3月期 決算短信〔日本基準〕（非連結）(11:00)](https://f.irbank.net/pdf/20260515/140120260513530229.pdf)" }
+    ]
+  }, { symbolCode: "5287" }, [governanceDisclosure], Date.UTC(2026, 4, 8, 0, 0, 0)), /mentions disclosure in narrative but omits it from 開示リンク/);
+  assert.doesNotThrow(() => assertNoNewerDisclosureCandidatesAccounted({
+    alertId: "linked-5287",
+    symbolCode: "5287",
+    fields: [
+      { name: "注意点", value: "5月22日の役員退職慰労金制度の廃止に関するお知らせは報酬体系見直しのガバナンス材料です。" },
+      { name: "開示リンク", value: "[2026-05-22 役員退職慰労金制度の廃止に関するお知らせ(11:00)](https://www2.jpx.co.jp/disc/52870/140120260521543824.pdf)" }
+    ]
+  }, { symbolCode: "5287" }, [governanceDisclosure], Date.UTC(2026, 4, 8, 0, 0, 0)));
   assert.equal(getPostSkipReason("posted-alert", { posted: { "posted-alert": {} }, claims: {} }, null), "already posted");
   assert.equal(getPostSkipReason("unclaimed-alert", { posted: {}, claims: {} }, null), "no active claim");
   assert.equal(getPostSkipReason("claimed-alert", { posted: {}, claims: { "claimed-alert": { claimId: "c1" } } }, { claimId: "c1" }), "");
