@@ -54,7 +54,7 @@ OVERLAP_DAYS = 3
 | 状態 | 取得方法 |
 |---|---|
 | `lastTs` なし | 直近120日分を `period1/period2` で取得 |
-| `OHLCV_REPAIR_SYMBOLS` 対象 | OHLCV未取得や手動全量修復では直近120日分。15:51本体の既存銘柄は当日PM分のみ |
+| `OHLCV_REPAIR_SYMBOLS` 対象 | OHLCV未取得・120日超過・手動全量修復では直近120日分。15:51本体の120日以内の既存銘柄は `lastTs` の次セッションから当日PMまで |
 | `lastTs` が取得終了時刻以上 | 異常値対策として直近範囲を `period1/period2` で取得 |
 | `lastTs` が直近5日以内 | 通常差分取得では `period1/period2` を強制し、`lastTs - 3日` から取得終了時刻まで取得 |
 | `lastTs` が6日〜120日以内 | `lastTs` の3日前から現在まで `period1/period2` で取得 |
@@ -62,8 +62,8 @@ OVERLAP_DAYS = 3
 
 重要。
 
-- 13:21先行取得の既存OHLCV銘柄は例外的に当日AMだけを取得する。OHLCV未取得銘柄は直近120日分、既存OHLCV銘柄は当日08:00〜13:00:59 JSTを `period1/period2` で取得し、重複整理・GAP修復・広範囲timestamp掃除は15:51本番側へ委譲する。
-- 15:51本体の既存OHLCV銘柄も例外的に当日PMだけを取得する。既存OHLCV銘柄は当日13:00:00 JSTから取得終了時刻までを `period1/period2` で取得し、`lastTs >= 当日13:00 JST` の銘柄は取得対象から外す。
+- 13:21先行取得では、OHLCV未取得銘柄または `lastTs` が取得終了時刻から120日より古い銘柄は直近120日分を取得する。120日以内の既存OHLCV銘柄は、`lastTs` が当日09:00 JSTより古い場合、`lastTs` の次セッションから当日13:00:59 JSTまでを `period1/period2` で取得する。例: `lastTs=5/13 13:00` なら `5/14 09:00` から当日AMまで取得する。
+- 15:51本体では、OHLCV未取得銘柄または `lastTs` が取得終了時刻から120日より古い銘柄は直近120日分を取得する。120日以内の既存OHLCV銘柄は、`lastTs` が当日13:00 JSTより古い場合、`lastTs` の次セッションから当日PMまでを `period1/period2` で取得する。例: `lastTs=6/1 13:00` なら `6/2 09:00` から当日PMまで取得する。`lastTs >= 当日13:00 JST` の銘柄は取得対象から外す。
 - 15:51本体では `range=5d` を使わない。`range=5d` は取得終了時刻を明示できず、当日足のキャッシュ差異でAM/PM集約が壊れるため、当日AM/PMだけの取得でも `period1/period2` を使う。
 - 既存銘柄の過去GAPは15:51 PHASE1の重ね取りで埋めず、日次メンテ後の `quickRepairRecentGaps` と post-repair cleanup で補填・整理する。
 - 15:51本体や後段cleanupでは、GAS再試行や120日新規取得に備えて `timestamp + symbol` の軽量重複ガード・重複整理を保険として残す。
@@ -307,7 +307,7 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 - `09:00 JST` はAM代表行。
 - `13:00 JST` はPM代表行。
 - B列 `alert_id` には通常取得、`MIDDAY_yyyy-mm-dd`、`MIDDAY_LOCKED_yyyy-mm-dd`、`GAP_REPAIR` などのマーカーが入る。
-- `MIDDAY_LOCKED_yyyy-mm-dd` は13:21に `alerts_raw` の出来高を転記したAM保護行。15:51本番、GAP修復、重複整理、MIDDAY掃除でも削除・上書きしない。
+- `MIDDAY_LOCKED_yyyy-mm-dd` は13:21に `alerts_raw` の出来高と `entry_price` 由来の終値を転記したAM保護行。15:51本番、GAP修復、重複整理、MIDDAY掃除でも削除・上書きしない。
 - 重複排除は `timestamp + symbol`。
 - 最終状態は必ず timestamp 昇順へ戻す。
 
@@ -365,7 +365,7 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 | `OHLCV_POST_REPAIR_CLEANUP_STATE_V1` | GAP修復完了後の小分けcleanup状態 |
 | `OHLCV_POST_REPAIR_FINAL_SORT_STATE_V1` | GAP修復後cleanup完了後の最終sort・GitHub Actions・Discord通知の再開状態 |
 | `OHLCV_INTRADAY_STALE_SYMBOLS_V1` | Yahoo 1hのOHLCが対象期間で古い/nullの銘柄の一時保留リスト |
-| `RAW_ALERT_VOLUME_MAP_PROP_V1` | 15:51 PHASE1 resumeで再利用する当日 `alerts_raw` 出来高マップキャッシュ |
+| `RAW_ALERT_VOLUME_MAP_PROP_V2` | 当日 `alerts_raw` の出来高・`entry_price` 終値マップキャッシュ。13:21/15:51入口では直前追加を取りこぼさないよう強制再読みにできる |
 | `CLEANUP_LEGACY_STATE_V1` | 旧OHLCV残骸整理の再開状態 |
 | `CLEANUP_LEGACY_AUTO_QUICK_REPAIR_V1` | cleanup完了後に `quickRepairTrigger` を予約するためのフラグ |
 | `EVAL_OHLCV_COVERAGE_REPAIR_STATE_V1` | 評価対象銘柄120日OHLCV補填の再開状態 |
@@ -417,14 +417,14 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 - 15:51本番処理が近い場合は再開せず終了。
 - 対象銘柄は `alerts_raw` と `signals_archive` に登場する `BOTTOM` シグナルの銘柄。`TOP` シグナルだけの銘柄は取得対象にしない。
 - 今日シグナルが出た銘柄数はメタ情報として `OHLCV_MIDDAY_NEW_ALERT_COUNT` に保持。
-- OHLCV未取得銘柄だけ120日分取得。
-- 既存OHLCVがある銘柄は、当日AM未取得の場合だけ当日08:00〜13:00:59 JSTを `period1/period2` で取得する。
+- OHLCV未取得銘柄、または `lastTs` が取得終了時刻から120日より古い銘柄は120日分取得。
+- 120日以内の既存OHLCVがある銘柄は、当日AM未取得の場合、`lastTs` の次セッションから当日13:00:59 JSTまでを `period1/period2` で取得する。
 - 既存OHLCVがある銘柄で `lastTs >= 当日09:00 JST` のものは13:21取得対象から外す。
 - fetch終端は当日AM分まで。
 - 当日PM行や14:00以降のYahoo足、15:30終値スナップショットは保存しない。
 - 13:21の追記は `appendMiddayOhlcvRowsWithoutGuard_()` の軽量appendを使い、既存キー探索、重複ガード、readback削除、広範囲timestamp後処理は行わない。
 - 13:21で重複やGAPが残っても、その場で直さず15:51本番、GAP修復、post-repair cleanupへ委譲する。
-- 13:21で `alerts_raw` から出来高を転記したAM行は `MIDDAY_LOCKED_yyyy-mm-dd` として保存し、後続処理では保護する。
+- 13:21で `alerts_raw` から出来高と `entry_price` 由来の終値を転記したAM行は `MIDDAY_LOCKED_yyyy-mm-dd` として保存し、後続処理では保護する。
 - 13:21再開時も事前の末尾12,000行掃除や `postprocessMiddayOhlcv` 予約は行わない。
 - 13:21取得の入口では、タイムアウト保険として `resumeOHLCVFetchMidday` を6.5分後に必ず予約する。通常の自前pause/resumeと重なっても、次回起動時に同じ入口で安全トリガーを張り直す。
 - 13:21取得結果は実行末尾までメモリに溜めず、Yahoo取得バッチごとに `ohlcv_4h` へ追記し、直後にカーソル・銘柄別最終timestamp・120日取得対象を保存する。タイムアウトや15:51引き継ぎ時に、未永続化の取得済み行を失わないようにする。
@@ -455,18 +455,18 @@ fetchOHLCVForNewAlerts
 - 13:21専用プロパティをクリア。
 - 13:21で書き込まれたOHLCV行はシート上の成果として引き継ぐ。
 - 13:21から15:51へ引き継がれるのは、`ohlcv_4h` に永続化済みの行だけ。13:21側で未追記のメモリ上データを前提にしない。
-- 15:51側では、OHLCV未取得銘柄は120日分、既存OHLCV銘柄は当日PM分だけを取得する。
+- 15:51側では、OHLCV未取得銘柄または `lastTs` が取得終了時刻から120日より古い銘柄は120日分、120日以内の既存OHLCV銘柄は `lastTs` の次セッションから当日PMまでを取得する。
 - 15:51取得の入口では、タイムアウト保険として `resumeOHLCVFetch` を6.5分後に必ず予約する。通常の自前pause/resumeと重なっても、次回起動時に同じ入口で安全トリガーを張り直す。
 - 既存OHLCV銘柄で `lastTs >= 当日13:00 JST` のものは15:51取得対象から外す。
 - 15:51本番で120日新規取得により同じ日付・銘柄のAM行を取得できた場合、通常の `MIDDAY_yyyy-mm-dd` のAM行は削除対象にできるが、`MIDDAY_LOCKED_yyyy-mm-dd` は保護する。
 - 15:51本番の当日PM出来高は、保護AM出来高または13:21保存済みAM出来高があればそれを優先して `日足出来高 - AM出来高` で補正する。AM行自体は上書きしない。
-- 15:51 PHASE1の `rawAlertVolumeMap` は、13:21由来のキャッシュを初回15:51開始時だけ破棄し、メイン状態があるresumeでは保持する。再開ごとに `alerts_raw` 全体を読み直さない。
+- 15:51 PHASE1の `rawAlertVolumeMap` / `rawAlertCloseMap` は、当日直前の `alerts_raw` 追加を取りこぼさないようPHASE1入口で強制再読みにできる。読み取る対象はBOTTOMの当日出来高と `entry_price` 終値に限定する。
 - 15:51 PHASE1の当日AM出来高マップは、`ohlcv_4h` のtimestamp昇順前提で当日の日付範囲だけを読んで作る。resumeごとに末尾60,000行を無条件で読まない。
 - 当日が休場日の場合はスキップ。
 - 対象銘柄は `alerts_raw` と `signals_archive` に登場する `BOTTOM` シグナルの銘柄。`OHLCV_REPAIR_SYMBOLS` も、その `BOTTOM` 銘柄集合に含まれるものだけ取得対象にする。
-- OHLCV未取得銘柄は120日分取得。
-- 既存OHLCVがある `OHLCV_REPAIR_SYMBOLS` の銘柄も、`BOTTOM` 銘柄に該当する場合だけ当日PM分を取得し、過去GAPは後段のGAP修復へ委譲する。
-- 既存OHLCV銘柄の当日PM取得窓は、当日13:00:00 JSTから15:51実行終了時刻までを `period1/period2` で明示する。
+- OHLCV未取得銘柄、または `lastTs` が取得終了時刻から120日より古い銘柄は120日分取得。
+- 120日以内の既存OHLCVがある `OHLCV_REPAIR_SYMBOLS` の銘柄も、`BOTTOM` 銘柄に該当する場合だけ `lastTs` の次セッションから当日PMまでを取得し、120日より古い過去GAPは後段のGAP修復へ委譲する。
+- 120日以内の既存OHLCV銘柄の取得窓は、`lastTs` の次セッションから15:51実行終了時刻までを `period1/period2` で明示する。
 - 15:51 PHASE1の取得結果も実行末尾までメモリに溜めず、Yahoo取得バッチごとに追記し、直後にカーソル・銘柄別最終timestamp・120日取得対象を保存する。
 - 15:51 PHASE1でも同じカーソルでYahoo取得が詰まる場合は、次回実行でバッチを縮小し、単一銘柄でも詰まる場合だけ修復キューへ逃がす。
 
