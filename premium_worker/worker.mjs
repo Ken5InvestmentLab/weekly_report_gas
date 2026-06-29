@@ -2668,8 +2668,7 @@ function normalizeNarrativeTemplateSentences(value, report = {}) {
 }
 
 function assertNoOverusedNarrativeSentences(buckets, reports) {
-  const reportCount = Array.isArray(reports) ? reports.length : 0;
-  const threshold = Math.max(3, Math.ceil(reportCount * 0.15));
+  const threshold = 3;
   for (const bucket of buckets.values()) {
     if (bucket.symbols.length < threshold) continue;
     throw new Error(
@@ -2900,6 +2899,19 @@ function selfTest() {
     }]
   }));
   assert.throws(() => normalizeReports({ reports: repeatedTemplateReports }), /same normalized narrative sentence/);
+  const largeBatchTemplateReports = Array.from({ length: 100 }, (_, index) => {
+    const symbolCode = String(3000 + index);
+    const repeated = index < 3
+      ? "今回の材料は単発の開示タイトルだけでなく、次回決算で営業利益率、資金残高、受注・顧客指標に残るかで評価が変わります。"
+      : `個別材料${index}は受注単価、利益率、資金繰りへの波及がそれぞれ異なるため、銘柄固有に評価します。`;
+    return {
+      alertId: `large-template-${symbolCode}`,
+      symbolCode,
+      symbolName: `大型テスト${symbolCode}`,
+      fields: [{ name: REQUIRED_FIELDS[2], value: `大型テスト${symbolCode}では、${repeated}` }]
+    };
+  });
+  assert.throws(() => normalizeReports({ reports: largeBatchTemplateReports }), /same normalized narrative sentence/);
   assert.throws(() => buildEmbed({
     alertId: "a2",
     fields: REQUIRED_FIELDS.map(name => ({ name, value: name === "Sources" ? "no source" : "x" }))
