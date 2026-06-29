@@ -2608,9 +2608,11 @@ function assertNoRepeatedNarrativeTemplates(reports) {
   ];
 
   const seen = new Map();
+  const narrativeFieldsForTemplateCheck = [...new Set([IMPACT_FIELD, ...narrativeFields])];
+  const repeatedSentenceBuckets = new Map();
   for (const report of reports || []) {
     const symbol = String(report.symbolCode || report.alertId || "unknown");
-    for (const fieldName of narrativeFields) {
+    for (const fieldName of narrativeFieldsForTemplateCheck) {
       const value = String((report.fields || []).find(field => field.name === fieldName)?.value || "").trim();
       if (!value) continue;
       const genericHit = genericTemplatePatterns.find(pattern => pattern.test(value));
@@ -2624,8 +2626,61 @@ function assertNoRepeatedNarrativeTemplates(reports) {
         throw new Error(`reports ${previous} and ${symbol} reuse the same ${fieldName}; write company-specific analysis`);
       }
       seen.set(key, symbol);
+      for (const sentenceKey of normalizeNarrativeTemplateSentences(value, report)) {
+        const bucketKey = `${fieldName}\n${sentenceKey}`;
+        const bucket = repeatedSentenceBuckets.get(bucketKey) || { fieldName, symbols: [] };
+        if (!bucket.symbols.includes(symbol)) bucket.symbols.push(symbol);
+        repeatedSentenceBuckets.set(bucketKey, bucket);
+      }
     }
   }
+  assertNoOverusedNarrativeSentences(repeatedSentenceBuckets, reports);
+}
+
+function normalizeNarrativeTemplateSentences(value, report = {}) {
+  const text = normalizeSpaces(value);
+  if (!text) return [];
+
+  const symbolName = String(report.symbolName || "").trim();
+  const symbolCode = String(report.symbolCode || "").trim();
+  const splitPattern = new RegExp(`[${String.fromCharCode(0x3002)}.!?]+`);
+  const datePattern = new RegExp(`[0-9]{1,2}${String.fromCharCode(0x6708)}[0-9]{1,2}${String.fromCharCode(0x65e5)}`, "g");
+  const quotePattern = new RegExp(`${String.fromCharCode(0x300c)}[^${String.fromCharCode(0x300d)}]+${String.fromCharCode(0x300d)}`, "g");
+  const items = [];
+
+  for (const rawSentence of text.split(splitPattern)) {
+    let sentence = normalizeSpaces(rawSentence);
+    if (sentence.length < 24) continue;
+    sentence = sentence
+      .replace(/\[[^\]\n]+\]\(https?:\/\/[^)\s]+\)/g, "<LINK>")
+      .replace(/https?:\/\/\S+/g, "<URL>")
+      .replace(datePattern, "<DATE>")
+      .replace(quotePattern, "<TITLE>")
+      .replace(/\d{4}-\d{2}-\d{2}/g, "<DATE>")
+      .replace(/[A-Za-z0-9_.()\-:,/ ]{8,}/g, "<TOKEN>");
+    if (symbolName) sentence = sentence.replace(new RegExp(escapeRegExp(symbolName), "g"), "<NAME>");
+    if (symbolCode) sentence = sentence.replace(new RegExp(escapeRegExp(symbolCode), "g"), "<CODE>");
+    sentence = normalizeSpaces(sentence);
+    if (sentence.length >= 24 && /[\u3040-\u30ff\u3400-\u9fff]/.test(sentence)) items.push(sentence);
+  }
+
+  return [...new Set(items)];
+}
+
+function assertNoOverusedNarrativeSentences(buckets, reports) {
+  const reportCount = Array.isArray(reports) ? reports.length : 0;
+  const threshold = Math.max(3, Math.ceil(reportCount * 0.15));
+  for (const bucket of buckets.values()) {
+    if (bucket.symbols.length < threshold) continue;
+    throw new Error(
+      `reports reuse the same normalized narrative sentence in ${bucket.fieldName} across ${bucket.symbols.length} symbols; ` +
+      `write company-specific analysis. examples=${bucket.symbols.slice(0, 8).join(", ")}`
+    );
+  }
+}
+
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function loadDotEnv(filePath) {
@@ -2835,6 +2890,16 @@ function selfTest() {
     { alertId: "dup1", symbolCode: "1111", fields: [{ name: "ファンダ要点", value: "株主還元や資本効率方針はROE、PBR、総還元性向、手元資金の配分を左右します。本業利益の伸びを伴う還元なら評価しやすい一方、利益が弱い局面では持続性が焦点です。" }] },
     { alertId: "dup2", symbolCode: "2222", fields: [{ name: "ファンダ要点", value: "株主還元や資本効率方針はROE、PBR、総還元性向、手元資金の配分を左右します。本業利益の伸びを伴う還元なら評価しやすい一方、利益が弱い局面では持続性が焦点です。" }] }
   ] }), /generic repeated template|reuse the same/);
+  const repeatedTemplateReports = ["1111", "2222", "3333"].map((symbolCode, index) => ({
+    alertId: `template-${symbolCode}`,
+    symbolCode,
+    symbolName: `テスト${symbolCode}`,
+    fields: [{
+      name: REQUIRED_FIELDS[2],
+      value: `テスト${symbolCode}では、今回の材料は単発の開示タイトルだけでなく、次回決算で営業利益率、資金残高、受注・顧客指標に残るかで評価が変わります。追加確認${index}は銘柄ごとに別の補足です。`
+    }]
+  }));
+  assert.throws(() => normalizeReports({ reports: repeatedTemplateReports }), /same normalized narrative sentence/);
   assert.throws(() => buildEmbed({
     alertId: "a2",
     fields: REQUIRED_FIELDS.map(name => ({ name, value: name === "Sources" ? "no source" : "x" }))
