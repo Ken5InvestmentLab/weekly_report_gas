@@ -570,6 +570,7 @@ function buildEmbed(report) {
   assertNarrativeMentionedDisclosuresAreLinked(alertId, fieldMap);
   assertJapaneseNarrativeFields(alertId, fieldMap);
   assertNoSymbolCodeInCaution(alertId, report, fieldMap);
+  assertNoSymbolIdentityLeadInFundamentals(alertId, report, fieldMap);
   assertConciseMaterialNarrative(alertId, fieldMap);
   assertNoGenericNarrativeTemplates(alertId, fieldMap);
   assertNoProceduralAnalysisLanguage(alertId, fieldMap);
@@ -671,6 +672,15 @@ function assertConciseMaterialImpact(alertId, value) {
   }
   if (/[\r\n]/.test(summary)) {
     throw new Error(`report ${alertId} field ${IMPACT_FIELD} must be a single line`);
+  }
+  if (/…|\.{2,}|[\[\]]/.test(summary)) {
+    throw new Error(`report ${alertId} field ${IMPACT_FIELD} must not use ellipses or pasted disclosure-title brackets`);
+  }
+  if (/(?:Notice|Summary|Consolidated Financial|Financial Results|Updated)/i.test(summary)) {
+    throw new Error(`report ${alertId} field ${IMPACT_FIELD} must summarize in Japanese, not paste an English disclosure title`);
+  }
+  if (/(?:に関するお知らせ|について(?:は|が|を)?|の開示について)/.test(summary)) {
+    throw new Error(`report ${alertId} field ${IMPACT_FIELD} must state the event and business effect, not paste the disclosure title`);
   }
   for (const fragment of MATERIAL_IMPACT_PROCEDURAL_FRAGMENTS) {
     if (summary.includes(fragment)) {
@@ -855,6 +865,26 @@ function assertNoSymbolCodeInCaution(alertId, report, fieldMap) {
   }
 }
 
+function assertNoSymbolIdentityLeadInFundamentals(alertId, report, fieldMap) {
+  const symbolCode = String(report.symbolCode || extractSymbolCodeFromUrl(report.url || "") || "").trim();
+  const symbolName = normalizeSpaces(String(report.symbolName || "")).replace(/[()（）]/g, "");
+  const fundamentals = normalizeSpaces(String(fieldMap.get("ファンダ要点") || ""));
+  if (!fundamentals) return;
+
+  if (symbolCode && new RegExp(`^${escapeRegExp(symbolCode)}(?:では|は|の|で|：|:)`).test(fundamentals)) {
+    throw new Error(`report ${alertId} field ファンダ要点 must not start with the symbol code; the embed title already identifies the symbol`);
+  }
+  if (symbolCode && new RegExp(`^[^。]{0,24}[（(]${escapeRegExp(symbolCode)}[）)](?:では|は|の|で|：|:)`).test(fundamentals)) {
+    throw new Error(`report ${alertId} field ファンダ要点 must not start with the symbol name/code; the embed title already identifies the symbol`);
+  }
+  if (symbolName) {
+    const plainName = escapeRegExp(symbolName.replace(symbolCode, "").trim());
+    if (plainName && new RegExp(`^${plainName}(?:では|は|の|で|：|:)`).test(fundamentals)) {
+      throw new Error(`report ${alertId} field ファンダ要点 must not start with the symbol name; the embed title already identifies the symbol`);
+    }
+  }
+}
+
 function assertPreferredDateStyle(alertId, fieldMap) {
   const materialImpact = String(fieldMap.get(IMPACT_FIELD) || "");
   if (/\b20\d{2}-\d{2}-\d{2}\b/.test(materialImpact)) {
@@ -914,6 +944,10 @@ function assertConciseMaterialNarrative(alertId, fieldMap) {
 function assertNoMaterialTitleDump(alertId, materials) {
   const firstSentence = String(materials || "").split("。")[0] || "";
   const quotedTitleCount = (firstSentence.match(/「[^」]{8,}」/g) || []).length;
+  const datedDisclosureMentions = (String(materials || "").match(/\d{1,2}月\d{1,2}日の/g) || []).length;
+  if (datedDisclosureMentions >= 4 || /本文上の補助材料として扱い/.test(materials)) {
+    throw new Error(`report ${alertId} field 足元材料 must analyze selected material disclosures, not dump a dated disclosure list`);
+  }
   if (
     /^20\d{2}[-年\/.]\s*\d{1,2}[-月\/.]\s*\d{1,2}日?に/.test(firstSentence) &&
     quotedTitleCount >= 1 &&
@@ -927,7 +961,7 @@ function assertNoMaterialTitleDump(alertId, materials) {
 }
 
 function assertNoGenericNarrativeTemplates(alertId, fieldMap) {
-  const fields = ["事業概要", "足元材料", "ファンダ要点", "注意点"];
+  const fields = [IMPACT_FIELD, "事業概要", "足元材料", "ファンダ要点", "注意点"];
   const genericPatterns = [
     {
       pattern: /開示資料で確認できる主要サービス・製品を中心に事業を展開する上場企業/,
@@ -960,6 +994,26 @@ function assertNoGenericNarrativeTemplates(alertId, fieldMap) {
     {
       pattern: /売買判断ではなく、追加IRと決算資料で実際の収益貢献を確認する前提/,
       reason: "risk note must not rely on generic not-investment-advice boilerplate"
+    },
+    {
+      pattern: /…|\.{3,}/,
+      reason: "analysis fields must not contain truncated disclosure-title fragments"
+    },
+    {
+      pattern: /主材料に置きます|直接評価する材料/,
+      reason: "material narrative must be written as analysis, not as a construction note"
+    },
+    {
+      pattern: /売上拡張または資本効率|を崩さず利益化|ファンダ面の焦点/,
+      reason: "fundamental point must avoid reusable template wording"
+    },
+    {
+      pattern: /取得・提携・還元の費用|効果が[^。]{0,80}に偏り|一過性材料で終わります/,
+      reason: "risk note must avoid reusable caution templates"
+    },
+    {
+      pattern: /Notice Regarding|Summary|Consolidated Financial|Financial Results|Updated/i,
+      reason: "analysis fields must not paste English disclosure-title fragments"
     }
   ];
 
@@ -1207,7 +1261,11 @@ function assertDescriptiveLinkLabels(alertId, fieldMap) {
 function assertDisclosureLinksAreDirectDisclosures(alertId, fieldMap) {
   const value = String(fieldMap.get("開示リンク") || "").trim();
   if (value === "開示リンク未確認") return;
-  for (const { label, url } of extractMarkdownLinks(value)) {
+  const links = extractMarkdownLinks(value);
+  if (links.length > 8) {
+    throw new Error(`report ${alertId} field 開示リンク has too many disclosure links (${links.length}); include only material links used in the analysis`);
+  }
+  for (const { label, url } of links) {
     if (!isDirectDisclosureLinkUrl(url)) {
       throw new Error(`report ${alertId} disclosure link must be a direct disclosure URL: ${label}`);
     }
