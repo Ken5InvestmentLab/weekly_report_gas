@@ -2806,7 +2806,7 @@ function normalizeTradingViewSymbol(tvSymbol) {
 
 function buildTradingViewUrl(tvSymbol) {
   const symbol = normalizeTradingViewSymbol(tvSymbol);
-  return symbol ? `https://www.tradingview.com/chart/?symbol=${encodeURIComponent(symbol)}` : "";
+  return symbol ? `https://jp.tradingview.com/chart/?symbol=${encodeURIComponent(symbol)}` : "";
 }
 
 function normalizeUrl(value) {
@@ -2837,6 +2837,7 @@ function normalizeTradingViewUrl(value) {
   try {
     const url = new URL(value);
     if (!/tradingview\.com$/i.test(url.hostname)) return value;
+    url.hostname = "jp.tradingview.com";
     const symbol = url.searchParams.get("symbol");
     if (symbol) url.searchParams.set("symbol", normalizeTradingViewSymbol(symbol));
     return url.toString();
@@ -2891,8 +2892,8 @@ function base64url(input) {
 
 function selfTest() {
   assert.equal(normalizeTradingViewSymbol("TYO:7203"), "TSE:7203");
-  assert.equal(buildTradingViewUrl("TYO:7203"), "https://www.tradingview.com/chart/?symbol=TSE%3A7203");
-  assert.equal(buildTradingViewUrl("TSE:8285"), "https://www.tradingview.com/chart/?symbol=TSE%3A8285");
+  assert.equal(buildTradingViewUrl("TYO:7203"), "https://jp.tradingview.com/chart/?symbol=TSE%3A7203");
+  assert.equal(buildTradingViewUrl("TSE:8285"), "https://jp.tradingview.com/chart/?symbol=TSE%3A8285");
   assert.equal(
     normalizeTitleForCompare("2026年４月度 月次売上概況"),
     normalizeTitleForCompare("2026年4月度月次売上概況")
@@ -2908,7 +2909,7 @@ function selfTest() {
   const embed = buildEmbed({
     alertId: "a1",
     title: "テスト（1234）｜Premium Snapshot",
-    url: "https://www.tradingview.com/chart/?symbol=TYO%3A1234",
+    url: "https://jp.tradingview.com/chart/?symbol=TYO%3A1234",
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
@@ -2922,7 +2923,7 @@ function selfTest() {
     ]
   });
   assert.equal(embed.title, "テスト (1234) | TradingView チャート");
-  assert.equal(embed.url, "https://www.tradingview.com/chart/?symbol=TSE%3A1234");
+  assert.equal(embed.url, "https://jp.tradingview.com/chart/?symbol=TSE%3A1234");
   assert.equal(embed.color, 0x2E7D32);
   assert.equal(embed.fields[0].name, "材料インパクト");
   assert.equal(embed.fields.find(f => f.name === "開示リンク").value, "開示リンク未確認");
@@ -2933,11 +2934,11 @@ function selfTest() {
   }, {
     symbolCode: "4321",
     symbolName: "ClaimName",
-    tradingViewUrl: "https://www.tradingview.com/chart/?symbol=TSE%3A4321"
+    tradingViewUrl: "https://jp.tradingview.com/chart/?symbol=TSE%3A4321"
   }));
   assert.equal(claimHydratedEmbed.title.startsWith("ClaimName (4321) | TradingView"), true);
   assert.notEqual(claimHydratedEmbed.title, "Premium Snapshot");
-  assert.equal(claimHydratedEmbed.url, "https://www.tradingview.com/chart/?symbol=TSE%3A4321");
+  assert.equal(claimHydratedEmbed.url, "https://jp.tradingview.com/chart/?symbol=TSE%3A4321");
   assert.deepEqual(sortReportsByImpact([
     { alertId: "n", materialImpact: "ネガティブ材料" },
     { alertId: "p", materialImpact: "ポジティブ材料" },
@@ -2977,7 +2978,7 @@ function selfTest() {
   assert.throws(() => buildEmbed({
     alertId: "symbol-code-caution",
     title: "テスト（1234）｜Premium Snapshot",
-    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A1234",
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
@@ -2993,7 +2994,7 @@ function selfTest() {
   assert.throws(() => buildEmbed({
     alertId: "impact-date-style",
     title: "テスト（1234）｜Premium Snapshot",
-    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A1234",
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
@@ -3009,7 +3010,7 @@ function selfTest() {
   assert.throws(() => buildEmbed({
     alertId: "current-material-date-style",
     title: "テスト（1234）｜Premium Snapshot",
-    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A1234",
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
@@ -3024,7 +3025,7 @@ function selfTest() {
   }), /field 足元材料 should use M月D日 style/);
   assert.throws(() => buildEmbed({
     alertId: "a3",
-    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A1234",
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
@@ -3038,7 +3039,7 @@ function selfTest() {
   }), /must be written in Japanese/);
   assert.throws(() => buildEmbed({
     alertId: "a4",
-    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A1234",
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
@@ -3052,7 +3053,7 @@ function selfTest() {
   }), /non-descriptive link label/);
   assert.throws(() => buildEmbed({
     alertId: "a4b",
-    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A1234",
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
@@ -3066,7 +3067,7 @@ function selfTest() {
   }), /research-log caveat/);
   assert.throws(() => buildEmbed({
     alertId: "a4bb",
-    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A1234",
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
@@ -3080,7 +3081,7 @@ function selfTest() {
   }), /mentions disclosure in narrative but omits it from 開示リンク/);
   assert.throws(() => buildEmbed({
     alertId: "a4c",
-    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A1234",
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
@@ -3095,7 +3096,7 @@ function selfTest() {
   }), /repeats the same long sentence/);
   assert.throws(() => buildEmbed({
     alertId: "a4d",
-    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A1234",
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
@@ -3109,7 +3110,7 @@ function selfTest() {
   }), /too generic/);
   assert.throws(() => buildEmbed({
     alertId: "a4e",
-    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A1234",
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
@@ -3123,7 +3124,7 @@ function selfTest() {
   }), /ファンダ要点 is too generic/);
   assert.throws(() => buildEmbed({
     alertId: "a4f",
-    url: "https://www.tradingview.com/chart/?symbol=TSE%3A441A",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A441A",
     symbolCode: "441A",
     symbolName: "NE",
     fields: [
@@ -3137,7 +3138,7 @@ function selfTest() {
   }), /事業概要 is too generic/);
   assert.throws(() => buildEmbed({
     alertId: "a5",
-    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A1234",
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
@@ -3151,7 +3152,7 @@ function selfTest() {
   }), /direct disclosure URL/);
   assert.throws(() => buildEmbed({
     alertId: "a6",
-    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A1234",
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
@@ -3165,7 +3166,7 @@ function selfTest() {
   }), /source link must be a reference\/listing page URL/);
   assert.throws(() => buildEmbed({
     alertId: "a8",
-    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A1234",
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
@@ -3179,7 +3180,7 @@ function selfTest() {
   }), /too narrowly scoped/);
   assert.throws(() => buildEmbed({
     alertId: "a9",
-    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A1234",
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
@@ -3193,7 +3194,7 @@ function selfTest() {
   }), /may be stale/);
   assert.throws(() => buildEmbed({
     alertId: "a10",
-    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A1234",
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
@@ -3207,7 +3208,7 @@ function selfTest() {
   }), /stale\/proxy document/);
   const sparseDisclosureEmbed = buildEmbed({
     alertId: "a10b",
-    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A1234",
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
@@ -3223,7 +3224,7 @@ function selfTest() {
   assert.equal(sparseDisclosureEmbed.fields.some(field => field.name === "開示リンク"), true);
   assert.throws(() => buildEmbed({
     alertId: "a10c",
-    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A1234",
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
@@ -3237,7 +3238,7 @@ function selfTest() {
   }), /材料インパクト/);
   assert.throws(() => buildEmbed({
     alertId: "a10c2",
-    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A1234",
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
@@ -3252,7 +3253,7 @@ function selfTest() {
   }), /bare label/);
   assert.throws(() => buildEmbed({
     alertId: "a10c3",
-    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A1234",
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
@@ -3267,7 +3268,7 @@ function selfTest() {
   }), /under 90 chars/);
   assert.throws(() => buildEmbed({
     alertId: "a10c4",
-    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A1234",
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
@@ -3290,7 +3291,7 @@ function selfTest() {
   ), /too vague/);
   assert.throws(() => buildEmbed({
     alertId: "a10c4b",
-    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A1234",
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
@@ -3305,7 +3306,7 @@ function selfTest() {
   }), /procedural placeholder language/);
   assert.throws(() => buildEmbed({
     alertId: "a10c4c",
-    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A1234",
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
@@ -3320,7 +3321,7 @@ function selfTest() {
   }), /procedural placeholder language/);
   assert.throws(() => buildEmbed({
     alertId: "a10c4d",
-    url: "https://www.tradingview.com/chart/?symbol=TSE%3A4680",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A4680",
     symbolCode: "4680",
     symbolName: "テスト",
     fields: [
@@ -3335,7 +3336,7 @@ function selfTest() {
   }), /事業概要 is too generic/);
   assert.throws(() => buildEmbed({
     alertId: "a10c5",
-    url: "https://www.tradingview.com/chart/?symbol=TSE%3A3798",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A3798",
     symbolCode: "3798",
     symbolName: "ULSグループ",
     fields: [
@@ -3350,7 +3351,7 @@ function selfTest() {
   }), /procedural placeholder language|too generic/);
   const dedupeEmbed = buildEmbed({
     alertId: "a10d",
-    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A1234",
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
@@ -3377,7 +3378,7 @@ function selfTest() {
       { name: "開示リンク", value: "[決算短信](https://example.com/disclosure.pdf)" },
       { name: "Sources", value: "[IRニュース一覧](https://example.com/ir)" }
     ]
-  }, { title: "テスト (1234) | TradingView チャート", url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234" }, {});
+  }, { title: "テスト (1234) | TradingView チャート", url: "https://jp.tradingview.com/chart/?symbol=TSE%3A1234" }, {});
   assert.equal(logEvent.reason, "混在/要確認：事業進捗はあるが、利益率と資金繰りの確認が必要。");
   const linkedLogEvent = buildPostLogEvent({
     alertId: "a11b",
@@ -3390,13 +3391,13 @@ function selfTest() {
       { name: "開示リンク", value: "[決算短信](https://example.com/disclosure.pdf)" },
       { name: "Sources", value: "[IRニュース一覧](https://example.com/ir)" }
     ]
-  }, { title: "千趣会 (8165) | TradingView チャート", url: "https://www.tradingview.com/chart/?symbol=TSE%3A8165" }, {}, "https://discord.com/channels/1/2/3");
+  }, { title: "千趣会 (8165) | TradingView チャート", url: "https://jp.tradingview.com/chart/?symbol=TSE%3A8165" }, {}, "https://discord.com/channels/1/2/3");
   assert.equal(linkedLogEvent.reason, "[混在/要確認：利益改善余地はあるが、投資負担と継続性の確認が必要。](https://discord.com/channels/1/2/3)");
   assert.equal(extractIrbankPdfUrlFromHtml('<a href="https://f.irbank.net/pr/20260401/140120260326590425.pdf">PDF</a>', "140120260326590425"), "https://f.irbank.net/pr/20260401/140120260326590425.pdf");
   assert.equal(extractIrbankPdfUrlFromHtml('<a href="https://f.irbank.net/pdf/20260430/140120260430514206.pdf">PDF</a>', "140120260430514206"), "https://f.irbank.net/pdf/20260430/140120260430514206.pdf");
   assert.throws(() => buildEmbed({
     alertId: "mentioned-disclosure-unlinked",
-    url: "https://www.tradingview.com/chart/?symbol=TSE%3A9610",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A9610",
     symbolCode: "9610",
     symbolName: "ウィルソン",
     fields: [
@@ -3411,7 +3412,7 @@ function selfTest() {
   }), /mentions disclosure in narrative but omits it from 開示リンク/);
   assert.doesNotThrow(() => buildEmbed({
     alertId: "mentioned-disclosure-linked",
-    url: "https://www.tradingview.com/chart/?symbol=TSE%3A9610",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A9610",
     symbolCode: "9610",
     symbolName: "ウィルソン",
     fields: [
@@ -3479,7 +3480,7 @@ function selfTest() {
   assert.equal(getPostSkipReason("claimed-alert", { posted: {}, claims: { "claimed-alert": { claimId: "c1" } } }, { claimId: "c1" }), "");
   assert.throws(() => buildEmbed({
     alertId: "a7",
-    url: "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A1234",
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
@@ -3537,11 +3538,11 @@ function selfTest() {
   const cutoff = parseJstDateEndMs("2026-05-01");
   assert.ok(parseReceivedAtMs("2026/05/01 23:59:59") <= cutoff);
   assert.ok(parseReceivedAtMs("2026/05/02 00:00:00") > cutoff);
-  assert.equal(extractSymbolCodeFromUrl("https://www.tradingview.com/chart/?symbol=TYO%3A8285"), "8285");
+  assert.equal(extractSymbolCodeFromUrl("https://jp.tradingview.com/chart/?symbol=TYO%3A8285"), "8285");
   const scanComponents = buildPremiumScanComponents(
     { symbolCode: "3917" },
     {},
-    "https://www.tradingview.com/chart/?symbol=TSE%3A3917"
+    "https://jp.tradingview.com/chart/?symbol=TSE%3A3917"
   );
   assert.equal(scanComponents[0].type, DISCORD_COMPONENT_ACTION_ROW);
   assert.equal(scanComponents[0].components[0].type, DISCORD_COMPONENT_BUTTON);
@@ -3551,7 +3552,7 @@ function selfTest() {
   assert.equal(scanComponents[0].components[1].type, DISCORD_COMPONENT_BUTTON);
   assert.equal(scanComponents[0].components[1].style, DISCORD_BUTTON_STYLE_LINK);
   assert.equal(scanComponents[0].components[1].label, "📊 チャートを見る");
-  assert.equal(scanComponents[0].components[1].url, "https://www.tradingview.com/chart/?symbol=TSE%3A3917");
+  assert.equal(scanComponents[0].components[1].url, "https://jp.tradingview.com/chart/?symbol=TSE%3A3917");
   assert.deepEqual(buildPremiumScanComponents({ symbolCode: "BAD" }), []);
   const yahooDisclosure = parseYahooFinanceDisclosureText(
     "Full-year earnings 5/11 15:30 TDnet PDF (348KB)",

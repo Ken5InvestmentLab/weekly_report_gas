@@ -305,8 +305,10 @@ reports share the same label; reject only unsupported or template-like labels.
 
 Keep this as a source-grounded material impact label, not a trading action.
 6. Use the TradingView URL from the claim as the Embed URL. JPX symbols must use
-   the TradingView `TSE:` prefix, not `TYO:`. The worker normalizes TradingView
-   embed titles to `銘柄名 (証券コード) | TradingView チャート`.
+   the TradingView `TSE:` prefix, not `TYO:`, and chart URLs must use
+   `https://jp.tradingview.com/chart/` rather than `https://www.tradingview.com/chart/`.
+   The worker normalizes TradingView embed titles to
+   `銘柄名 (証券コード) | TradingView チャート`.
 7. Put only direct disclosure file/detail URLs in `開示リンク` when verified:
    - direct PDF URLs such as `https://f.irbank.net/pdf/YYYYMMDD/<document_id>.pdf`
    - direct IRBANK PR PDFs such as `https://f.irbank.net/pr/...pdf`

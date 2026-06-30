@@ -387,7 +387,7 @@ Codex should create `premium_worker/out/premium_reports.json` like this:
     {
       "alertId": "example-alert-id",
       "title": "銘柄名 (1234) | TradingView チャート",
-      "url": "https://www.tradingview.com/chart/?symbol=TSE%3A1234",
+      "url": "https://jp.tradingview.com/chart/?symbol=TSE%3A1234",
       "symbolCode": "1234",
       "symbolName": "銘柄名",
       "fields": [

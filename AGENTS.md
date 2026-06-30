@@ -116,6 +116,7 @@ OVERLAP_DAYS = 3
 ### プレミアムEmbed・分析ルール
 
 - TradingViewリンクはJPX銘柄でも `TSE:{code}` を使う。`TYO:` は開けない銘柄がある。
+- TradingViewリンクは `https://jp.tradingview.com/chart/` を使い、`https://www.tradingview.com/chart/` に戻さない。13:05/15:36のプレミアム投稿とチャートボタンの両方で同じURLを使う。
 - タイトルはチャートリンクだと分かる文言にする。
 - プレミアムEmbedのタイトルは必ず `銘柄名 (code) | TradingView チャート` 形式にし、`Premium Snapshot` のフォールバックタイトルのままdry-run通過・投稿させない。reportに `url` / `symbolName` がなくても、active claim の `tradingViewUrl` / `symbolName` / `symbolCode` を合流してタイトルとEmbed URLを作る。
 - プレミアム分析は決算だけに限定しない。
