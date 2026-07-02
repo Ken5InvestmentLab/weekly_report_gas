@@ -984,6 +984,14 @@ function assertNoGenericNarrativeTemplates(alertId, fieldMap) {
       reason: "material impact must be based on the selected fundamental disclosure, not a routine governance filing"
     },
     {
+      pattern: /支配株主関連は補助材料|支配株主関係と人事|支配株主等に関する事項は資本関係の補助情報|親会社関連開示は補助情報|統治関連更新/,
+      reason: "do not frame routine controlling-shareholder or governance notices as supplemental fundamental material"
+    },
+    {
+      pattern: /株式報酬[^。]{0,80}(?:人材面の更新|役員インセンティブ|インセンティブ面の開示|直結しません|本業材料)|(?:譲渡制限付)?株式報酬[^。]{0,80}更新/,
+      reason: "do not use routine stock-compensation filings as filler in premium fundamentals"
+    },
+    {
       pattern: /事業進捗、業績変化、資本政策のいずれに影響するかが確認点/,
       reason: "material narrative must choose the concrete impact path"
     },
@@ -1486,10 +1494,16 @@ function assertNoNewerDisclosureCandidatesAccounted(report, claim, candidates, c
   const sameTimeNewestMaterial = materialCandidates.filter(item => item.disclosedAtMs === newestMaterial.disclosedAtMs);
 
   const missing = sameTimeNewestMaterial.filter(item => {
-    const titleHit = reportText.includes(item.title) || looseTitleIncluded(reportText, item.title);
-    const urlHit = disclosureText.includes(item.url) || disclosureText.includes(item.documentId);
-    const dateHit = reportMentionsDisclosureDate(reportText, item);
-    return !(titleHit || urlHit) || !dateHit;
+    if (isDisclosureCandidateAccountedInReport(item, reportText, disclosureText)) return false;
+    if (isTranslatedMirrorDisclosureCandidate(item)) {
+      const siblingAccounted = sameTimeNewestMaterial.some(peer => {
+        if (peer === item) return false;
+        if (isTranslatedMirrorDisclosureCandidate(peer)) return false;
+        return isDisclosureCandidateAccountedInReport(peer, reportText, disclosureText);
+      });
+      if (siblingAccounted) return false;
+    }
+    return true;
   });
 
   if (missing.length) {
@@ -1512,6 +1526,20 @@ function assertNoNewerDisclosureCandidatesAccounted(report, claim, candidates, c
   }
 }
 
+function isDisclosureCandidateAccountedInReport(item, reportText, disclosureText) {
+  const titleHit = reportText.includes(item.title) || looseTitleIncluded(reportText, item.title);
+  const urlHit = disclosureText.includes(item.url) || disclosureText.includes(item.documentId);
+  const dateHit = reportMentionsDisclosureDate(reportText, item);
+  return (titleHit || urlHit) && dateHit;
+}
+
+function isTranslatedMirrorDisclosureCandidate(item) {
+  const title = normalizeSpaces(String(item?.title || ""));
+  if (!title) return false;
+  if (!hasJapaneseText(title)) return true;
+  return /Notice|Summary|Consolidated Financial|Financial Results|Announcement|Materials|Regarding/i.test(title);
+}
+
 function isFundamentallyMaterialDisclosureCandidate(item) {
   const title = normalizeSpaces(String(item?.title || ""));
   if (!title) return false;
@@ -1522,6 +1550,28 @@ function isFundamentallyMaterialDisclosureCandidate(item) {
 function isRoutineAdministrativeDisclosureTitle(title) {
   const text = normalizeSpaces(String(title || ""));
   if (!text) return false;
+
+  if (/親会社等の決算に関するお知らせ|非上場の親会社等の決算情報に関するお知らせ|非上場の親会社等の決算に関するお知らせ/.test(text)) {
+    return true;
+  }
+  if (/動画配信及び質疑応答のご案内|決算説明会動画配信|質疑応答のご案内/.test(text)) {
+    return true;
+  }
+  if (/アナリストレポート公開|調査レポート|シェアードリサーチ|Shared Research/i.test(text)) {
+    return true;
+  }
+  if (/譲渡制限付株式としての自己株式の処分|譲渡制限付株式報酬としての自己株式の?処分|譲渡制限付株式報酬としての新株式発行|株式報酬型ストックオプション|株式報酬.*制度|払込完了に関するお知らせ/.test(text)) {
+    return true;
+  }
+  if (/^(?:定款の一部変更|定款一部変更|定款変更|定款\s)/.test(text)) {
+    return true;
+  }
+  if (/取締役候補者の辞退|取締役候補者.*選任|取締役の役付変更|代表取締役及び役員の決定に関するお知らせ/.test(text)) {
+    return true;
+  }
+  if (/取締役会の実効性に関する評価結果|取締役会.*実効性評価/.test(text)) {
+    return true;
+  }
 
   const materialGovernancePatterns = [
     /代表取締役|社長|CEO|CFO|監査法人|会計監査人|不適切|不正|調査委員会|訴訟|判決|行政処分|規制|上場維持|改善期間|特設注意|監理銘柄|整理銘柄|支配株主.*異動|主要株主.*異動|筆頭株主.*異動|親会社.*異動|支配株主.*変更|主要株主.*変更|筆頭株主.*変更|親会社.*変更|MBO|TOB|公開買付|資本政策|資本コスト|株価を意識|配当|自己株式取得|自己株式の取得|株主還元|新株|新株予約権|第三者割当|公募|売出|CB|社債|借入|資金調達|M&A|合併|会社分割|事業譲渡|事業譲受|子会社化|持分譲渡|固定資産|特別利益|特別損失|業績予想|月次|決算/
@@ -1535,18 +1585,25 @@ function isRoutineAdministrativeDisclosureTitle(title) {
     /独立役員届出書/,
     /定時株主総会招集/,
     /定時株主総会資料/,
+    /定時株主総会.*動画配信/,
+    /質疑応答のご案内/,
     /電子提供措置事項/,
     /法令及び定款に基づく/,
     /組織変更及び人事異動/,
     /人事異動に関するお知らせ/,
+    /人事の異動について/,
+    /役員人事に関するお知らせ/,
+    /当社及び子会社役員人事に関するお知らせ/,
+    /役員候補者の選任に関するお知らせ/,
     /役員の異動に関するお知らせ/,
     /取締役.*体制に関するお知らせ/,
     /執行役員.*体制に関するお知らせ/,
+    /譲渡制限付株式としての自己株式の処分/,
     /譲渡制限付株式報酬としての自己株式の処分/,
     /譲渡制限付株式報酬としての新株式発行/,
     /株式報酬型ストックオプション/,
     /払込完了に関するお知らせ/,
-    /支配株主等に関する事項について/,
+    /支配株主等(?:\([^)]*\))?に関する事項について/,
     /親会社等の決算に関するお知らせ/,
     /非上場の親会社等の決算情報に関するお知らせ/
   ].some(pattern => pattern.test(text));
@@ -3587,6 +3644,21 @@ function selfTest() {
       { name: "Sources", value: "[IRBANK 阿波製紙(3896) 開示一覧](https://irbank.net/3896/ir)" }
     ]
   }), /routine governance filings|routine governance filing/);
+  assert.throws(() => buildEmbed({
+    alertId: "routine-controlling-shareholder-filler",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A3231",
+    symbolCode: "3231",
+    symbolName: "野村不動産ホールディングス",
+    fields: [
+      { name: "材料インパクト", value: "様子見：支配株主関連は補助材料で、通期決算の分譲・賃貸・開発パイプラインが実体です。" },
+      { name: "事業概要", value: "住宅分譲、都市開発、賃貸、資産運用、仲介・管理などを展開する総合不動産グループです。" },
+      { name: "足元材料", value: "4月24日の2026年3月期決算短信では、マンション分譲、オフィス賃貸、開発物件の引き渡し、資産回転が業績の中心になります。販売速度、賃貸空室率、資産売却益が利益の振れを作ります。" },
+      { name: "ファンダ要点", value: "分譲マンション販売戸数、粗利率、賃貸空室率、開発パイプライン、資産売却益が重要です。不動産市況と金利が販売速度を左右し、開発採算と在庫回転が営業利益率に反映されます。" },
+      { name: "注意点", value: "不動産開発は引き渡し時期で利益が偏ります。金利上昇や建築費高騰が続くと、用地取得と販売価格のバランスが悪化し、完成在庫の資金負担も増えます。" },
+      { name: "開示リンク", value: "[2026-04-24 2026年3月期決算短信〔日本基準〕(連結)(15:30)](https://f.irbank.net/pdf/20260424/140120260424510126.pdf)" },
+      { name: "Sources", value: "[IRBANK 野村不動産ホールディングス(3231) 開示一覧](https://irbank.net/3231/ir)" }
+    ]
+  }), /routine controlling-shareholder|routine governance/);
   assert.equal(getPostSkipReason("posted-alert", { posted: { "posted-alert": {} }, claims: {} }, null), "already posted");
   assert.equal(getPostSkipReason("unclaimed-alert", { posted: {}, claims: {} }, null), "no active claim");
   assert.equal(getPostSkipReason("claimed-alert", { posted: {}, claims: { "claimed-alert": { claimId: "c1" } } }, { claimId: "c1" }), "");
