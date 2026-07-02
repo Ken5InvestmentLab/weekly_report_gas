@@ -2464,7 +2464,13 @@ const fetchEndMillis = getMiddayOhlcvFetchEndMillis_(todayKey);
 const refreshId = props.getProperty(MIDDAY_REFRESH_ID_KEY) || expectedRefreshId;
 
 // ★追加ここから
-const rawAlertVolumeMapData = buildRawAlertVolumeMapForBusinessDate_(rawSheet, todayKey, { forceRefresh: true });
+const hasMiddayPhaseResumeState = !!(props.getProperty(MIDDAY_SYMBOL_LIST_KEY) ||
+  props.getProperty(MIDDAY_STATE_KEY) ||
+  props.getProperty(MIDDAY_FETCH_INFLIGHT_KEY));
+const middayRawAlertVolumeMapOptions = hasMiddayPhaseResumeState
+  ? {}
+  : { forceRefresh: true, cacheResult: true };
+const rawAlertVolumeMapData = buildRawAlertVolumeMapForBusinessDate_(rawSheet, todayKey, middayRawAlertVolumeMapOptions);
 const rawAlertVolumeMap = rawAlertVolumeMapData.volumeMap;
 const rawAlertCloseMap = rawAlertVolumeMapData.closeMap || {};
 
