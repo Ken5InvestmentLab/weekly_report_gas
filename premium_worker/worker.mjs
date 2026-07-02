@@ -976,6 +976,14 @@ function assertNoGenericNarrativeTemplates(alertId, fieldMap) {
       reason: "material narrative must explain the disclosure's impact, not the research method"
     },
     {
+      pattern: /最新開示は管理・体制面が中心|体制更新は[^。]{0,80}管理面への影響が中心/,
+      reason: "do not use routine governance filings as a filler material narrative"
+    },
+    {
+      pattern: /管理・体制面が中心で、[^。]{2,40}への直接効果は限定的/,
+      reason: "material impact must be based on the selected fundamental disclosure, not a routine governance filing"
+    },
+    {
       pattern: /事業進捗、業績変化、資本政策のいずれに影響するかが確認点/,
       reason: "material narrative must choose the concrete impact path"
     },
@@ -1471,7 +1479,13 @@ function assertNoNewerDisclosureCandidatesAccounted(report, claim, candidates, c
     );
   }
 
-  const missing = sameTimeNewest.filter(item => {
+  const materialCandidates = reviewedCandidates.filter(isFundamentallyMaterialDisclosureCandidate);
+  if (!materialCandidates.length) return;
+
+  const newestMaterial = materialCandidates[0];
+  const sameTimeNewestMaterial = materialCandidates.filter(item => item.disclosedAtMs === newestMaterial.disclosedAtMs);
+
+  const missing = sameTimeNewestMaterial.filter(item => {
     const titleHit = reportText.includes(item.title) || looseTitleIncluded(reportText, item.title);
     const urlHit = disclosureText.includes(item.url) || disclosureText.includes(item.documentId);
     const dateHit = reportMentionsDisclosureDate(reportText, item);
@@ -1488,14 +1502,54 @@ function assertNoNewerDisclosureCandidatesAccounted(report, claim, candidates, c
     );
   }
 
-  const newestDateMs = startOfJstDateMs(newest.disclosedAtMs);
+  const newestDateMs = startOfJstDateMs(newestMaterial.disclosedAtMs);
   const reportMaxDateMs = extractNewestDateMentionMs(reportText);
 
   if (reportMaxDateMs && reportMaxDateMs < newestDateMs) {
     throw new Error(
-      `report ${alertId} uses an older disclosure while newer disclosure exists for ${symbolCode}: ${newest.dateText} ${newest.title}; read the newer disclosure and mention its effect or why older material remains primary`
+      `report ${alertId} uses an older disclosure while newer disclosure exists for ${symbolCode}: ${newestMaterial.dateText} ${newestMaterial.title}; read the newer disclosure and mention its effect or why older material remains primary`
     );
   }
+}
+
+function isFundamentallyMaterialDisclosureCandidate(item) {
+  const title = normalizeSpaces(String(item?.title || ""));
+  if (!title) return false;
+  if (isRoutineAdministrativeDisclosureTitle(title)) return false;
+  return true;
+}
+
+function isRoutineAdministrativeDisclosureTitle(title) {
+  const text = normalizeSpaces(String(title || ""));
+  if (!text) return false;
+
+  const materialGovernancePatterns = [
+    /代表取締役|社長|CEO|CFO|監査法人|会計監査人|不適切|不正|調査委員会|訴訟|判決|行政処分|規制|上場維持|改善期間|特設注意|監理銘柄|整理銘柄|支配株主.*異動|主要株主.*異動|筆頭株主.*異動|親会社.*異動|支配株主.*変更|主要株主.*変更|筆頭株主.*変更|親会社.*変更|MBO|TOB|公開買付|資本政策|資本コスト|株価を意識|配当|自己株式取得|自己株式の取得|株主還元|新株|新株予約権|第三者割当|公募|売出|CB|社債|借入|資金調達|M&A|合併|会社分割|事業譲渡|事業譲受|子会社化|持分譲渡|固定資産|特別利益|特別損失|業績予想|月次|決算/
+  ];
+  if (materialGovernancePatterns.some(pattern => pattern.test(text))) return false;
+
+  return [
+    /コーポレート・ガバナンスに関する報告書/,
+    /コーポレートガバナンスに関する報告書/,
+    /Corporate Governance Report/i,
+    /独立役員届出書/,
+    /定時株主総会招集/,
+    /定時株主総会資料/,
+    /電子提供措置事項/,
+    /法令及び定款に基づく/,
+    /組織変更及び人事異動/,
+    /人事異動に関するお知らせ/,
+    /役員の異動に関するお知らせ/,
+    /取締役.*体制に関するお知らせ/,
+    /執行役員.*体制に関するお知らせ/,
+    /譲渡制限付株式報酬としての自己株式の処分/,
+    /譲渡制限付株式報酬としての新株式発行/,
+    /株式報酬型ストックオプション/,
+    /払込完了に関するお知らせ/,
+    /支配株主等に関する事項について/,
+    /親会社等の決算に関するお知らせ/,
+    /非上場の親会社等の決算情報に関するお知らせ/
+  ].some(pattern => pattern.test(text));
 }
 
 async function fetchIrbankDisclosureCandidates(symbolCode) {
@@ -3475,6 +3529,64 @@ function selfTest() {
       { name: "開示リンク", value: "[2026-05-22 役員退職慰労金制度の廃止に関するお知らせ(11:00)](https://www2.jpx.co.jp/disc/52870/140120260521543824.pdf)" }
     ]
   }, { symbolCode: "5287" }, [governanceDisclosure], Date.UTC(2026, 4, 8, 0, 0, 0)));
+  const routineCgDisclosure = {
+    dateText: "2026-06-26",
+    timeText: "15:57",
+    title: "コーポレート・ガバナンスに関する報告書 2026/06/26",
+    url: "https://example.com/cg.pdf",
+    documentId: "cg-3896",
+    sourceName: "Yahoo Finance T",
+    disclosedAtMs: Date.UTC(2026, 5, 26, 6, 57, 0)
+  };
+  const midtermDisclosure = {
+    dateText: "2026-05-28",
+    timeText: "15:30",
+    title: "第5次中期経営計画策定のお知らせ",
+    url: "https://f.irbank.net/pdf/20260528/140120260528552222.pdf",
+    documentId: "140120260528552222",
+    sourceName: "IRBANK",
+    disclosedAtMs: Date.UTC(2026, 4, 28, 6, 30, 0)
+  };
+  assert.doesNotThrow(() => assertNoNewerDisclosureCandidatesAccounted({
+    alertId: "routine-cg-skipped-3896",
+    symbolCode: "3896",
+    fields: [
+      { name: "足元材料", value: "5月28日の第5次中期経営計画では機能紙の受注、原燃料価格、海外向け販売の改善が利益率を左右します。" },
+      { name: "開示リンク", value: "[2026-05-28 第5次中期経営計画策定のお知らせ(15:30)](https://f.irbank.net/pdf/20260528/140120260528552222.pdf)" }
+    ]
+  }, { symbolCode: "3896" }, [routineCgDisclosure, midtermDisclosure], Date.UTC(2026, 4, 8, 0, 0, 0)));
+  const controlChangeDisclosure = {
+    dateText: "2026-06-29",
+    timeText: "15:30",
+    title: "親会社及び主要株主である筆頭株主の異動に関するお知らせ",
+    url: "https://f.irbank.net/pdf/20260629/140120260629582800.pdf",
+    documentId: "140120260629582800",
+    sourceName: "IRBANK",
+    disclosedAtMs: Date.UTC(2026, 5, 29, 6, 30, 0)
+  };
+  assert.throws(() => assertNoNewerDisclosureCandidatesAccounted({
+    alertId: "material-governance-missing-3222",
+    symbolCode: "3222",
+    fields: [
+      { name: "足元材料", value: "5月1日の決算では既存店売上と食品粗利の改善が確認材料です。" },
+      { name: "開示リンク", value: "[2026-05-01 2026年2月期決算短信(15:00)](https://f.irbank.net/pdf/20260501/140120260501511111.pdf)" }
+    ]
+  }, { symbolCode: "3222" }, [controlChangeDisclosure], Date.UTC(2026, 4, 8, 0, 0, 0)), /newer disclosure exists/);
+  assert.throws(() => buildEmbed({
+    alertId: "routine-cg-filler",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A3896",
+    symbolCode: "3896",
+    symbolName: "阿波製紙",
+    fields: [
+      { name: "材料インパクト", value: "様子見：阿波製紙の最新開示は管理・体制面が中心で、機能紙の受注への直接効果は限定的です。" },
+      { name: "事業概要", value: "自動車・水処理・産業用途の機能紙、濾材、分離膜支持体などを製造する特殊紙メーカーです。" },
+      { name: "足元材料", value: "6月26日の阿波製紙の体制更新は、機能紙の受注より管理面への影響が中心です。5月28日の中期経営計画では機能紙の受注、原燃料価格、海外向け販売、設備稼働率が利益率を左右します。" },
+      { name: "ファンダ要点", value: "機能紙の受注、原燃料価格、海外向け販売、設備稼働率、製品ミックスが利益率を左右します。高付加価値品の数量回復が鈍い場合、原燃料高を吸収できません。" },
+      { name: "注意点", value: "中期計画の施策が受注単価と設備稼働率に表れない場合、海外向け販売の伸びより固定費負担が先に残ります。原燃料価格の上昇を価格転嫁できない局面では、製品ミックス改善も利益に残りにくくなります。" },
+      { name: "開示リンク", value: "[2026-05-28 第5次中期経営計画策定のお知らせ(15:30)](https://f.irbank.net/pdf/20260528/140120260528552222.pdf)" },
+      { name: "Sources", value: "[IRBANK 阿波製紙(3896) 開示一覧](https://irbank.net/3896/ir)" }
+    ]
+  }), /routine governance filings|routine governance filing/);
   assert.equal(getPostSkipReason("posted-alert", { posted: { "posted-alert": {} }, claims: {} }, null), "already posted");
   assert.equal(getPostSkipReason("unclaimed-alert", { posted: {}, claims: {} }, null), "no active claim");
   assert.equal(getPostSkipReason("claimed-alert", { posted: {}, claims: { "claimed-alert": { claimId: "c1" } } }, { claimId: "c1" }), "");

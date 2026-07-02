@@ -68,6 +68,13 @@ If any fundamentally material disclosure exists within 45 days before `receivedA
 
 Do not force routine administrative disclosures into the report merely because they are newest.
 Routine personnel changes, ordinary officer personnel notices, organization changes, shareholders meeting notices, corporate governance reports, and similar administrative notices may be ignored unless they directly affect governance risk, management control, capital policy, earnings, shareholder returns, financing, M&A, business operations, or listing status.
+Still open and scan those latest routine-looking disclosures before deciding.
+If the content is routine and not fundamental, do not use it as the lead
+`材料インパクト` or first `足元材料` sentence. Instead, lead with the newest
+fundamentally material disclosure and leave the routine disclosure out of
+`開示リンク` unless the narrative explicitly discusses it. Do not write filler
+such as "最新開示は管理・体制面が中心" or "体制更新は管理面への影響が中心" just
+to satisfy the stale-disclosure validator.
 
 Examples:
 - If the newest disclosure is an ordinary personnel change and the latest fundamentally material disclosure is an older earnings release, using the older earnings release is acceptable.
