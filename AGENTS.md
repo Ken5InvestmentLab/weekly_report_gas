@@ -467,6 +467,7 @@ fetchOHLCVForNewAlerts
 - 15:51本番で120日新規取得により同じ日付・銘柄のAM行を取得できた場合、通常の `MIDDAY_yyyy-mm-dd` のAM行は削除対象にできるが、`MIDDAY_LOCKED_yyyy-mm-dd` は保護する。
 - 15:51本番の当日PM出来高は、保護AM出来高または13:21保存済みAM出来高があればそれを優先して `日足出来高 - AM出来高` で補正する。AM行自体は上書きしない。
 - 15:51 PHASE1の `rawAlertVolumeMap` / `rawAlertCloseMap` は、当日直前の `alerts_raw` 追加を取りこぼさないようPHASE1入口で強制再読みにできる。読み取る対象はBOTTOMの当日出来高と `entry_price` 終値に限定する。
+- 15:51 PHASE1初回で強制再読込した `RAW_ALERT_VOLUME_MAP_PROP_V2` は、同じPHASE1のresumeでは `alerts_raw` の最終行が変わっていない場合だけ再利用し、resumeごとの全件再読込へ戻さない。
 - 15:51 PHASE1の当日AM出来高マップは、`ohlcv_4h` のtimestamp昇順前提で当日の日付範囲だけを読んで作る。resumeごとに末尾60,000行を無条件で読まない。
 - 当日が休場日の場合はスキップ。
 - 対象銘柄は `alerts_raw` と `signals_archive` に登場する `BOTTOM` シグナルの銘柄。`OHLCV_REPAIR_SYMBOLS` も、その `BOTTOM` 銘柄集合に含まれるものだけ取得対象にする。

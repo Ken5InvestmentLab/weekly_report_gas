@@ -4468,7 +4468,13 @@ function fetchOHLCVForNewAlertsInternal_(outerStartedAt) {
   debugLogToSheet_("ohlcv.phase.summary", { event: "phase_start", phase: phase, refreshId: refreshId });
 
 if (phase === "PHASE1") {
-  const rawAlertVolumeMapData = buildRawAlertVolumeMapForBusinessDate_(rawSheet, todayKey, { forceRefresh: true });
+  const hasMainPhase1ResumeState = !!(props.getProperty(SYMBOL_LIST_KEY) ||
+    props.getProperty(STATE_KEY) ||
+    props.getProperty(MAIN_PHASE1_FETCH_INFLIGHT_KEY));
+  const rawAlertVolumeMapOptions = hasMainPhase1ResumeState
+    ? {}
+    : { forceRefresh: true, cacheResult: true };
+  const rawAlertVolumeMapData = buildRawAlertVolumeMapForBusinessDate_(rawSheet, todayKey, rawAlertVolumeMapOptions);
   const rawAlertVolumeMap = rawAlertVolumeMapData.volumeMap;
   const rawAlertCloseMap = rawAlertVolumeMapData.closeMap || {};
 
@@ -11485,6 +11491,7 @@ function saveCachedRawAlertVolumeMap_(businessDateKey, result) {
 }
 
 function buildRawAlertVolumeMapForBusinessDate_(rawSheet, businessDateKey, options) {
+  options = options || {};
   const map = {};
   const closeMap = {};
   const stats = {
@@ -11505,17 +11512,20 @@ function buildRawAlertVolumeMapForBusinessDate_(rawSheet, businessDateKey, optio
   if (lastRow < dataStartRow_()) return { volumeMap: map, closeMap: closeMap, stats: stats };
 
   // expectedKeys 付き呼び出しは post-repair cleanup の AM 保護でフィルタ済みの部分集合を返す特殊用途なのでキャッシュをスキップ。
-  const cacheOk = !(options && options.forceRefresh === true) && (!options || !options.expectedKeys || options.expectedKeys.length === 0);
-  if (cacheOk) {
+  const hasExpectedKeys = options.expectedKeys && options.expectedKeys.length > 0;
+  const canReadCache = options.forceRefresh !== true && !hasExpectedKeys;
+  const canSaveCache = !hasExpectedKeys && (canReadCache || options.cacheResult === true);
+  if (canReadCache) {
     const cached = loadCachedRawAlertVolumeMap_(businessDateKey);
-    if (cached) {
+    const cachedSourceLastRow = cached && cached.stats ? Number(cached.stats.sourceLastRow || 0) : 0;
+    if (cached && cachedSourceLastRow === lastRow) {
       cached.stats = Object.assign({}, cached.stats, { cacheHit: true });
       return cached;
     }
   }
 
   const result = buildRawAlertVolumeMapForBusinessDateChunked_(rawSheet, businessDateKey, options);
-  if (cacheOk && result && result.volumeMap) {
+  if (canSaveCache && result && result.volumeMap) {
     saveCachedRawAlertVolumeMap_(businessDateKey, result);
   }
   return result;
@@ -11587,6 +11597,9 @@ function buildRawAlertVolumeMapForBusinessDateChunked_(rawSheet, businessDateKey
   const stats = {
     businessDateKey: normalizedBusinessDateKey,
     scannedRows: 0,
+    sourceLastRow: 0,
+    firstDataRow: 0,
+    totalDataRows: 0,
     mappedRows: 0,
     mappedCloseRows: 0,
     skippedNoSymbol: 0,
@@ -11607,6 +11620,8 @@ function buildRawAlertVolumeMapForBusinessDateChunked_(rawSheet, businessDateKey
   const lastRow = rawSheet.getLastRow();
   const firstDataRow = dataStartRow_();
   if (lastRow < firstDataRow) return { volumeMap: map, closeMap: closeMap, stats: stats };
+  stats.sourceLastRow = lastRow;
+  stats.firstDataRow = firstDataRow;
 
   const expectedKeys = options.expectedKeys || [];
   const expectedKeySet = new Set(expectedKeys);
@@ -11622,6 +11637,7 @@ function buildRawAlertVolumeMapForBusinessDateChunked_(rawSheet, businessDateKey
   const idxVolume = RAW_IDX.volume - readStartIndex;
 
   const totalDataRows = lastRow - firstDataRow + 1;
+  stats.totalDataRows = totalDataRows;
   const chunkRows = Math.max(500, Number(options.chunkRows || OHLCV_RAW_ALERT_VOLUME_MAP_CHUNK_ROWS || 5000));
   const maxScanRows = Number(options.maxScanRows || 0);
   let rowsBudget = maxScanRows > 0 ? Math.min(maxScanRows, totalDataRows) : totalDataRows;
