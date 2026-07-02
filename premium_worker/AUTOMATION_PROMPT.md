@@ -235,6 +235,18 @@ If the disclosure file cannot be opened or the content cannot be verified, use
    their specificity around actual business, event dates, figures, KPIs, and
    unresolved risks, but adapt structure and emphasis to the company and
    disclosure.
+   This automation is normally run with GPT-5.5 reasoning set to high. Use that
+   reasoning budget to preserve per-symbol quality, not to compress the work.
+   When the claim has many alerts, split the work into small chunks, such as
+   5-8 symbols at a time, and keep an internal audit table for every symbol:
+   `alertId`, `symbolCode`, selected material disclosure(s), direct
+   `開示リンク` count, `Sources` count, company-specific KPI, unresolved risk,
+   and final `材料インパクト` label. Do not write the whole batch from titles,
+   snippets, or a shared prose pattern in one pass.
+   Large-batch fatigue is not an acceptable reason for thinner analysis. If the
+   batch is too large to finish at the same quality level, keep iterating in
+   chunks and run dry-run repairs; do not post partially grounded reports or
+   convert grounded-but-unpolished alerts into `fail` stubs.
    Write the analytical conclusion, not the research procedure. Do not use
    generic placeholder phrases such as `確認対象です`, `確認する局面です`,
    `確認したい局面です`, or `次回進捗待ちです` as the main
@@ -416,6 +428,11 @@ If the error says any of the following:
 - `newer IRBANK fundamentally material disclosure exists`
 - `disclosure link must be a direct disclosure URL`
 - `source link must be a reference/listing page URL`
+- `Sources must include at least 2 reference/listing URLs`
+- `Sources duplicates the same reference URL`
+- `large premium batch has too many reports without direct 開示リンク`
+- `large premium batch has too many sparse-disclosure fallback reports`
+- `large premium batch field ... average length is too terse`
 - `field 足元材料`
 - `field ファンダ要点`
 - `too generic`

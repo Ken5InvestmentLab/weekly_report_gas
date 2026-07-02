@@ -50,6 +50,16 @@ const MATERIAL_IMPACT_WEAK_SUMMARY_PATTERNS = [
 ];
 const REQUIRED_FIELDS = [IMPACT_FIELD, "事業概要", "足元材料", "ファンダ要点", "注意点", "開示リンク", "Sources"];
 const OPTIONAL_FIELDS = [];
+const MIN_REFERENCE_SOURCE_URLS = 2;
+const MAX_REFERENCE_SOURCE_URLS = 4;
+const LARGE_BATCH_QUALITY_MIN_REPORTS = 10;
+const LARGE_BATCH_MAX_NO_DISCLOSURE_RATIO = 0.10;
+const LARGE_BATCH_MAX_SPARSE_RATIO = 0.10;
+const LARGE_BATCH_AVG_LENGTH_MIN = {
+  "足元材料": 85,
+  "ファンダ要点": 80,
+  "注意点": 60
+};
 const PREMIUM_SCAN_BUTTON_PREFIX = "premium_scan:";
 const LIST_BULLET = "\u30fb";
 const DISCORD_COMPONENT_ACTION_ROW = 1;
@@ -2760,9 +2770,99 @@ function normalizeReports(data) {
   const reports = Array.isArray(data) ? data : (Array.isArray(data.reports) ? data.reports : null);
   if (reports) {
     assertNoRepeatedNarrativeTemplates(reports);
+    assertReportSourceCoverage(reports);
+    assertLargeBatchQualityFloor(reports);
     return reports;
   }
   throw new Error("report file must be an array or { reports: [...] }");
+}
+
+function assertReportSourceCoverage(reports) {
+  for (const report of reports || []) {
+    const symbol = String(report.symbolCode || report.alertId || "unknown");
+    const fields = fieldsToMap(report.fields || []);
+    const sourceLinks = extractMarkdownLinks(fields.get("Sources") || "");
+    const urls = sourceLinks.map(link => normalizeReferenceUrlForDuplicate(link.url)).filter(Boolean);
+    const uniqueUrls = new Set(urls);
+
+    if (urls.length < MIN_REFERENCE_SOURCE_URLS) {
+      throw new Error(
+        `report ${report.alertId || symbol} field Sources must include at least ${MIN_REFERENCE_SOURCE_URLS} reference/listing URLs; ` +
+        `use company IR plus IRBANK/Yahoo/TDnet-style listing pages, and keep direct disclosures in 開示リンク`
+      );
+    }
+    if (urls.length > MAX_REFERENCE_SOURCE_URLS) {
+      throw new Error(
+        `report ${report.alertId || symbol} field Sources has too many URLs (${urls.length}); keep only ${MIN_REFERENCE_SOURCE_URLS}-${MAX_REFERENCE_SOURCE_URLS} reference/listing pages`
+      );
+    }
+    if (uniqueUrls.size !== urls.length) {
+      throw new Error(`report ${report.alertId || symbol} field Sources duplicates the same reference URL with different labels`);
+    }
+  }
+}
+
+function normalizeReferenceUrlForDuplicate(url) {
+  try {
+    const parsed = new URL(String(url || "").trim());
+    parsed.hash = "";
+    parsed.hostname = parsed.hostname.toLowerCase().replace(/^www\./, "");
+    parsed.pathname = parsed.pathname.replace(/\/+$/, "") || "/";
+    const removableParams = ["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "fbclid", "gclid"];
+    for (const key of removableParams) parsed.searchParams.delete(key);
+    parsed.searchParams.sort();
+    return parsed.toString();
+  } catch {
+    return String(url || "").trim().toLowerCase();
+  }
+}
+
+function assertLargeBatchQualityFloor(reports) {
+  const items = reports || [];
+  if (items.length < LARGE_BATCH_QUALITY_MIN_REPORTS) return;
+
+  const noDisclosure = [];
+  const sparseFallback = [];
+  const lengths = Object.fromEntries(Object.keys(LARGE_BATCH_AVG_LENGTH_MIN).map(name => [name, []]));
+
+  for (const report of items) {
+    const symbol = String(report.symbolCode || report.alertId || "unknown");
+    const fields = fieldsToMap(report.fields || []);
+    const disclosure = String(fields.get("開示リンク") || "").trim();
+    if (!hasUrl(disclosure) || disclosure === "開示リンク未確認") noDisclosure.push(symbol);
+    if (hasSparseDisclosureFallback(fields)) sparseFallback.push(symbol);
+
+    for (const name of Object.keys(LARGE_BATCH_AVG_LENGTH_MIN)) {
+      lengths[name].push(String(fields.get(name) || "").trim().length);
+    }
+  }
+
+  const maxNoDisclosure = Math.max(2, Math.ceil(items.length * LARGE_BATCH_MAX_NO_DISCLOSURE_RATIO));
+  if (noDisclosure.length > maxNoDisclosure) {
+    throw new Error(
+      `large premium batch has too many reports without direct 開示リンク (${noDisclosure.length}/${items.length}); ` +
+      `repair source coverage before posting. examples=${noDisclosure.slice(0, 8).join(", ")}`
+    );
+  }
+
+  const maxSparse = Math.max(3, Math.ceil(items.length * LARGE_BATCH_MAX_SPARSE_RATIO));
+  if (sparseFallback.length > maxSparse) {
+    throw new Error(
+      `large premium batch has too many sparse-disclosure fallback reports (${sparseFallback.length}/${items.length}); ` +
+      `re-scan official IR/IRBANK/TDnet-style lists and use grounded materials where available. examples=${sparseFallback.slice(0, 8).join(", ")}`
+    );
+  }
+
+  for (const [fieldName, minAverage] of Object.entries(LARGE_BATCH_AVG_LENGTH_MIN)) {
+    const values = lengths[fieldName] || [];
+    const average = values.reduce((sum, value) => sum + value, 0) / Math.max(values.length, 1);
+    if (average < minAverage) {
+      throw new Error(
+        `large premium batch field ${fieldName} average length is too terse (${average.toFixed(1)} chars); ` +
+        `large batches must preserve company-specific analysis quality`
+      );
+    }
+  }
 }
 
 function assertNoRepeatedNarrativeTemplates(reports) {
@@ -3055,6 +3155,57 @@ function selfTest() {
     { alertId: "p", materialImpact: "ポジティブ材料" },
     { alertId: "w", materialImpact: "様子見" }
   ]).map(report => report.alertId), ["p", "w", "n"]);
+  const sourceField = symbolCode => ({
+    name: "Sources",
+    value: `[IRBANK テスト${symbolCode} 開示一覧](https://irbank.net/${symbolCode}/ir)\n[Yahoo!ファイナンス テスト${symbolCode} 適時開示一覧](https://finance.yahoo.co.jp/quote/${symbolCode}.T/disclosure)`
+  });
+  const disclosureField = symbolCode => ({
+    name: "開示リンク",
+    value: `[2026-05-08 決算短信に関するお知らせ(15:00)](https://f.irbank.net/pdf/20260508/14012026050852${String(symbolCode).padStart(4, "0")}.pdf)`
+  });
+  assert.throws(() => normalizeReports({ reports: [
+    {
+      alertId: "source-single",
+      symbolCode: "1111",
+      fields: [
+        { name: "Sources", value: "[IRBANK テスト1111 開示一覧](https://irbank.net/1111/ir)" }
+      ]
+    }
+  ] }), /Sources must include at least 2 reference/);
+  assert.throws(() => normalizeReports({ reports: [
+    {
+      alertId: "source-duplicate",
+      symbolCode: "1111",
+      fields: [
+        { name: "Sources", value: "[IRBANK テスト1111 開示一覧](https://irbank.net/1111/ir)\n[別ラベル](https://irbank.net/1111/ir/)" }
+      ]
+    }
+  ] }), /Sources duplicates the same reference URL/);
+  assert.throws(() => normalizeReports({ reports: Array.from({ length: 10 }, (_, index) => {
+    const symbolCode = String(4100 + index);
+    return {
+      alertId: `large-no-disclosure-${symbolCode}`,
+      symbolCode,
+      fields: [
+        sourceField(symbolCode),
+        { name: "開示リンク", value: "開示リンク未確認" }
+      ]
+    };
+  }) }), /too many reports without direct 開示リンク/);
+  assert.throws(() => normalizeReports({ reports: Array.from({ length: 10 }, (_, index) => {
+    const symbolCode = String(4200 + index);
+    return {
+      alertId: `large-terse-${symbolCode}`,
+      symbolCode,
+      fields: [
+        sourceField(symbolCode),
+        disclosureField(symbolCode),
+        { name: "足元材料", value: `5月${index + 1}日の開示は売上確認材料です。` },
+        { name: "ファンダ要点", value: `受注と利益率が重要です。${index}` },
+        { name: "注意点", value: `費用増がリスクです。${index}` }
+      ]
+    };
+  }) }), /average length is too terse/);
   assert.throws(() => normalizeReports({ reports: [
     { alertId: "dup1", symbolCode: "1111", fields: [{ name: "ファンダ要点", value: "株主還元や資本効率方針はROE、PBR、総還元性向、手元資金の配分を左右します。本業利益の伸びを伴う還元なら評価しやすい一方、利益が弱い局面では持続性が焦点です。" }] },
     { alertId: "dup2", symbolCode: "2222", fields: [{ name: "ファンダ要点", value: "株主還元や資本効率方針はROE、PBR、総還元性向、手元資金の配分を左右します。本業利益の伸びを伴う還元なら評価しやすい一方、利益が弱い局面では持続性が焦点です。" }] }
