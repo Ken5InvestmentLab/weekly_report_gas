@@ -583,6 +583,7 @@ function buildEmbed(report) {
   assertNoSymbolIdentityLeadInFundamentals(alertId, report, fieldMap);
   assertConciseMaterialNarrative(alertId, fieldMap);
   assertNoGenericNarrativeTemplates(alertId, fieldMap);
+  assertMonthlyNarrativeGrounding(alertId, fieldMap);
   assertNoProceduralAnalysisLanguage(alertId, fieldMap);
   assertNoGenericBusinessOverview(alertId, fieldMap);
   assertNoGenericFundamentalPoint(alertId, fieldMap);
@@ -986,6 +987,26 @@ function assertNoGenericNarrativeTemplates(alertId, fieldMap) {
       reason: "material narrative must explain the disclosure's impact, not the research method"
     },
     {
+      pattern: /同期間の追加開示も踏まえると/,
+      reason: "do not use batch-compression transition wording instead of company-specific analysis"
+    },
+    {
+      pattern: /今回の開示は、?[^。]{0,180}に効くかで評価が変わります/,
+      reason: "state the actual impact path instead of deferring to a generic impact question"
+    },
+    {
+      pattern: /収益寄与が単発なら限定的ですが/,
+      reason: "replace reusable one-off contribution boilerplate with the actual revenue or margin driver"
+    },
+    {
+      pattern: /開示後の数値で[^。]{0,180}(?:が崩れる場合|材料の見え方が弱まり)/,
+      reason: "risk notes must name the concrete KPI risk, not a reusable post-disclosure fallback"
+    },
+    {
+      pattern: /月次動向が主材料で、[^。]{0,120}会社計画との差を見極める段階/,
+      reason: "monthly disclosures must be read and summarized with actual same-store/all-store/customer metrics"
+    },
+    {
       pattern: /最新開示は管理・体制面が中心|体制更新は[^。]{0,80}管理面への影響が中心/,
       reason: "do not use routine governance filings as a filler material narrative"
     },
@@ -1050,6 +1071,28 @@ function assertNoGenericNarrativeTemplates(alertId, fieldMap) {
         throw new Error(`report ${alertId} field ${field} is too generic: ${reason}`);
       }
     }
+  }
+}
+
+function assertMonthlyNarrativeGrounding(alertId, fieldMap) {
+  const disclosureLinks = String(fieldMap.get("開示リンク") || "");
+  const narrativeFields = [IMPACT_FIELD, "足元材料", "ファンダ要点", "注意点"];
+  const narrative = narrativeFields.map(name => String(fieldMap.get(name) || "")).join(" ");
+  const combined = `${disclosureLinks} ${narrative}`;
+  if (!/月次/.test(combined)) return;
+
+  if (!/月次/.test(narrative)) {
+    throw new Error(`report ${alertId} references a monthly disclosure but does not discuss the monthly substance in narrative fields`);
+  }
+
+  const hasMonthlyMetric = /\d+(?:\.\d+)?\s*(?:%|％|億円|百万円|万円|円)/.test(narrative);
+  if (!hasMonthlyMetric) {
+    throw new Error(`report ${alertId} discusses monthly disclosure without actual monthly metrics; include YoY, all-store/same-store, customer count, average spend, or sales figures`);
+  }
+
+  const weaknessPattern = /(?:月次[^。]{0,80}(?:弱|悪化|鈍化|減収|前年割れ|マイナス|下回)|(?:弱|悪化|鈍化|減収|前年割れ|マイナス|下回)[^。]{0,80}月次)/;
+  if (weaknessPattern.test(narrative) && !/\d+(?:\.\d+)?\s*(?:%|％)/.test(narrative)) {
+    throw new Error(`report ${alertId} classifies monthly trend as weak without numeric monthly evidence`);
   }
 }
 
@@ -3234,6 +3277,36 @@ function selfTest() {
   });
   assert.throws(() => normalizeReports({ reports: largeBatchTemplateReports }), /same normalized narrative sentence/);
   assert.throws(() => buildEmbed({
+    alertId: "monthly-no-metrics",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A1234",
+    symbolCode: "1234",
+    symbolName: "テスト",
+    fields: [
+      { name: "材料インパクト", value: "様子見：月次は需要を示すが、店舗採算と粗利率への波及はまだ限定的です。" },
+      { name: "事業概要", value: "衣料品、服飾雑貨、生活雑貨を自社店舗とECサイトで販売し、国内外の複数ブランドを運営する小売企業です。" },
+      { name: "足元材料", value: "5月14日の月次売上は店舗需要の方向感を示す材料です。店舗とECの動きが分かれたという説明だけでは足りず、在庫回転、値引き率、粗利率へどう波及したかを本文で扱う必要があります。" },
+      { name: "ファンダ要点", value: "店舗客数、EC比率、在庫回転、値引き率が重要です。月次の強弱を扱う場合は、実店舗、EC、既存店、全店を分けて、売上増減が粗利率と固定費吸収へどう残るかまで具体化します。" },
+      { name: "注意点", value: "月次だけでは販管費や在庫評価は分かりません。休日要因、セール比率、前年水準の反動、店舗改装の影響で売上の見え方が変わるため、タイトルだけの強弱判定は誤りになります。" },
+      { name: "開示リンク", value: "[2026-05-14 月次売上速報に関するお知らせ(15:00)](https://example.com/monthly.pdf)" },
+      { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
+    ]
+  }), /without actual monthly metrics/);
+  assert.throws(() => buildEmbed({
+    alertId: "generic-disclosure-impact-template",
+    url: "https://jp.tradingview.com/chart/?symbol=TSE%3A1234",
+    symbolCode: "1234",
+    symbolName: "テスト",
+    fields: [
+      { name: "材料インパクト", value: "様子見：契約開示は受注拡大の入口だが、導入単価と粗利率への寄与はまだ限定的です。" },
+      { name: "事業概要", value: "法人向けクラウドサービスを提供し、業務支援ソフトと関連サポートを展開する会社です。" },
+      { name: "足元材料", value: "5月14日の新規契約開示は、大口顧客への導入が始まったことを示します。同期間の追加開示も踏まえると、法人向けクラウドサービスの顧客獲得、稼働人員、契約単価、解約率へのつながりが焦点です。" },
+      { name: "ファンダ要点", value: "法人向けクラウドサービスでは、導入社数、ARPU、解約率、サポート人員の稼働が重要です。今回の開示は、法人向けクラウドサービスの顧客獲得効率、稼働率、単価改善、継続契約の積み上げに効くかで評価が変わります。収益寄与が単発なら限定的ですが、導入社数とARPUに残れば業績の下支えになります。" },
+      { name: "注意点", value: "開示後の数値で法人向けクラウドサービスの成約件数、稼働率、顧客単価、広告費率が崩れる場合は材料の見え方が弱まります。" },
+      { name: "開示リンク", value: "[2026-05-14 新規契約に関するお知らせ(15:00)](https://example.com/contract.pdf)" },
+      { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
+    ]
+  }), /too generic/);
+  assert.throws(() => buildEmbed({
     alertId: "a2",
     fields: REQUIRED_FIELDS.map(name => ({ name, value: name === "Sources" ? "no source" : "x" }))
   }), /Sources/);
@@ -3557,10 +3630,10 @@ function selfTest() {
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
-      { name: "材料インパクト", value: "様子見：月次と決算で需要は追えるが、成約単価と利益率の改善は限定的。" },
+      { name: "材料インパクト", value: "様子見：月次売上105.0%と決算で需要は追えるが、成約単価と利益率の改善は限定的。" },
       { name: "事業概要", value: "専門職向け人材紹介と求人広告を手掛ける人材サービス企業で、企業向け採用支援と求職者向け転職支援を提供しています。" },
-      { name: "足元材料", value: "2026年5月14日に第1四半期決算と月次売上を開示し、採用需要の強弱を同時に確認できる材料になっています。月次売上は堅調でも、紹介成約の単価と粗利率が伸びなければ営業利益への寄与は限定的です。" },
-      { name: "ファンダ要点", value: "月次売上、国内人材紹介の成約数、コンサルタント生産性、求人単価、海外売上がKPIです。1Q決算と月次は採用需要の強弱を同時に示します。今回の開示では、これらのKPIが売上成長、粗利率、営業利益率、資金繰りのどこに効くかを具体的に追います。" },
+      { name: "足元材料", value: "2026年5月14日に第1四半期決算と月次売上105.0%を開示し、採用需要の強弱を同時に確認できる材料になっています。月次売上は堅調でも、紹介成約の単価と粗利率が伸びなければ営業利益への寄与は限定的です。" },
+      { name: "ファンダ要点", value: "月次売上105.0%、国内人材紹介の成約数、コンサルタント生産性、求人単価、海外売上がKPIです。1Q決算と月次は採用需要の強弱を同時に示します。今回の開示では、これらのKPIが売上成長、粗利率、営業利益率、資金繰りのどこに効くかを具体的に追います。" },
       { name: "注意点", value: "求人需要が鈍ると成約数と単価が同時に下がり、人件費と広告費の固定負担が利益率を圧迫します。海外売上が伸びても国内紹介の採算が弱い場合は利益改善が遅れます。" },
       { name: "開示リンク", value: "[2026-05-14 第1四半期決算短信(15:30)](https://example.com/20260514.pdf)" },
       { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
@@ -3572,10 +3645,10 @@ function selfTest() {
     symbolCode: "1234",
     symbolName: "テスト",
     fields: [
-      { name: "材料インパクト", value: "様子見：月次は需要の強弱を示すが、粗利率と固定費吸収への波及は限定的。" },
+      { name: "材料インパクト", value: "様子見：月次売上105.0%は需要の強弱を示すが、粗利率と固定費吸収への波及は限定的。" },
       { name: "事業概要", value: "専門職向け人材紹介と求人広告を手掛ける人材サービス企業で、企業向け採用支援と求職者向け転職支援を提供しています。" },
-      { name: "足元材料", value: "2026年5月14日に第1四半期決算と月次売上を開示し、採用需要の強弱を同時に示しています。月次売上は堅調でも、紹介成約の単価と粗利率が伸びなければ営業利益への寄与は限定的です。" },
-      { name: "ファンダ要点", value: "月次売上、国内人材紹介の成約数、コンサルタント生産性、求人単価、海外売上がKPIです。決算資料では成約数と利益率を見ます。読み取れる結果は、売上成長よりも粗利率と固定費吸収の強弱が評価材料です。" },
+      { name: "足元材料", value: "2026年5月14日に第1四半期決算と月次売上105.0%を開示し、採用需要の強弱を同時に示しています。月次売上は堅調でも、紹介成約の単価と粗利率が伸びなければ営業利益への寄与は限定的です。" },
+      { name: "ファンダ要点", value: "月次売上105.0%、国内人材紹介の成約数、コンサルタント生産性、求人単価、海外売上がKPIです。決算資料では成約数と利益率を見ます。読み取れる結果は、売上成長よりも粗利率と固定費吸収の強弱が評価材料です。" },
       { name: "注意点", value: "求人需要が鈍ると成約数と単価が同時に下がり、人件費と広告費の固定負担が利益率を圧迫します。海外売上が伸びても国内紹介の採算が弱い場合は利益改善が遅れます。" },
       { name: "開示リンク", value: "[2026-05-14 第1四半期決算短信(15:30)](https://example.com/20260514.pdf)" },
       { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
@@ -3587,10 +3660,10 @@ function selfTest() {
     symbolCode: "4680",
     symbolName: "テスト",
     fields: [
-      { name: "材料インパクト", value: "様子見：月次は需要を示すが、粗利率と固定費吸収への波及は限定的。" },
+      { name: "材料インパクト", value: "様子見：月次売上105.0%は需要を示すが、粗利率と固定費吸収への波及は限定的。" },
       { name: "事業概要", value: "ボウリング、アミューズメント、カラオケ、スポッチャを国内外で運営するレジャー企業です。月次売上、来場者数、客単価、米国店舗、出店・改装投資が収益を左右します。" },
-      { name: "足元材料", value: "2026年5月14日に月次売上を開示し、国内外施設の需要動向が材料になっています。来場回復が続いても改装・出店費用が先行すると利益率への寄与は限定的です。" },
-      { name: "ファンダ要点", value: "月次売上、来場者数、客単価、米国店舗、出店・改装投資はファンダ要点で扱うKPIです。既存施設の稼働と投資負担のバランスが利益率を左右します。" },
+      { name: "足元材料", value: "2026年5月14日に月次売上105.0%を開示し、国内外施設の需要動向が材料になっています。来場回復が続いても改装・出店費用が先行すると利益率への寄与は限定的です。" },
+      { name: "ファンダ要点", value: "月次売上105.0%、来場者数、客単価、米国店舗、出店・改装投資はファンダ要点で扱うKPIです。既存施設の稼働と投資負担のバランスが利益率を左右します。" },
       { name: "注意点", value: "レジャー需要は休日・天候・訪日客動向で振れやすく、出店や改装の投資負担が重い場合は売上増でも営業利益率が伸びにくくなります。" },
       { name: "開示リンク", value: "[2026-05-14 月次売上に関するお知らせ(15:00)](https://example.com/20260514.pdf)" },
       { name: "Sources", value: "[テスト株式会社 IRニュース一覧](https://example.com/ir/news)" }
