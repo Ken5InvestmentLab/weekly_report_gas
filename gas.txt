@@ -1954,6 +1954,7 @@ const FETCH_GUARD_MS = 90000;
 const OHLCV_PHASE1_MAX_RUN_MS = 150 * 1000;
 const OHLCV_LOCK_WAIT_MS = 15000;
 const OHLCV_LOCK_BUSY_RESUME_AFTER_MS = 60 * 1000;
+const OHLCV_QUOTA_RESUME_AFTER_MS = 10 * 1000;
 const OHLCV_SAFETY_RESUME_AFTER_MS = 6.5 * 60 * 1000;
 const OHLCV_CHAIN_NEXT_TRIGGER_AFTER_MS = 10 * 1000;
 const OHLCV_DEFAULT_LOOKBACK_DAYS = 120;
@@ -4786,7 +4787,7 @@ reqMeta.push({
         responses = UrlFetchApp.fetchAll(requests);
       } catch (e) {
         if (isQuotaExhausted_(e)) {
-          writeProcessLog_("OHLCV", `PHASE1: Google側の実行制限に当たったため、バッチ ${batchNo} から4時間後に再開します。`, { batchNo: batchNo, message: e.message });
+          writeProcessLog_("OHLCV", `PHASE1: Google側の実行制限に当たったため、バッチ ${batchNo} から10秒後に再開します。`, { batchNo: batchNo, message: e.message });
           debugLogToSheet_("ohlcv.phase.error", { phase: "PHASE1", stage: "quota_exhausted", batchNo: batchNo, message: e.message });
           const appendedOnQuota = allFetchedData.length > 0 ? appendRowsToSheet_(ohlcvSheet, allFetchedData, "phase1_quota_pause") : 0;
           phase1AppendedRows += appendedOnQuota;
@@ -4798,8 +4799,7 @@ reqMeta.push({
             "LAST_TS_MAP": JSON.stringify(lastTsMap),
             [MAIN_FULL_BACKFILL_SYMBOLS_KEY]: JSON.stringify(Array.from(fullBackfillSet))
           });
-          deleteTriggersByHandler_("resumeOHLCVFetch");
-          ScriptApp.newTrigger("resumeOHLCVFetch").timeBased().after(4 * 60 * 60 * 1000).create();
+          scheduleOhlcvResume_("resumeOHLCVFetch", OHLCV_QUOTA_RESUME_AFTER_MS);
           return;
         }
         writeProcessLog_("OHLCV", `PHASE1: バッチ ${batchNo} のOHLCV取得に失敗しました。次の処理に進みます。`, { batchNo: batchNo, message: e.message });
@@ -5007,15 +5007,14 @@ if (validRows.length > 0) {
           fetchBatches++;
         } catch (e) {
           if (isQuotaExhausted_(e)) {
-            writeProcessLog_("OHLCV", `PHASE2: 株式分割情報の取得中にGoogle側の実行制限へ当たりました。行 ${chunkStartRow} から4時間後に再開します。`, {
+            writeProcessLog_("OHLCV", `PHASE2: 株式分割情報の取得中にGoogle側の実行制限へ当たりました。行 ${chunkStartRow} から10秒後に再開します。`, {
               rowStart: chunkStartRow,
               batchNo: fetchBatches + 1,
               message: e.message
             });
             debugLogToSheet_("ohlcv.phase.error", { phase: "PHASE2", stage: "quota_exhausted", rowStart: chunkStartRow, batchNo: fetchBatches + 1, message: e.message });
             props.setProperty(STATE_KEY, chunkStartRow.toString());
-            deleteTriggersByHandler_("resumeOHLCVFetch");
-            ScriptApp.newTrigger("resumeOHLCVFetch").timeBased().after(4 * 60 * 60 * 1000).create();
+            scheduleOhlcvResume_("resumeOHLCVFetch", OHLCV_QUOTA_RESUME_AFTER_MS);
             return;
           }
           writeProcessLog_("OHLCV", `PHASE2: 行 ${chunkStartRow} からの株式分割情報バッチ取得に失敗しました。`, {

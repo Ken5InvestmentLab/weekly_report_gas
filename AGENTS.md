@@ -274,6 +274,7 @@ OVERLAP_DAYS = 3
 | `resumeHistoricalOhlcvVolumeRepair` | 過去OHLCV出来高補正未完了時 | `repairHistoricalOhlcvVolumes` を再開 |
 
 重要: ワンショットトリガーのラッパー関数は、冒頭で `deleteTriggersByHandler_("自分の関数名")` を呼び、自分自身のトリガーを削除してから本体処理を呼ぶ。
+重要: 15:51本体のPHASE1/PHASE2で `isQuotaExhausted_()` を検知した場合は、保存済みカーソルから `resumeOHLCVFetch` を10秒後に再開する。4時間待機へ戻さない。
 重要: `.after(10 * 1000)` は10秒ぴったりの起動保証ではなく、GAS側の最小待機時間指定。実際の起動はGoogle側の時間主導トリガーキューにより遅れることがある。
 
 ## スプレッドシート構造
