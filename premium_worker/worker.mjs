@@ -74,9 +74,6 @@ const CLAIM_TTL_MS = 2 * 60 * 60 * 1000;
 const DEFAULT_RETRY_AFTER_MS = 24 * 60 * 60 * 1000;
 const SHEETS_READONLY_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly";
 const SHEETS_WRITE_SCOPE = "https://www.googleapis.com/auth/spreadsheets";
-const disclosureCandidatesBySymbol = new Map();
-const disclosureHeadStatusByUrl = new Map();
-const irbankDisclosurePdfByUrl = new Map();
 const LOG_HEADERS = [
   "event_at", "event_type", "alert_id", "symbol_code", "symbol_name",
   "signal_type", "title", "tradingview_url", "disclosure_links",
@@ -1535,21 +1532,15 @@ function isIrbankPdfFileUrl(url) {
 }
 
 async function fetchDisclosureHeadStatus(url) {
-  const key = String(url || "").trim();
-  if (!disclosureHeadStatusByUrl.has(key)) {
-    disclosureHeadStatusByUrl.set(key, (async () => {
-      try {
-        const response = await fetch(key, {
-          method: "HEAD",
-          signal: AbortSignal.timeout(10000)
-        });
-        return response.status;
-      } catch {
-        return 0;
-      }
-    })());
+  try {
+    const response = await fetch(url, {
+      method: "HEAD",
+      signal: AbortSignal.timeout(10000)
+    });
+    return response.status;
+  } catch {
+    return 0;
   }
-  return disclosureHeadStatusByUrl.get(key);
 }
 
 function isUnavailableDisclosureStatus(status) {
@@ -1565,21 +1556,12 @@ async function assertNoNewerIrbankDisclosureMiss(report, claim) {
     ? receivedAtMs - 45 * 24 * 60 * 60 * 1000
     : Date.now() - 45 * 24 * 60 * 60 * 1000;
 
-  const candidates = await fetchDisclosureCandidatesForSymbol(symbolCode);
+  const candidates = dedupeDisclosureCandidates([
+    ...(await fetchIrbankDisclosureCandidates(symbolCode)),
+    ...(await fetchYahooFinanceDisclosureCandidates(symbolCode))
+  ]);
 
   assertNoNewerDisclosureCandidatesAccounted(report, claim, candidates, cutoffMs);
-}
-
-async function fetchDisclosureCandidatesForSymbol(symbolCode) {
-  const code = String(symbolCode || "").trim();
-  if (!disclosureCandidatesBySymbol.has(code)) {
-    disclosureCandidatesBySymbol.set(code, (async () => {
-      const irbank = await fetchIrbankDisclosureCandidates(code);
-      const yahoo = await fetchYahooFinanceDisclosureCandidates(code);
-      return dedupeDisclosureCandidates([...irbank, ...yahoo]);
-    })());
-  }
-  return disclosureCandidatesBySymbol.get(code);
 }
 
 function assertNoNewerDisclosureCandidatesAccounted(report, claim, candidates, cutoffMs) {
@@ -2102,19 +2084,14 @@ async function replaceMarkdownLinkUrls(value, resolver) {
 async function resolveIrbankDisclosurePdfUrl(url) {
   const normalized = normalizeIrbankDisclosureDetailUrl(url);
   if (!normalized) return url;
-  if (!irbankDisclosurePdfByUrl.has(normalized)) {
-    irbankDisclosurePdfByUrl.set(normalized, (async () => {
-      try {
-        const response = await fetch(normalized);
-        if (!response.ok) return normalized;
-        const html = await response.text();
-        return extractIrbankPdfUrlFromHtml(html, extractIrbankDisclosureId(normalized)) || normalized;
-      } catch {
-        return normalized;
-      }
-    })());
+  try {
+    const response = await fetch(normalized);
+    if (!response.ok) return normalized;
+    const html = await response.text();
+    return extractIrbankPdfUrlFromHtml(html, extractIrbankDisclosureId(normalized)) || normalized;
+  } catch {
+    return normalized;
   }
-  return irbankDisclosurePdfByUrl.get(normalized);
 }
 
 function normalizeIrbankDisclosureDetailUrl(url) {
