@@ -82,6 +82,7 @@ OVERLAP_DAYS = 3
 - 生成中ファイルは `premium_worker/out/` に保存する。
 - `premium_worker/state/` と `premium_worker/out/` は git 管理しない。
 - 日本語を含む `premium_worker/out/premium_reports.json` は PowerShell here-string 等で作成しない。文字化けで `?` 化することがあるため、UTF-8安全な Node 書き込みや `apply_patch` で作成・修正する。
+- ライブ実行中のPDF本文抽出では Codex の `load_workspace_dependencies` / `codex_app__load_workspace_dependencies` を呼ばず、新規ランタイムも導入しない。まず `%USERPROFILE%\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe` の `pypdf` を短く確認し、次に既存の `python`、どちらも利用できなければWeb/PDFビューアまたは公式HTML詳細ページへ切り替える。
 
 ### プレミアム投稿ログ
 
@@ -111,6 +112,7 @@ OVERLAP_DAYS = 3
 - 正の値は手動テストなど、意図的に件数制限したい場合だけ使う。
 - `collect` が `claimedCount: 0` の場合は何も投稿しない。
 - `post` はアクティブなclaimが残っている `alert_id` だけをDiscord投稿対象にする。
+- `post --dry-run` が複数の失敗 `alert_id` を返した場合は、列挙されたレポートを一度に修正し、列挙されていない有効レポートは変更しない。
 - 古い `premium_reports.json` や投稿済み `alert_id` はskipして再投稿しない。
 
 ### プレミアムEmbed・分析ルール

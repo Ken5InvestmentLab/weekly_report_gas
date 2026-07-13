@@ -74,6 +74,9 @@ const CLAIM_TTL_MS = 2 * 60 * 60 * 1000;
 const DEFAULT_RETRY_AFTER_MS = 24 * 60 * 60 * 1000;
 const SHEETS_READONLY_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly";
 const SHEETS_WRITE_SCOPE = "https://www.googleapis.com/auth/spreadsheets";
+const disclosureCandidatesBySymbol = new Map();
+const disclosureHeadStatusByUrl = new Map();
+const irbankDisclosurePdfByUrl = new Map();
 const LOG_HEADERS = [
   "event_at", "event_type", "alert_id", "symbol_code", "symbol_name",
   "signal_type", "title", "tradingview_url", "disclosure_links",
@@ -195,8 +198,16 @@ async function post(opts) {
   const reports = sortReportsByImpact(normalizeReports(readJson(path.resolve(inputPath))));
   if (!reports.length) throw new Error("report file contains no reports");
 
+  if (dryRun) {
+    const localErrors = collectDryRunLocalValidationErrors(reports, state);
+    if (localErrors.length) {
+      throw new Error(formatDryRunValidationErrors("dry-run local preflight", localErrors));
+    }
+  }
+
   const results = [];
   const postLogEvents = [];
+  const dryRunErrors = [];
   try {
     for (const report of reports) {
       const claim = state.claims[report.alertId] || null;
@@ -206,16 +217,28 @@ async function post(opts) {
         continue;
       }
 
-      const reportWithClaim = hydrateReportWithClaim(report, claim);
-      await assertNoNewerIrbankDisclosureMiss(reportWithClaim, claim);
-      await resolveIrbankPdfDisclosureLinks(reportWithClaim);
-      const embed = buildEmbed(reportWithClaim);
-      const payload = {
-        username: env("DISCORD_PREMIUM_USERNAME") || "天底極致 Premium Report",
-        allowed_mentions: { parse: [] },
-        embeds: [embed],
-        components: buildPremiumScanComponents(reportWithClaim, claim, embed.url)
-      };
+      let reportWithClaim;
+      let embed;
+      let payload;
+      try {
+        reportWithClaim = hydrateReportWithClaim(report, claim);
+        await assertNoNewerIrbankDisclosureMiss(reportWithClaim, claim);
+        await resolveIrbankPdfDisclosureLinks(reportWithClaim);
+        embed = buildEmbed(reportWithClaim);
+        payload = {
+          username: env("DISCORD_PREMIUM_USERNAME") || "天底極致 Premium Report",
+          allowed_mentions: { parse: [] },
+          embeds: [embed],
+          components: buildPremiumScanComponents(reportWithClaim, claim, embed.url)
+        };
+      } catch (error) {
+        if (!dryRun) throw error;
+        dryRunErrors.push({
+          alertId: String(report.alertId || "unknown"),
+          message: String(error?.message || error)
+        });
+        continue;
+      }
 
       if (dryRun) {
         results.push({ alertId: reportWithClaim.alertId, dryRun: true, payload });
@@ -247,7 +270,44 @@ async function post(opts) {
     }
   }
 
+  if (dryRunErrors.length) {
+    throw new Error(formatDryRunValidationErrors("dry-run disclosure validation", dryRunErrors));
+  }
+
   console.log(JSON.stringify({ ok: true, posted: results.filter(r => r.posted).length, results }, null, 2));
+}
+
+function collectDryRunLocalValidationErrors(reports, state) {
+  const errors = [];
+  for (const report of reports || []) {
+    const alertId = String(report.alertId || "unknown");
+    const claim = state.claims?.[report.alertId] || null;
+    if (getPostSkipReason(report.alertId, state, claim)) continue;
+
+    const reportWithClaim = hydrateReportWithClaim(report, claim);
+    if (hasResolvableIrbankDisclosureDetailLink(reportWithClaim)) continue;
+
+    try {
+      buildEmbed(reportWithClaim);
+    } catch (error) {
+      errors.push({ alertId, message: String(error?.message || error) });
+    }
+  }
+  return errors;
+}
+
+function hasResolvableIrbankDisclosureDetailLink(report) {
+  const value = getReportFieldValue(report, "開示リンク");
+  return extractMarkdownLinks(value).some(link => Boolean(normalizeIrbankDisclosureDetailUrl(link.url)));
+}
+
+function formatDryRunValidationErrors(stage, errors) {
+  const items = errors || [];
+  const lines = items.map(item => {
+    const message = String(item.message || "validation failed").replace(/\s+/g, " ").trim();
+    return `- ${item.alertId || "unknown"}: ${message}`;
+  });
+  return `${stage} failed for ${items.length} report(s):\n${lines.join("\n")}`;
 }
 
 function getPostSkipReason(alertId, state, claim) {
@@ -1475,15 +1535,21 @@ function isIrbankPdfFileUrl(url) {
 }
 
 async function fetchDisclosureHeadStatus(url) {
-  try {
-    const response = await fetch(url, {
-      method: "HEAD",
-      signal: AbortSignal.timeout(10000)
-    });
-    return response.status;
-  } catch {
-    return 0;
+  const key = String(url || "").trim();
+  if (!disclosureHeadStatusByUrl.has(key)) {
+    disclosureHeadStatusByUrl.set(key, (async () => {
+      try {
+        const response = await fetch(key, {
+          method: "HEAD",
+          signal: AbortSignal.timeout(10000)
+        });
+        return response.status;
+      } catch {
+        return 0;
+      }
+    })());
   }
+  return disclosureHeadStatusByUrl.get(key);
 }
 
 function isUnavailableDisclosureStatus(status) {
@@ -1499,12 +1565,21 @@ async function assertNoNewerIrbankDisclosureMiss(report, claim) {
     ? receivedAtMs - 45 * 24 * 60 * 60 * 1000
     : Date.now() - 45 * 24 * 60 * 60 * 1000;
 
-  const candidates = dedupeDisclosureCandidates([
-    ...(await fetchIrbankDisclosureCandidates(symbolCode)),
-    ...(await fetchYahooFinanceDisclosureCandidates(symbolCode))
-  ]);
+  const candidates = await fetchDisclosureCandidatesForSymbol(symbolCode);
 
   assertNoNewerDisclosureCandidatesAccounted(report, claim, candidates, cutoffMs);
+}
+
+async function fetchDisclosureCandidatesForSymbol(symbolCode) {
+  const code = String(symbolCode || "").trim();
+  if (!disclosureCandidatesBySymbol.has(code)) {
+    disclosureCandidatesBySymbol.set(code, (async () => {
+      const irbank = await fetchIrbankDisclosureCandidates(code);
+      const yahoo = await fetchYahooFinanceDisclosureCandidates(code);
+      return dedupeDisclosureCandidates([...irbank, ...yahoo]);
+    })());
+  }
+  return disclosureCandidatesBySymbol.get(code);
 }
 
 function assertNoNewerDisclosureCandidatesAccounted(report, claim, candidates, cutoffMs) {
@@ -2027,14 +2102,19 @@ async function replaceMarkdownLinkUrls(value, resolver) {
 async function resolveIrbankDisclosurePdfUrl(url) {
   const normalized = normalizeIrbankDisclosureDetailUrl(url);
   if (!normalized) return url;
-  try {
-    const response = await fetch(normalized);
-    if (!response.ok) return normalized;
-    const html = await response.text();
-    return extractIrbankPdfUrlFromHtml(html, extractIrbankDisclosureId(normalized)) || normalized;
-  } catch {
-    return normalized;
+  if (!irbankDisclosurePdfByUrl.has(normalized)) {
+    irbankDisclosurePdfByUrl.set(normalized, (async () => {
+      try {
+        const response = await fetch(normalized);
+        if (!response.ok) return normalized;
+        const html = await response.text();
+        return extractIrbankPdfUrlFromHtml(html, extractIrbankDisclosureId(normalized)) || normalized;
+      } catch {
+        return normalized;
+      }
+    })());
   }
+  return irbankDisclosurePdfByUrl.get(normalized);
 }
 
 function normalizeIrbankDisclosureDetailUrl(url) {
@@ -2843,27 +2923,30 @@ function normalizeReports(data) {
 }
 
 function assertReportSourceCoverage(reports) {
+  const errors = [];
   for (const report of reports || []) {
     const symbol = String(report.symbolCode || report.alertId || "unknown");
+    const alertId = String(report.alertId || symbol);
     const fields = fieldsToMap(report.fields || []);
     const sourceLinks = extractMarkdownLinks(fields.get("Sources") || "");
     const urls = sourceLinks.map(link => normalizeReferenceUrlForDuplicate(link.url)).filter(Boolean);
     const uniqueUrls = new Set(urls);
 
     if (urls.length < MIN_REFERENCE_SOURCE_URLS) {
-      throw new Error(
-        `report ${report.alertId || symbol} field Sources must include at least ${MIN_REFERENCE_SOURCE_URLS} reference/listing URLs; ` +
+      errors.push(
+        `report ${alertId} field Sources must include at least ${MIN_REFERENCE_SOURCE_URLS} reference/listing URLs; ` +
         `use company IR plus IRBANK/Yahoo/TDnet-style listing pages, and keep direct disclosures in 開示リンク`
       );
-    }
-    if (urls.length > MAX_REFERENCE_SOURCE_URLS) {
-      throw new Error(
-        `report ${report.alertId || symbol} field Sources has too many URLs (${urls.length}); keep only ${MIN_REFERENCE_SOURCE_URLS}-${MAX_REFERENCE_SOURCE_URLS} reference/listing pages`
+    } else if (urls.length > MAX_REFERENCE_SOURCE_URLS) {
+      errors.push(
+        `report ${alertId} field Sources has too many URLs (${urls.length}); keep only ${MIN_REFERENCE_SOURCE_URLS}-${MAX_REFERENCE_SOURCE_URLS} reference/listing pages`
       );
+    } else if (uniqueUrls.size !== urls.length) {
+      errors.push(`report ${alertId} field Sources duplicates the same reference URL with different labels`);
     }
-    if (uniqueUrls.size !== urls.length) {
-      throw new Error(`report ${report.alertId || symbol} field Sources duplicates the same reference URL with different labels`);
-    }
+  }
+  if (errors.length) {
+    throw new Error(`report source coverage failed for ${errors.length} report(s):\n- ${errors.join("\n- ")}`);
   }
 }
 
@@ -3246,6 +3329,48 @@ function selfTest() {
       ]
     }
   ] }), /Sources duplicates the same reference URL/);
+  assert.throws(() => normalizeReports({ reports: [
+    {
+      alertId: "source-batch-a",
+      symbolCode: "1111",
+      fields: [{ name: "Sources", value: "[IRBANK A](https://irbank.net/1111/ir)" }]
+    },
+    {
+      alertId: "source-batch-b",
+      symbolCode: "2222",
+      fields: [{ name: "Sources", value: "[IRBANK B](https://irbank.net/2222/ir)" }]
+    }
+  ] }), error => {
+    assert.match(error.message, /source-batch-a/);
+    assert.match(error.message, /source-batch-b/);
+    return true;
+  });
+  const localPreflightErrors = collectDryRunLocalValidationErrors([
+    { alertId: "preflight-a", fields: [{ name: "Sources", value: "missing" }] },
+    { alertId: "preflight-b", fields: [{ name: "Sources", value: "missing" }] }
+  ], {
+    posted: {},
+    claims: {
+      "preflight-a": { claimId: "claim-a" },
+      "preflight-b": { claimId: "claim-b" }
+    }
+  });
+  assert.deepEqual(localPreflightErrors.map(item => item.alertId), ["preflight-a", "preflight-b"]);
+  const localPreflightMessage = formatDryRunValidationErrors("dry-run local preflight", localPreflightErrors);
+  assert.match(localPreflightMessage, /preflight-a/);
+  assert.match(localPreflightMessage, /preflight-b/);
+  assert.deepEqual(collectDryRunLocalValidationErrors([
+    {
+      alertId: "preflight-irbank-detail",
+      fields: [{
+        name: "開示リンク",
+        value: "[2026-05-08 決算短信(15:00)](https://irbank.net/1234/140120260508521234)"
+      }]
+    }
+  ], {
+    posted: {},
+    claims: { "preflight-irbank-detail": { claimId: "claim-detail" } }
+  }), []);
   assert.throws(() => normalizeReports({ reports: Array.from({ length: 10 }, (_, index) => {
     const symbolCode = String(4100 + index);
     return {

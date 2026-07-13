@@ -104,6 +104,18 @@ For every fundamentally material disclosure selected for the report, open the
 direct PDF/detail page and read the actual content before deciding
 `材料インパクト`.
 
+For PDF text extraction during a live automation run, do not call the Codex
+workspace dependency loader (`load_workspace_dependencies` /
+`codex_app__load_workspace_dependencies`) and do not install or bootstrap a new
+runtime. That loader has caused long stalls unrelated to report quality. First
+probe the already cached Codex runtime at
+`%USERPROFILE%\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe`
+with `-c "import pypdf"`; if it is absent, probe `where.exe python` and the same
+short import check. If neither existing interpreter works, read the PDF through
+the web/PDF viewer or use an official HTML/detail page. This changes only the
+extraction route; the same disclosure content must still be read and grounded
+before writing the report.
+
 When deciding `材料インパクト`, evaluate the substance of the disclosure:
 
 - actual earnings figures vs prior year
@@ -442,12 +454,13 @@ If the error says any of the following:
 then do NOT stop.
 
 Instead:
-1. Identify the failed `alertId` and symbol from the error.
+1. Identify every failed `alertId` and symbol listed in the error. The dry-run
+   may now report several independent failures at once.
 2. Re-open `premium_worker/out/latest_claim.json`.
 3. Re-open the current `premium_worker/out/premium_reports.json`.
-4. Regenerate only the failed report.
+4. Regenerate all listed failed reports in one repair pass.
 5. Keep all other valid reports unchanged.
-6. For the failed symbol, open and scan:
+6. For each failed symbol, open and scan:
    - the company's official IR/news disclosure list
    - IRBANK disclosure list for the symbol
    - TDnet/JPX-style disclosure list or equivalent
@@ -456,8 +469,9 @@ Instead:
 9. Rewrite `premium_worker/out/premium_reports.json`.
 10. Run the dry-run again.
 
-Repeat this dry-run → fix → dry-run loop for the failed alert. A batch-level
-retry count is not evidence that the symbol lacks disclosures.
+Repeat this dry-run → fix → dry-run loop only after repairing every symbol named
+by the current error. A batch-level retry count is not evidence that a symbol
+lacks disclosures.
 
 If the dry-run still fails after repeated report repair:
 - keep the failed alert isolated from the next real post batch

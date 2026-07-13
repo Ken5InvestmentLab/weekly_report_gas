@@ -254,12 +254,24 @@ The dry-run checks:
 
 If every report is valid, dry-run returns a payload preview and does not post.
 
-If a report fails validation, fix only the failed report in
+The dry-run performs deterministic local validation for all active reports
+before disclosure-network checks. It reports all local failures together, then
+reports all disclosure-network failures together, so repair every named report
+in one pass while leaving valid reports unchanged.
+
+If reports fail validation, fix only the named reports in
 `premium_worker/out/premium_reports.json`, then run dry-run again.
 Do not convert a grounded report into a watch-and-wait stub merely because a
 batch-level validation retry budget was exhausted. Isolate the failed alert and
 repair the validator-reported title, date, disclosure URL, or report field when
 verified disclosure material exists.
+
+For live-run PDF extraction, first probe the already cached Codex Python at
+`%USERPROFILE%\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe`
+for `pypdf`, then try another existing Python or the web/PDF viewer. Do not call
+the Codex workspace dependency loader or install a new runtime during the alert
+window; dependency bootstrap is not part of the report outcome and can stall
+the run for an extended period.
 
 ---
 
