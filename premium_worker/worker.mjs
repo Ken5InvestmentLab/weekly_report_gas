@@ -1721,11 +1721,12 @@ function extractNearestDisclosureDateInfo(beforeText, titleText = "") {
   const year = Number(match[1]);
   const month = Number(match[2]);
   const day = Number(match[3]);
-  if (!year || !month || !day) return null;
+  if (!isValidCalendarDate(year, month, day)) return null;
 
   const time = normalizeSpaces(stripHtml(titleText)).match(/(\d{1,2}):(\d{2})/);
   const hour = time ? Number(time[1]) : 0;
   const minute = time ? Number(time[2]) : 0;
+  if (!isValidClockTime(hour, minute)) return null;
   const disclosedAtMs = Date.UTC(year, month - 1, day, hour - 9, minute, 0);
 
   return {
@@ -1793,7 +1794,7 @@ function parseYahooFinanceDisclosureText(text, now = new Date()) {
   const dateParts = meta[1].split(/[\/.-]/).map(part => Number(part));
   const hour = Number(meta[2]);
   const minute = Number(meta[3]);
-  if (!title || !Number.isInteger(hour) || !Number.isInteger(minute)) {
+  if (!title || !isValidClockTime(hour, minute)) {
     return { title: "", dateText: "", timeText: "", disclosedAtMs: 0 };
   }
 
@@ -1809,7 +1810,9 @@ function parseYahooFinanceDisclosureText(text, now = new Date()) {
     if (candidateMs > now.getTime() + 24 * 60 * 60 * 1000) year -= 1;
   }
 
-  if (!year || !month || !day) return { title: "", dateText: "", timeText: "", disclosedAtMs: 0 };
+  if (!isValidCalendarDate(year, month, day)) {
+    return { title: "", dateText: "", timeText: "", disclosedAtMs: 0 };
+  }
 
   const disclosedAtMs = Date.UTC(year, month - 1, day, hour - 9, minute, 0);
   return {
@@ -1827,6 +1830,21 @@ function getJstYear(now = new Date()) {
   }).format(now));
 }
 
+function isValidCalendarDate(year, month, day) {
+  if (![year, month, day].every(Number.isInteger)) return false;
+  if (year < 2000 || year > 2100 || month < 1 || month > 12 || day < 1 || day > 31) return false;
+
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day;
+}
+
+function isValidClockTime(hour, minute) {
+  return Number.isInteger(hour) && Number.isInteger(minute) &&
+    hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59;
+}
+
 function normalizeHtmlUrl(href, baseUrl) {
   const text = String(href || "").trim();
   if (!text) return "";
@@ -1842,7 +1860,7 @@ function extractDisclosureDateInfo(text) {
 
   const ymd =
     value.match(/(20\d{2})[年\/.-]\s*(\d{1,2})[月\/.-]\s*(\d{1,2})日?/) ||
-    value.match(/(20\d{2})(\d{2})(\d{2})/);
+    value.match(/(?<!\d)(20\d{2})(\d{2})(\d{2})(?!\d)/);
 
   if (!ymd) return { dateText: "", timeText: "", disclosedAtMs: 0 };
 
@@ -1853,6 +1871,10 @@ function extractDisclosureDateInfo(text) {
   const time = value.match(/(\d{1,2}):(\d{2})/);
   const hour = time ? Number(time[1]) : 0;
   const minute = time ? Number(time[2]) : 0;
+
+  if (!isValidCalendarDate(year, month, day) || !isValidClockTime(hour, minute)) {
+    return { dateText: "", timeText: "", disclosedAtMs: 0 };
+  }
 
   const disclosedAtMs = Date.UTC(year, month - 1, day, hour - 9, minute, 0);
 
@@ -3972,6 +3994,9 @@ function selfTest() {
   const nearestDisclosureDate = extractNearestDisclosureDateInfo("quote date 2026/05/11 previous disclosure 2026/02/10", "Q3 earnings (15:30)");
   assert.equal(nearestDisclosureDate.dateText, "2026-02-10");
   assert.equal(nearestDisclosureDate.timeText, "15:30");
+  assert.equal(extractNearestDisclosureDateInfo("invalid document date 2049/97/69", "Correction (15:10)"), null);
+  assert.equal(extractDisclosureDateInfo("document id 140120180209476969").dateText, "");
+  assert.equal(extractDisclosureDateInfo("standalone date 20260511").dateText, "2026-05-11");
   assert.throws(() => assertFailCommandScope([
     { alertId: "f1", reason: "insufficient verified sources" },
     { alertId: "f2", reason: "insufficient verified sources" }
