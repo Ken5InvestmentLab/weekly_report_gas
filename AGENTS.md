@@ -435,6 +435,7 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 - 13:21で重複やGAPが残っても、その場で直さず15:51本番、GAP修復、post-repair cleanupへ委譲する。
 - 13:21で `alerts_raw` から出来高と `entry_price` 由来の終値を転記したAM行は `MIDDAY_LOCKED_yyyy-mm-dd` として保存し、後続処理では保護する。
 - 13:21初回で強制再読込した `RAW_ALERT_VOLUME_MAP_PROP_V2` は、同じ13:21 PHASEのresumeでは `alerts_raw` の最終行が変わっていない場合だけ再利用し、15:51本番へ引き継ぐ前に破棄する。
+- 13:21初回の `alerts_raw` 走査では、出来高・終値マップと同時に全BOTTOM銘柄、および末尾3,000行の `signal_date` または `received_at` が当日の銘柄を集計する。走査が未完了なら既存helperへfallbackし、対象集合を欠かさない。`signals_archive` は別途 `signal_type`〜`symbol_code` の最小列だけを読む。
 - 13:21再開時も事前の末尾12,000行掃除や `postprocessMiddayOhlcv` 予約は行わない。
 - 13:21取得の入口では、タイムアウト保険として `resumeOHLCVFetchMidday` を6.5分後に必ず予約する。通常の自前pause/resumeと重なっても、次回起動時に同じ入口で安全トリガーを張り直す。
 - 13:21取得結果は実行末尾までメモリに溜めず、Yahoo取得バッチごとに `ohlcv_4h` へ追記し、直後にカーソル・銘柄別最終timestamp・120日取得対象を保存する。タイムアウトや15:51引き継ぎ時に、未永続化の取得済み行を失わないようにする。
@@ -472,6 +473,7 @@ fetchOHLCVForNewAlerts
 - 15:51本番の当日PM出来高は、保護AM出来高または13:21保存済みAM出来高があればそれを優先して `日足出来高 - AM出来高` で補正する。AM行自体は上書きしない。
 - 15:51 PHASE1の `rawAlertVolumeMap` / `rawAlertCloseMap` は、当日直前の `alerts_raw` 追加を取りこぼさないようPHASE1入口で強制再読みにできる。読み取る対象はBOTTOMの当日出来高と `entry_price` 終値に限定する。
 - 15:51 PHASE1初回で強制再読込した `RAW_ALERT_VOLUME_MAP_PROP_V2` は、同じPHASE1のresumeでは `alerts_raw` の最終行が変わっていない場合だけ再利用し、resumeごとの全件再読込へ戻さない。
+- 15:51 PHASE1初回の同じ走査から全BOTTOM銘柄と、全行の `signal_date` が当日のBOTTOM銘柄を集計する。13:21の末尾3,000行・`received_at` 併用条件と混同せず、`signals_archive` のBOTTOM銘柄も必ず統合する。
 - 15:51 PHASE1の当日AM出来高マップは、`ohlcv_4h` のtimestamp昇順前提で当日の日付範囲だけを読んで作る。resumeごとに末尾60,000行を無条件で読まない。
 - 当日が休場日の場合はスキップ。
 - 対象銘柄は `alerts_raw` と `signals_archive` に登場する `BOTTOM` シグナルの銘柄。`OHLCV_REPAIR_SYMBOLS` も、その `BOTTOM` 銘柄集合に含まれるものだけ取得対象にする。
@@ -489,6 +491,8 @@ fetchOHLCVForNewAlerts
 | `PHASE2` | 株式分割検出・価格調整 |
 | `PHASE3` | 分割調整キューを `ohlcv_4h` に適用 |
 | `PHASE4` | 重い重複削除を行わず取得フローを完了し、日次メンテナンスを予約 |
+
+- PHASE2はまず `symbol_code` 列だけを読み、実際の分割情報があるチャンクだけ `RAW_HEADERS` 全列を読んで従来の価格調整を行う。正常な空 `SPLIT_QUEUE` はPHASE3を省略してPHASE4へ進めるが、分割あり・破損・非配列状態は従来のPHASE3経路へ渡す。
 
 通常の未指定取得窓は `OHLCV_DEFAULT_LOOKBACK_DAYS = 120` 日。
 
