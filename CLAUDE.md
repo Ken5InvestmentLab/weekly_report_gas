@@ -148,6 +148,8 @@ status, note, logged_at
 | `OHLCV_FULL_DEDUP_STATE_V1` | `cleanupOhlcvDuplicatesNow()`（全行重複削除）の再開カーソル。完走で削除、`resetCleanupOhlcvDuplicatesState()` でリセット |
 | `EVAL_OHLCV_COVERAGE_REPAIR_STATE_V1` | 評価対象銘柄120日OHLCV補填の再開状態 |
 | `HISTORICAL_VOLUME_REPAIR_STATE_V1` | 過去OHLCV出来高補正の再開状態 |
+| `HISTORICAL_VOLUME_REPAIR_ACTIVE_V1` | 過去OHLCV出来高補正を明示的に開始・再開した間だけ立てるactive状態 |
+| `HISTORICAL_VOLUME_REPAIR_PAUSE_V1` | 手動停止またはUrlFetch日次上限で停止した理由。存在中は自動再開しない |
 | `HIST_ALERT_VOL_REPAIR_PM_V1` | 過去PM出来高をalerts_rawから反映するリペアの再開状態 |
 | `HIST_ALERT_VOL_REPAIR_AM_V1` | 過去AM出来高をalerts_rawから反映するリペアの再開状態 |
 | `HIST_ALERT_VOL_REPAIR_CHAIN_PM_TO_AM` | PM完了後にAMを自動起動するチェーンフラグ（payload: `{dryRun: bool}`） |
@@ -356,6 +358,9 @@ resetEvaluationOhlcvCoverageRepairState()  // 補填状態リセット
 // 過去出来高補正
 previewHistoricalOhlcvVolumeRepair() // 過去出来高補正 DryRun
 repairHistoricalOhlcvVolumes()       // 過去出来高補正 本番
+resumeHistoricalOhlcvVolumeRepair()  // 保存カーソルから明示的に再開
+pauseHistoricalOhlcvVolumeRepair()   // 進捗を保持して手動停止
+getHistoricalOhlcvVolumeRepairStatus() // active/pause/trigger/進捗確認
 resetHistoricalOhlcvVolumeRepairState()   // 過去出来高補正状態リセット
 
 // alerts_raw 由来の過去出来高反映（一時リペア）

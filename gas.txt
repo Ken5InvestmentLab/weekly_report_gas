@@ -1303,7 +1303,15 @@ function buildGlobalExecutionWatchdogJobs_(allProps) {
       delayMs: 10 * 1000
     },
     { id: "evaluation_ohlcv_coverage", handler: EVAL_OHLCV_COVERAGE_RESUME_HANDLER, pending: !!allProps[EVAL_OHLCV_COVERAGE_STATE_KEY], delayMs: 10 * 1000 },
-    { id: "historical_ohlcv_volume", handler: HISTORICAL_VOLUME_REPAIR_RESUME_HANDLER, pending: !!allProps[HISTORICAL_VOLUME_REPAIR_STATE_KEY] },
+    {
+      id: "historical_ohlcv_volume",
+      handler: HISTORICAL_VOLUME_REPAIR_RESUME_HANDLER,
+      pending: !!allProps[HISTORICAL_VOLUME_REPAIR_STATE_KEY] &&
+        !!allProps[HISTORICAL_VOLUME_REPAIR_ACTIVE_KEY] &&
+        !allProps[HISTORICAL_VOLUME_REPAIR_PAUSE_KEY],
+      allowed: !allProps[GLOBAL_WATCHDOG_OHLCV_MAIN_ACTIVE_KEY] &&
+        !allProps[GLOBAL_WATCHDOG_OHLCV_MIDDAY_ACTIVE_KEY]
+    },
     { id: "historical_alert_pm_volume", handler: "resumeRepairHistoricalPmVolumeFromAlertsRaw", pending: !!allProps.HIST_ALERT_VOL_REPAIR_PM_V1, delayMs: 10 * 1000 },
     { id: "historical_alert_am_volume", handler: "resumeRepairHistoricalAmVolumeFromAlertsRaw", pending: !!allProps.HIST_ALERT_VOL_REPAIR_AM_V1, delayMs: 10 * 1000 },
     { id: "ohlcv_recovery_timestamp", handler: OHLCV_RECOVERY_TS_RESUME_HANDLER, pending: !!allProps[OHLCV_RECOVERY_TS_STATE_KEY] },
@@ -7514,10 +7522,13 @@ return { ok: false, symbol, rows: 0, dummy: true, cleanup: cleanup };
 }
 
 const HISTORICAL_VOLUME_REPAIR_STATE_KEY = "HISTORICAL_VOLUME_REPAIR_STATE_V1";
+const HISTORICAL_VOLUME_REPAIR_ACTIVE_KEY = "HISTORICAL_VOLUME_REPAIR_ACTIVE_V1";
+const HISTORICAL_VOLUME_REPAIR_PAUSE_KEY = "HISTORICAL_VOLUME_REPAIR_PAUSE_V1";
 const HISTORICAL_VOLUME_REPAIR_RESUME_HANDLER = "resumeHistoricalOhlcvVolumeRepair";
 const HISTORICAL_VOLUME_REPAIR_BATCH_SYMBOLS = 12;
 const HISTORICAL_VOLUME_REPAIR_MAX_RUN_MS = 3.5 * 60 * 1000;
 const HISTORICAL_VOLUME_REPAIR_RESUME_AFTER_MS = 60 * 1000;
+const HISTORICAL_VOLUME_REPAIR_PRIORITY_RETRY_AFTER_MS = 30 * 60 * 1000;
 const HISTORICAL_VOLUME_REPAIR_ROW_CHUNK_SIZE = 800;
 const HISTORICAL_VOLUME_REPAIR_FETCH_BATCH_SYMBOLS = 6;
 
@@ -7526,6 +7537,7 @@ const HISTORICAL_VOLUME_REPAIR_FETCH_BATCH_SYMBOLS = 6;
  * 既存行の B列マーカーは保持し、D:H（open/high/low/close/volume）のみ更新する。
  */
 function repairHistoricalOhlcvVolumes() {
+  activateHistoricalOhlcvVolumeRepair_(PropertiesService.getScriptProperties(), "manual_start");
   return repairHistoricalOhlcvVolumesInternal_({ dryRun: false });
 }
 
@@ -7533,15 +7545,58 @@ function previewHistoricalOhlcvVolumeRepair() {
   return repairHistoricalOhlcvVolumesInternal_({ dryRun: true, reset: true });
 }
 
-function resumeHistoricalOhlcvVolumeRepair() {
+function resumeHistoricalOhlcvVolumeRepair(event) {
   deleteTriggersByHandler_(HISTORICAL_VOLUME_REPAIR_RESUME_HANDLER);
-  return repairHistoricalOhlcvVolumes();
+  const props = PropertiesService.getScriptProperties();
+  const isTimeDrivenResume = !!(event && event.triggerUid);
+  const pause = readHistoricalOhlcvVolumeRepairPause_(props);
+
+  if (isTimeDrivenResume && (!isHistoricalOhlcvVolumeRepairActive_(props) || pause)) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: pause ? "paused" : "not_active",
+      pause: pause
+    };
+  }
+  if (!isTimeDrivenResume) {
+    activateHistoricalOhlcvVolumeRepair_(props, "manual_resume");
+  }
+  return repairHistoricalOhlcvVolumesInternal_({ dryRun: false });
+}
+
+function pauseHistoricalOhlcvVolumeRepair() {
+  const props = PropertiesService.getScriptProperties();
+  pauseHistoricalOhlcvVolumeRepair_(props, "manual", "manually paused");
+  return getHistoricalOhlcvVolumeRepairStatus();
 }
 
 function resetHistoricalOhlcvVolumeRepairState() {
-  PropertiesService.getScriptProperties().deleteProperty(HISTORICAL_VOLUME_REPAIR_STATE_KEY);
+  const props = PropertiesService.getScriptProperties();
+  props.deleteProperty(HISTORICAL_VOLUME_REPAIR_STATE_KEY);
+  props.deleteProperty(HISTORICAL_VOLUME_REPAIR_ACTIVE_KEY);
+  props.deleteProperty(HISTORICAL_VOLUME_REPAIR_PAUSE_KEY);
   deleteTriggersByHandler_(HISTORICAL_VOLUME_REPAIR_RESUME_HANDLER);
   return { ok: true, reset: true };
+}
+
+function getHistoricalOhlcvVolumeRepairStatus() {
+  const props = PropertiesService.getScriptProperties();
+  const allProps = props.getProperties();
+  const state = readHistoricalVolumeRepairState_(props);
+  const pause = readHistoricalOhlcvVolumeRepairPause_(props);
+  const triggerPresent = ScriptApp.getProjectTriggers().some(function(trigger) {
+    return trigger.getHandlerFunction() === HISTORICAL_VOLUME_REPAIR_RESUME_HANDLER;
+  });
+  return {
+    ok: true,
+    active: !!allProps[HISTORICAL_VOLUME_REPAIR_ACTIVE_KEY] && !pause,
+    paused: !!pause,
+    pause: pause,
+    triggerPresent: triggerPresent,
+    priorityOhlcvActive: isHistoricalOhlcvVolumeRepairPriorityBusy_(allProps),
+    state: state ? buildHistoricalVolumeRepairChunkedSummary_(state, false) : null
+  };
 }
 
 function repairHistoricalOhlcvVolumesInternal_(options) {
@@ -7556,6 +7611,48 @@ function readHistoricalVolumeRepairState_(props) {
   } catch (e) {
     return null;
   }
+}
+
+function readHistoricalOhlcvVolumeRepairPause_(props) {
+  try {
+    const raw = props.getProperty(HISTORICAL_VOLUME_REPAIR_PAUSE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    return { reason: "invalid_pause_state", at: "", message: "" };
+  }
+}
+
+function isHistoricalOhlcvVolumeRepairActive_(props) {
+  return !!props.getProperty(HISTORICAL_VOLUME_REPAIR_ACTIVE_KEY);
+}
+
+function isHistoricalOhlcvVolumeRepairPriorityBusy_(allProps) {
+  return !!allProps[GLOBAL_WATCHDOG_OHLCV_MAIN_ACTIVE_KEY] ||
+    !!allProps[GLOBAL_WATCHDOG_OHLCV_MIDDAY_ACTIVE_KEY];
+}
+
+function activateHistoricalOhlcvVolumeRepair_(props, source) {
+  props.setProperty(HISTORICAL_VOLUME_REPAIR_ACTIVE_KEY, JSON.stringify({
+    source: source || "manual",
+    at: new Date().toISOString()
+  }));
+  props.deleteProperty(HISTORICAL_VOLUME_REPAIR_PAUSE_KEY);
+}
+
+function pauseHistoricalOhlcvVolumeRepair_(props, reason, message) {
+  props.deleteProperty(HISTORICAL_VOLUME_REPAIR_ACTIVE_KEY);
+  props.setProperty(HISTORICAL_VOLUME_REPAIR_PAUSE_KEY, JSON.stringify({
+    reason: reason || "manual",
+    at: new Date().toISOString(),
+    message: message || ""
+  }));
+  deleteTriggersByHandler_(HISTORICAL_VOLUME_REPAIR_RESUME_HANDLER);
+}
+
+function isHistoricalOhlcvVolumeRepairDailyQuotaError_(err) {
+  const msg = String((err && err.message) || err || "").toLowerCase();
+  return msg.indexOf("service invoked too many times for one day") !== -1 &&
+    msg.indexOf("urlfetch") !== -1;
 }
 
 
@@ -7605,6 +7702,7 @@ metaList.push({
     deferredSymbols: 0,
     parseErrors: 0,
     transient: false,
+    dailyQuotaExceeded: false,
     message: ""
   };
   if (requests.length === 0) return summary;
@@ -7613,7 +7711,13 @@ metaList.push({
   try {
     responses = UrlFetchApp.fetchAll(requests);
   } catch (e) {
-    if (isTransientError_(e)) {
+    if (isHistoricalOhlcvVolumeRepairDailyQuotaError_(e)) {
+      summary.dailyQuotaExceeded = true;
+      summary.deferredSymbols = symbols.length;
+      summary.message = e.message;
+      return summary;
+    }
+    if (isQuotaExhausted_(e) || isTransientError_(e)) {
       summary.transient = true;
       summary.deferredSymbols = symbols.length;
       summary.message = e.message;
@@ -7732,7 +7836,27 @@ function repairHistoricalOhlcvVolumesChunked_(options) {
     state = makeHistoricalVolumeRepairChunkedState_(dryRun);
     props.setProperty(HISTORICAL_VOLUME_REPAIR_STATE_KEY, JSON.stringify(state));
   }
-  scheduleHistoricalVolumeRepairResume_(GLOBAL_JOB_SAFETY_AFTER_MS);
+  if (!dryRun) {
+    const allProps = props.getProperties();
+    const pause = readHistoricalOhlcvVolumeRepairPause_(props);
+    if (!isHistoricalOhlcvVolumeRepairActive_(props) || pause) {
+      return Object.assign(buildHistoricalVolumeRepairChunkedSummary_(state, false), {
+        skipped: true,
+        reason: pause ? "paused" : "not_active",
+        pause: pause
+      });
+    }
+    if (isHistoricalOhlcvVolumeRepairPriorityBusy_(allProps)) {
+      scheduleHistoricalVolumeRepairResume_(HISTORICAL_VOLUME_REPAIR_PRIORITY_RETRY_AFTER_MS);
+      console.log(`[historicalVolumeRepair] deferred while priority OHLCV is active rowStart=${state.rowStart}, nextSymbolIndex=${state.nextSymbolIndex}`);
+      return Object.assign(buildHistoricalVolumeRepairChunkedSummary_(state, false), {
+        skipped: true,
+        reason: "priority_ohlcv_active",
+        retryAfterMs: HISTORICAL_VOLUME_REPAIR_PRIORITY_RETRY_AFTER_MS
+      });
+    }
+    scheduleHistoricalVolumeRepairResume_(GLOBAL_JOB_SAFETY_AFTER_MS);
+  }
 
   const ss = SpreadsheetApp.openById(
     PropertiesService.getScriptProperties().getProperty("SPREADSHEET_ID")
@@ -7752,6 +7876,8 @@ function repairHistoricalOhlcvVolumesChunked_(options) {
         SpreadsheetApp.flush();
       }
       props.deleteProperty(HISTORICAL_VOLUME_REPAIR_STATE_KEY);
+      props.deleteProperty(HISTORICAL_VOLUME_REPAIR_ACTIVE_KEY);
+      props.deleteProperty(HISTORICAL_VOLUME_REPAIR_PAUSE_KEY);
       deleteTriggersByHandler_(HISTORICAL_VOLUME_REPAIR_RESUME_HANDLER);
       const complete = buildHistoricalVolumeRepairChunkedSummary_(state, true);
       console.log(`[historicalVolumeRepair] complete ${JSON.stringify(complete)}`);
@@ -7791,13 +7917,34 @@ function repairHistoricalOhlcvVolumesChunked_(options) {
       continue;
     }
 
+    if (!dryRun && isHistoricalOhlcvVolumeRepairPriorityBusy_(props.getProperties())) {
+      scheduleHistoricalVolumeRepairResume_(HISTORICAL_VOLUME_REPAIR_PRIORITY_RETRY_AFTER_MS);
+      console.log(`[historicalVolumeRepair] deferred before fetch because priority OHLCV became active rowStart=${state.rowStart}, nextSymbolIndex=${state.nextSymbolIndex}`);
+      return Object.assign(buildHistoricalVolumeRepairChunkedSummary_(state, false), {
+        skipped: true,
+        reason: "priority_ohlcv_active",
+        retryAfterMs: HISTORICAL_VOLUME_REPAIR_PRIORITY_RETRY_AFTER_MS
+      });
+    }
+
     const context = buildHistoricalVolumeRepairChunkContext_(sh, state.rowStart, state.rowEnd, batchSymbols);
     const result = fetchHistoricalVolumeRepairRowsForSymbols_(batchSymbols, context.ranges);
+    if (result.dailyQuotaExceeded) {
+      state.deferredSymbols += result.deferredSymbols || batchSymbols.length;
+      state.updatedAt = new Date().toISOString();
+      props.setProperty(HISTORICAL_VOLUME_REPAIR_STATE_KEY, JSON.stringify(state));
+      pauseHistoricalOhlcvVolumeRepair_(props, "urlfetch_daily_quota", result.message);
+      console.log(`[historicalVolumeRepair] paused for manual resume after daily UrlFetch quota rowStart=${state.rowStart}, nextSymbolIndex=${state.nextSymbolIndex}: ${result.message}`);
+      return Object.assign(buildHistoricalVolumeRepairChunkedSummary_(state, false), {
+        paused: true,
+        reason: "urlfetch_daily_quota"
+      });
+    }
     if (result.transient) {
       state.deferredSymbols += result.deferredSymbols || batchSymbols.length;
       state.updatedAt = new Date().toISOString();
       props.setProperty(HISTORICAL_VOLUME_REPAIR_STATE_KEY, JSON.stringify(state));
-      scheduleHistoricalVolumeRepairResume_();
+      if (!dryRun) scheduleHistoricalVolumeRepairResume_();
       console.log(`[historicalVolumeRepair] transient pause rowStart=${state.rowStart}, nextSymbolIndex=${state.nextSymbolIndex}: ${result.message}`);
       return buildHistoricalVolumeRepairChunkedSummary_(state, false);
     }
@@ -7829,7 +7976,7 @@ function repairHistoricalOhlcvVolumesChunked_(options) {
     Utilities.sleep(200);
   }
 
-  scheduleHistoricalVolumeRepairResume_();
+  if (!dryRun) scheduleHistoricalVolumeRepairResume_();
   console.log(`[historicalVolumeRepair] pause rowStart=${state.rowStart}, nextSymbolIndex=${state.nextSymbolIndex}, updatedRows=${state.updatedRows}`);
   return buildHistoricalVolumeRepairChunkedSummary_(state, false);
 }
