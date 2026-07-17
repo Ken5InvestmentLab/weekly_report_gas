@@ -382,7 +382,7 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 | `EVAL_OHLCV_COVERAGE_REPAIR_STATE_V1` | 評価対象銘柄120日OHLCV補填の再開状態 |
 | `HISTORICAL_VOLUME_REPAIR_STATE_V1` | 過去OHLCV出来高補正の再開状態 |
 | `HISTORICAL_VOLUME_REPAIR_ACTIVE_V1` | 過去OHLCV出来高補正を明示的に開始・再開した間だけ立てるactive状態 |
-| `HISTORICAL_VOLUME_REPAIR_PAUSE_V1` | 手動停止またはUrlFetch日次上限で停止した理由。存在中はウォッチドッグから再開しない |
+| `HISTORICAL_VOLUME_REPAIR_PAUSE_V1` | 手動停止またはUrlFetch日次上限待機の理由。日次上限時は再開予定時刻も保持する |
 
 ## アーキテクチャ
 
@@ -661,10 +661,10 @@ resetHistoricalOhlcvVolumeRepairState()
 - 旧セッション境界で保存済みの過去OHLCV出来高を補正する。
 - 再開可能バッチとして実行する。
 - 進捗は `HISTORICAL_VOLUME_REPAIR_STATE_V1` に保存する。
-- `repairHistoricalOhlcvVolumes()` / 手動の `resumeHistoricalOhlcvVolumeRepair()` で明示的にactive化したときだけfetchする。
-- 13:21/15:51 OHLCV本体がactiveの間はfetchせず30分後へ延期する。
-- `Service invoked too many times for one day: urlfetch` ではカーソルを保持してpauseし、再開トリガーを削除する。24時間後の自動再開はせず、手動の `resumeHistoricalOhlcvVolumeRepair()` でだけ再開する。
-- pause中またはactiveでない保存stateを `runGlobalExecutionWatchdog` から復活させない。
+- `repairHistoricalOhlcvVolumes()` / 手動の `resumeHistoricalOhlcvVolumeRepair()` で開始したactiveジョブだけがfetchする。開始後の再開は自動で行う。
+- 13:21/15:51 OHLCV本体がactiveの間はfetchせず30分後へ延期し、完了するまで同じ判定を繰り返す。
+- `Service invoked too many times for one day: urlfetch` ではカーソルを保持し、約24時間はfetchせず待機してから1回だけ自動再開する。再開時に本体がactiveなら30分延期判定へ移る。
+- 手動pause中またはactiveでない保存stateは `runGlobalExecutionWatchdog` から復活させない。日次上限の自動再開予定時刻を過ぎたactiveジョブだけは、再開トリガー欠落時にウォッチドッグで復旧する。
 
 ## タイムアウト対策パターン
 

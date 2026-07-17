@@ -1306,9 +1306,16 @@ function buildGlobalExecutionWatchdogJobs_(allProps) {
     {
       id: "historical_ohlcv_volume",
       handler: HISTORICAL_VOLUME_REPAIR_RESUME_HANDLER,
-      pending: !!allProps[HISTORICAL_VOLUME_REPAIR_STATE_KEY] &&
-        !!allProps[HISTORICAL_VOLUME_REPAIR_ACTIVE_KEY] &&
-        !allProps[HISTORICAL_VOLUME_REPAIR_PAUSE_KEY],
+      pending: (function() {
+        if (!allProps[HISTORICAL_VOLUME_REPAIR_STATE_KEY]) return false;
+        const active = !!allProps[HISTORICAL_VOLUME_REPAIR_ACTIVE_KEY];
+        const pauseRaw = allProps[HISTORICAL_VOLUME_REPAIR_PAUSE_KEY];
+        if (!pauseRaw) return active;
+        const pause = parseWatchdogJson_(pauseRaw);
+        if (!pause) return false;
+        const quotaWait = isHistoricalOhlcvVolumeRepairDailyQuotaPause_(pause);
+        return (active || quotaWait) && isHistoricalOhlcvVolumeRepairAutoRetryReady_(pause);
+      })(),
       allowed: !allProps[GLOBAL_WATCHDOG_OHLCV_MAIN_ACTIVE_KEY] &&
         !allProps[GLOBAL_WATCHDOG_OHLCV_MIDDAY_ACTIVE_KEY]
     },
@@ -7529,6 +7536,7 @@ const HISTORICAL_VOLUME_REPAIR_BATCH_SYMBOLS = 12;
 const HISTORICAL_VOLUME_REPAIR_MAX_RUN_MS = 3.5 * 60 * 1000;
 const HISTORICAL_VOLUME_REPAIR_RESUME_AFTER_MS = 60 * 1000;
 const HISTORICAL_VOLUME_REPAIR_PRIORITY_RETRY_AFTER_MS = 30 * 60 * 1000;
+const HISTORICAL_VOLUME_REPAIR_QUOTA_RETRY_AFTER_MS = 24 * 60 * 60 * 1000;
 const HISTORICAL_VOLUME_REPAIR_ROW_CHUNK_SIZE = 800;
 const HISTORICAL_VOLUME_REPAIR_FETCH_BATCH_SYMBOLS = 6;
 
@@ -7551,13 +7559,39 @@ function resumeHistoricalOhlcvVolumeRepair(event) {
   const isTimeDrivenResume = !!(event && event.triggerUid);
   const pause = readHistoricalOhlcvVolumeRepairPause_(props);
 
-  if (isTimeDrivenResume && (!isHistoricalOhlcvVolumeRepairActive_(props) || pause)) {
-    return {
-      ok: true,
-      skipped: true,
-      reason: pause ? "paused" : "not_active",
-      pause: pause
-    };
+  if (isTimeDrivenResume && !isHistoricalOhlcvVolumeRepairActive_(props)) {
+    if (pause &&
+        isHistoricalOhlcvVolumeRepairDailyQuotaPause_(pause) &&
+        isHistoricalOhlcvVolumeRepairAutoRetryReady_(pause)) {
+      props.setProperty(HISTORICAL_VOLUME_REPAIR_ACTIVE_KEY, JSON.stringify({
+        source: "automatic_quota_resume",
+        at: new Date().toISOString()
+      }));
+    } else {
+      return {
+        ok: true,
+        skipped: true,
+        reason: "not_active",
+        pause: pause
+      };
+    }
+  }
+  if (isTimeDrivenResume && pause) {
+    if (!isHistoricalOhlcvVolumeRepairAutoRetryReady_(pause)) {
+      const remainingMs = getHistoricalOhlcvVolumeRepairAutoRetryRemainingMs_(pause);
+      if (remainingMs > 0) scheduleHistoricalVolumeRepairResume_(remainingMs);
+      return {
+        ok: true,
+        skipped: true,
+        reason: "paused",
+        pause: pause,
+        retryAfterMs: remainingMs
+      };
+    }
+    props.deleteProperty(HISTORICAL_VOLUME_REPAIR_PAUSE_KEY);
+    const autoResumeAtMs = getHistoricalOhlcvVolumeRepairAutoRetryAtMs_(pause);
+    const autoResumeAt = Number.isFinite(autoResumeAtMs) ? new Date(autoResumeAtMs).toISOString() : "";
+    console.log(`[historicalVolumeRepair] daily UrlFetch quota wait finished; automatic resume started retryAt=${autoResumeAt}`);
   }
   if (!isTimeDrivenResume) {
     activateHistoricalOhlcvVolumeRepair_(props, "manual_resume");
@@ -7585,14 +7619,21 @@ function getHistoricalOhlcvVolumeRepairStatus() {
   const allProps = props.getProperties();
   const state = readHistoricalVolumeRepairState_(props);
   const pause = readHistoricalOhlcvVolumeRepairPause_(props);
+  const active = !!allProps[HISTORICAL_VOLUME_REPAIR_ACTIVE_KEY] ||
+    isHistoricalOhlcvVolumeRepairDailyQuotaPause_(pause);
+  const autoResumeAtMs = getHistoricalOhlcvVolumeRepairAutoRetryAtMs_(pause);
   const triggerPresent = ScriptApp.getProjectTriggers().some(function(trigger) {
     return trigger.getHandlerFunction() === HISTORICAL_VOLUME_REPAIR_RESUME_HANDLER;
   });
   return {
     ok: true,
-    active: !!allProps[HISTORICAL_VOLUME_REPAIR_ACTIVE_KEY] && !pause,
+    active: active,
+    runnable: !!allProps[HISTORICAL_VOLUME_REPAIR_ACTIVE_KEY] && !pause,
     paused: !!pause,
     pause: pause,
+    autoResumeAt: Number.isFinite(autoResumeAtMs)
+      ? new Date(autoResumeAtMs).toISOString()
+      : "",
     triggerPresent: triggerPresent,
     priorityOhlcvActive: isHistoricalOhlcvVolumeRepairPriorityBusy_(allProps),
     state: state ? buildHistoricalVolumeRepairChunkedSummary_(state, false) : null
@@ -7644,9 +7685,51 @@ function pauseHistoricalOhlcvVolumeRepair_(props, reason, message) {
   props.setProperty(HISTORICAL_VOLUME_REPAIR_PAUSE_KEY, JSON.stringify({
     reason: reason || "manual",
     at: new Date().toISOString(),
-    message: message || ""
+    message: message || "",
+    autoResume: false
   }));
   deleteTriggersByHandler_(HISTORICAL_VOLUME_REPAIR_RESUME_HANDLER);
+}
+
+function deferHistoricalOhlcvVolumeRepairForDailyQuota_(props, message) {
+  const retryAtMs = Date.now() + HISTORICAL_VOLUME_REPAIR_QUOTA_RETRY_AFTER_MS;
+  const pause = {
+    reason: "urlfetch_daily_quota",
+    at: new Date().toISOString(),
+    message: message || "",
+    autoResume: true,
+    retryAt: new Date(retryAtMs).toISOString()
+  };
+  props.setProperty(HISTORICAL_VOLUME_REPAIR_PAUSE_KEY, JSON.stringify(pause));
+  scheduleHistoricalVolumeRepairResume_(HISTORICAL_VOLUME_REPAIR_QUOTA_RETRY_AFTER_MS);
+  return pause;
+}
+
+function getHistoricalOhlcvVolumeRepairAutoRetryAtMs_(pause) {
+  if (!isHistoricalOhlcvVolumeRepairDailyQuotaPause_(pause)) return NaN;
+  if (pause.autoResume === true && pause.retryAt) return new Date(pause.retryAt).getTime();
+  const pausedAtMs = pause.at ? new Date(pause.at).getTime() : NaN;
+  return Number.isFinite(pausedAtMs)
+    ? pausedAtMs + HISTORICAL_VOLUME_REPAIR_QUOTA_RETRY_AFTER_MS
+    : NaN;
+}
+
+function isHistoricalOhlcvVolumeRepairDailyQuotaPause_(pause) {
+  return !!pause && pause.reason === "urlfetch_daily_quota";
+}
+
+function isHistoricalOhlcvVolumeRepairAutoRetryReady_(pause, nowMs) {
+  const retryAtMs = getHistoricalOhlcvVolumeRepairAutoRetryAtMs_(pause);
+  if (!Number.isFinite(retryAtMs)) return false;
+  const currentMs = Number.isFinite(nowMs) ? nowMs : Date.now();
+  return retryAtMs <= currentMs;
+}
+
+function getHistoricalOhlcvVolumeRepairAutoRetryRemainingMs_(pause, nowMs) {
+  const retryAtMs = getHistoricalOhlcvVolumeRepairAutoRetryAtMs_(pause);
+  if (!Number.isFinite(retryAtMs)) return 0;
+  const currentMs = Number.isFinite(nowMs) ? nowMs : Date.now();
+  return Math.max(0, retryAtMs - currentMs);
 }
 
 function isHistoricalOhlcvVolumeRepairDailyQuotaError_(err) {
@@ -7933,11 +8016,12 @@ function repairHistoricalOhlcvVolumesChunked_(options) {
       state.deferredSymbols += result.deferredSymbols || batchSymbols.length;
       state.updatedAt = new Date().toISOString();
       props.setProperty(HISTORICAL_VOLUME_REPAIR_STATE_KEY, JSON.stringify(state));
-      pauseHistoricalOhlcvVolumeRepair_(props, "urlfetch_daily_quota", result.message);
-      console.log(`[historicalVolumeRepair] paused for manual resume after daily UrlFetch quota rowStart=${state.rowStart}, nextSymbolIndex=${state.nextSymbolIndex}: ${result.message}`);
+      const quotaPause = deferHistoricalOhlcvVolumeRepairForDailyQuota_(props, result.message);
+      console.log(`[historicalVolumeRepair] daily UrlFetch quota reached; fetch is paused until one automatic retry rowStart=${state.rowStart}, nextSymbolIndex=${state.nextSymbolIndex}, retryAt=${quotaPause.retryAt}: ${result.message}`);
       return Object.assign(buildHistoricalVolumeRepairChunkedSummary_(state, false), {
         paused: true,
-        reason: "urlfetch_daily_quota"
+        reason: "urlfetch_daily_quota",
+        autoResumeAt: quotaPause.retryAt
       });
     }
     if (result.transient) {

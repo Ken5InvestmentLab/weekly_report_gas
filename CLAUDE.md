@@ -149,7 +149,7 @@ status, note, logged_at
 | `EVAL_OHLCV_COVERAGE_REPAIR_STATE_V1` | 評価対象銘柄120日OHLCV補填の再開状態 |
 | `HISTORICAL_VOLUME_REPAIR_STATE_V1` | 過去OHLCV出来高補正の再開状態 |
 | `HISTORICAL_VOLUME_REPAIR_ACTIVE_V1` | 過去OHLCV出来高補正を明示的に開始・再開した間だけ立てるactive状態 |
-| `HISTORICAL_VOLUME_REPAIR_PAUSE_V1` | 手動停止またはUrlFetch日次上限で停止した理由。存在中は自動再開しない |
+| `HISTORICAL_VOLUME_REPAIR_PAUSE_V1` | 手動停止またはUrlFetch日次上限待機の理由。日次上限時は再開予定時刻を保持し、約24時間の無fetch待機後に1回だけ自動再開する |
 | `HIST_ALERT_VOL_REPAIR_PM_V1` | 過去PM出来高をalerts_rawから反映するリペアの再開状態 |
 | `HIST_ALERT_VOL_REPAIR_AM_V1` | 過去AM出来高をalerts_rawから反映するリペアの再開状態 |
 | `HIST_ALERT_VOL_REPAIR_CHAIN_PM_TO_AM` | PM完了後にAMを自動起動するチェーンフラグ（payload: `{dryRun: bool}`） |

@@ -478,7 +478,7 @@ refetchSymbolGap(symbol, startDate, endDate)
 refetchSymbolRange(symbols, startDate, endDate)
 ```
 
-過去OHLCV出来高補正は、手動で開始または再開したactiveジョブだけがYahoo Financeをfetchします。13:21/15:51 OHLCV本体の実行中は30分後へ延期し、UrlFetch日次上限では進捗を保持したままpauseして自動再開を止めます。再開する場合は `resumeHistoricalOhlcvVolumeRepair()` を手動実行してください。
+過去OHLCV出来高補正は、開始済みのactiveジョブだけがYahoo Financeをfetchします。13:21/15:51 OHLCV本体の実行中はfetchせず、30分ごとに完了を再判定します。UrlFetch日次上限では進捗を保持し、約24時間はfetchせず待機した後に1回だけ自動再開します。自動再開時も本体が実行中なら30分後へ再延期するため、手動の `resumeHistoricalOhlcvVolumeRepair()` は不要です。
 
 ## プレミアム通知workerとの関係
 
