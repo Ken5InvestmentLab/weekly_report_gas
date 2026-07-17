@@ -347,6 +347,7 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 | `OHLCV_SYMBOL_LIST` | 15:51 OHLCV本番取得対象銘柄 |
 | `OHLCV_NEW_ALERT_COUNT` | 15:51 OHLCV本番取得時の当日シグナル銘柄数 |
 | `CURRENT_REFRESH_ID` | 現在のOHLCV取得ID |
+| `OHLCV_OPTIMIZE_DISPATCHED_BUSINESS_DATE_V1` | 15:51本番チェーンから同じ営業日の `optimize.yml` とDiscord完了通知を二重起動しないための送信済み営業日 |
 | `LAST_TS_MAP` | 銘柄別最終timestamp |
 | `SYNC_ENTRY_PRICE_INDEX` | entry_price 同期処理用カーソル |
 | `SPLIT_QUEUE` / `SPLIT_INDEX` | 株式分割調整キュー |
@@ -464,6 +465,8 @@ fetchOHLCVForNewAlerts
         → quickRepairTrigger
           → quickRepairRecentGaps
 ```
+
+- GAP修復後の最終sortから `optimize.yml` を起動するのは営業日ごとに1回だけ。`OHLCV_OPTIMIZE_DISPATCHED_BUSINESS_DATE_V1` を永続ガードにし、ガード導入前・消失時もGitHub上の同日成功/実行中runを確認して二重起動しない。
 
 15:51開始時のルール。
 
