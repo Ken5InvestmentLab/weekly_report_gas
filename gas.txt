@@ -904,6 +904,20 @@ function triggerGitHubActionsMegaValidationReport_(context) {
   const props = PropertiesService.getScriptProperties();
   const token = props.getProperty("GITHUB_PAT");
   const payloadContext = context || {};
+  const middayRefreshId = payloadContext.source === "midday_ohlcv"
+    ? String(payloadContext.refreshId || "").trim()
+    : "";
+  if (middayRefreshId && props.getProperty(MIDDAY_MEGA_REPORT_DISPATCHED_REFRESH_ID_KEY) === middayRefreshId) {
+    const skipped = {
+      skipped: true,
+      reason: "midday_refresh_already_dispatched",
+      refreshId: middayRefreshId,
+      context: payloadContext
+    };
+    debugLogToSheet_("triggerMegaReport.skip", skipped);
+    writeProcessLog_("GitHub Actions", "同じ13:21更新IDのMegaレポート起動は送信済みのためスキップしました。", skipped);
+    return skipped;
+  }
   if (!token) {
     const skipped = { skipped: true, reason: "GITHUB_PAT未設定", context: payloadContext };
     debugLogToSheet_("triggerMegaReport.skip", skipped);
@@ -938,6 +952,8 @@ function triggerGitHubActionsMegaValidationReport_(context) {
     };
     if (!result.ok) {
       result.body = body.slice(0, 500);
+    } else if (middayRefreshId) {
+      props.setProperty(MIDDAY_MEGA_REPORT_DISPATCHED_REFRESH_ID_KEY, middayRefreshId);
     }
     debugLogToSheet_("triggerMegaReport.result", result);
     writeProcessLog_("GitHub Actions", "mega-validation-report.yml dispatch requested.", result);
@@ -2248,6 +2264,7 @@ const MIDDAY_SYMBOL_LIST_KEY = "OHLCV_MIDDAY_SYMBOL_LIST";
 const MIDDAY_NEW_ALERT_COUNT_KEY = "OHLCV_MIDDAY_NEW_ALERT_COUNT";
 const MIDDAY_LAST_TS_MAP_KEY = "OHLCV_MIDDAY_LAST_TS_MAP";
 const MIDDAY_REFRESH_ID_KEY = "OHLCV_MIDDAY_REFRESH_ID";
+const MIDDAY_MEGA_REPORT_DISPATCHED_REFRESH_ID_KEY = "OHLCV_MIDDAY_MEGA_REPORT_DISPATCHED_REFRESH_ID_V1";
 const MIDDAY_RESUME_HANDLER = "resumeOHLCVFetchMidday";
 const MIDDAY_FETCH_INFLIGHT_KEY = "OHLCV_MIDDAY_FETCH_INFLIGHT_V1";
 const MAIN_PHASE1_FETCH_INFLIGHT_KEY = "OHLCV_PHASE1_FETCH_INFLIGHT_V1";

@@ -360,6 +360,7 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 | `OHLCV_MIDDAY_NEW_ALERT_COUNT` | 13:21先行取得時の当日シグナル銘柄数 |
 | `OHLCV_MIDDAY_LAST_TS_MAP` | 13:21先行取得用の銘柄別最終timestamp |
 | `OHLCV_MIDDAY_REFRESH_ID` | 13:21先行取得ID |
+| `OHLCV_MIDDAY_MEGA_REPORT_DISPATCHED_REFRESH_ID_V1` | 13:21の同一取得IDからMegaレポートとDiscord通知を二重起動しないための送信済みID |
 | `OHLCV_MIDDAY_FULL_BACKFILL_SYMBOLS` | 13:21で120日取得する真の新規銘柄 |
 | `OHLCV_MIDDAY_POSTPROCESS_PENDING` | 旧13:21後処理トリガーが残っているかの印 |
 | `OHLCV_MIDDAY_POSTPROCESS_STATE_V1` | 旧13:21後処理の末尾timestamp掃除を小分け再開する状態 |
@@ -443,6 +444,7 @@ timestamp, alert_id, symbol, open, high, low, close, volume
 - 同じ13:21取得カーソルでタイムアウトが続く場合は、次回実行でYahoo取得バッチを縮小し、単一銘柄でも詰まる場合だけ修復キューへ逃がして全体を止めない。
 - 日次メンテナンス、optimizer、GAP修復には進まない。
 - 完了時に `mega-validation-report.yml` をGitHub Actionsへdispatchし、HTMLレポートだけを再生成する。今日のBOTTOMシグナルがある場合は、既に当日AMのOHLCVがあり新規取得不要で早期終了するときもdispatchを省略しない。
+- 13:21のdispatchは `OHLCV_MIDDAY_MEGA_REPORT_DISPATCHED_REFRESH_ID_V1` で取得ID単位に冪等化する。再開実行が重なっても同じ `MIDDAY_yyyy-mm-dd` からGitHub ActionsとDiscord通知を2回起動せず、通常のMIDDAY状態cleanupでこの送信済みIDを消さない。
 - `/scan` / ブラウザ確認を案内するDiscord通知はGASから送らない。13:21のmidday dispatchでは `mega-validation-report.yml` に `notify_discord=true` を渡し、HTML生成後の通知は `screening-bot` の `mega-validation-report.yml` が `DISCORD_REPORT_WEBHOOK_URL` で送る。
 
 #### 15:51: `fetchOHLCVForNewAlerts`
