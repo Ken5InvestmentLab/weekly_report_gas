@@ -83,6 +83,7 @@ OVERLAP_DAYS = 3
 - `premium_worker/state/` と `premium_worker/out/` は git 管理しない。
 - 日本語を含む `premium_worker/out/premium_reports.json` は PowerShell here-string 等で作成しない。文字化けで `?` 化することがあるため、UTF-8安全な Node 書き込みや `apply_patch` で作成・修正する。
 - ライブ実行中のPDF本文抽出では Codex の `load_workspace_dependencies` / `codex_app__load_workspace_dependencies` を呼ばず、新規ランタイムも導入しない。まず `%USERPROFILE%\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe` の `pypdf` を短く確認し、次に既存の `python`、どちらも利用できなければWeb/PDFビューアまたは公式HTML詳細ページへ切り替える。
+- ライブ実行中はHTML、JSON、スクリプト、PDF抽出全文を会話へ出力しない。`Invoke-WebRequest` の `.Content` を直接表示せず、必要ならローカルへ保存して、タイトル・日付・リンク・数値など必要箇所だけを件数上限付きで抽出する。大出力が発生した取得経路は繰り返さず、公式PDF・詳細ページまたは絞り込み抽出へ切り替える。
 
 ### プレミアム投稿ログ
 

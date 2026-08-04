@@ -116,6 +116,18 @@ the web/PDF viewer or use an official HTML/detail page. This changes only the
 extraction route; the same disclosure content must still be read and grounded
 before writing the report.
 
+Keep web and shell output bounded so the automation can always reach dry-run,
+post, and closeout. Never print an entire HTML page, script bundle, JSON feed,
+or extracted PDF to the Codex conversation. In particular, do not pipe
+`Invoke-WebRequest ... .Content` or `Select-Object -ExpandProperty Content`
+directly to terminal output. Prefer the web reader for a relevant page section.
+When shell retrieval is necessary, save the response to a temporary/local file,
+then extract only the needed titles, dates, links, and numeric passages with a
+targeted parser, `rg -m`, or `Select-String | Select-Object -First`; keep each
+tool result to a small, reviewable excerpt. If a command unexpectedly produces
+large output, stop using that route and switch to an official PDF/detail page or
+a bounded extraction instead of repeating or expanding the output.
+
 When deciding `材料インパクト`, evaluate the substance of the disclosure:
 
 - actual earnings figures vs prior year
