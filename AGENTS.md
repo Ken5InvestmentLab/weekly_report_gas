@@ -174,6 +174,7 @@ OVERLAP_DAYS = 3
 - 同一内容の開示は、URLが異なっていても1件だけ載せる。TDnet/IRBANKのdocument ID、PDFファイル、同一日時・同一タイトルで同じ資料と判断できるものは重複扱いにし、確認できる場合は `f.irbank.net` のPDF/PR直リンクを優先する。
 - リンクラベルは `開示1` / `出典1` / `会社IR` のような汎用名にしない。
 - 開示リンクのラベルは必ず `YYYY-MM-DD 開示タイトル(hh:mm)` 形式にし、実際の資料タイトルまたはページタイトルを使う。
+- 正式な開示タイトルに `有価証券報告書` を含む訂正・提出・延期・開示見通しの通知は、タイトルが `に関するお知らせ` で終わる最新の個別通知なら、有価証券報告書本体と同一視して旧資料扱いしない。
 - IRBANK個別開示ページ内に `f.irbank.net/pdf/...pdf` または `f.irbank.net/pr/...pdf` が確認できる場合はPDF直リンクを優先する。
 - IRBANKのdocument ID内の日付と提出日がズレることがあるため、`f.irbank.net` の日付パスと `開示リンク` ラベル日はIRBANK個別開示ページまたはvalidatorが示す提出日で確認してから使う。
 - `https://irbank.net/{code}/{documentId}` より、確認できるなら `https://f.irbank.net/pdf/{yyyymmdd}/{documentId}.pdf` 形式を優先する。

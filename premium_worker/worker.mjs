@@ -1357,10 +1357,11 @@ function assertNoStaleDisclosureProxyLabels(alertId, fieldMap) {
     /^[^0-9０-９]*IR説明会資料$/
   ];
   for (const { label } of extractMarkdownLinks(value)) {
+    const isDisclosureNotice = /に関するお知らせ(?:[（(]\d{1,2}:\d{2}[）)])?$/.test(label);
     if (alwaysProxyPatterns.some(pattern => pattern.test(label))) {
       throw new Error(`report ${alertId} disclosure link uses a proxy document instead of a current direct disclosure: ${label}`);
     }
-    if (staleOfficialPatterns.some(pattern => pattern.test(label)) && !hasSparseDisclosureFallback(fieldMap)) {
+    if (staleOfficialPatterns.some(pattern => pattern.test(label)) && !isDisclosureNotice && !hasSparseDisclosureFallback(fieldMap)) {
       throw new Error(`report ${alertId} disclosure link uses a stale/proxy document instead of a current direct disclosure: ${label}`);
     }
   }
@@ -4010,6 +4011,12 @@ function selfTest() {
   assert.equal(getPostSkipReason("posted-alert", { posted: { "posted-alert": {} }, claims: {} }, null), "already posted");
   assert.equal(getPostSkipReason("unclaimed-alert", { posted: {}, claims: {} }, null), "no active claim");
   assert.equal(getPostSkipReason("claimed-alert", { posted: {}, claims: { "claimed-alert": { claimId: "c1" } } }, { claimId: "c1" }), "");
+  assert.doesNotThrow(() => assertNoStaleDisclosureProxyLabels("current-correction-notice", new Map([
+    ["開示リンク", "[2026-08-12 過年度の有価証券報告書等の訂正及び決算短信の開示見通しに関するお知らせ(17:10)](https://www.release.tdnet.info/inbs/140120260812518468.pdf)"]
+  ])));
+  assert.throws(() => assertNoStaleDisclosureProxyLabels("stale-securities-report", new Map([
+    ["開示リンク", "[2026-06-30 有価証券報告書(15:00)](https://f.irbank.net/pdf/20260630/140120260630500001.pdf)"]
+  ])), /stale\/proxy document/);
   assert.throws(() => buildEmbed({
     alertId: "a7",
     url: "https://jp.tradingview.com/chart/?symbol=TSE%3A1234",
