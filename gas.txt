@@ -304,6 +304,7 @@ function executeWeeklyReportWithWatchdog_() {
 }
 
 function resumeBuildAndSendWeeklyReport() {
+  consumeTemporaryTrigger_(WEEKLY_REPORT_RESUME_HANDLER);
   const props = PropertiesService.getScriptProperties();
   const newCount = Number(props.getProperty(WEEKLY_REPORT_RETRY_COUNT_KEY) || "0") + 1;
 
@@ -637,6 +638,7 @@ function postDiscordPayload_(webhookUrl, payload, maxRetries = 3) {
  * - そのため、最後の finally では deleteTriggersByHandler_ を呼ばない
  */
 function sendDeferredDiscordPayload() {
+  consumeTemporaryTrigger_("sendDeferredDiscordPayload");
   const handlerName = "sendDeferredDiscordPayload";
   const props = PropertiesService.getScriptProperties();
   const deferredKey = "DEFERRED_DISCORD_PAYLOAD";
@@ -978,6 +980,7 @@ function runDailyMaintenance(newCount, refreshId) {
 }
 
 function resumeDailyMaintenance() {
+  consumeTemporaryTrigger_(CONFIG.DAILY_CONT_TRIGGER_HANDLER);
   return runDailyMaintenanceInternal_(true, null, null);
 }
 
@@ -1540,15 +1543,152 @@ function replaceProjectTriggerTransactionally_(handlerName, createTriggerFn, det
   }
 }
 
+const TEMP_TRIGGER_REGISTRY_KEY = "TEMP_TRIGGER_REGISTRY_V1";
+const TEMP_TRIGGER_FAILSAFE_GRACE_MS = 12 * 60 * 60 * 1000;
+
+function loadTemporaryTriggerRegistry_() {
+  try {
+    const raw = PropertiesService.getScriptProperties().getProperty(TEMP_TRIGGER_REGISTRY_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function saveTemporaryTriggerRegistry_(registry) {
+  const props = PropertiesService.getScriptProperties();
+  const keys = Object.keys(registry || {});
+  if (!keys.length) {
+    props.deleteProperty(TEMP_TRIGGER_REGISTRY_KEY);
+    return;
+  }
+  props.setProperty(TEMP_TRIGGER_REGISTRY_KEY, JSON.stringify(registry));
+}
+
+function markTemporaryTriggerScheduled_(handlerName, delayMs) {
+  const handler = String(handlerName || "").trim();
+  if (!handler) return;
+  const now = Date.now();
+  const normalizedDelay = Math.max(0, Number.isFinite(delayMs) ? Number(delayMs) : 0);
+  const registry = loadTemporaryTriggerRegistry_();
+  registry[handler] = {
+    scheduledAt: new Date(now).toISOString(),
+    delayMs: normalizedDelay,
+    expiresAt: new Date(now + normalizedDelay + TEMP_TRIGGER_FAILSAFE_GRACE_MS).toISOString()
+  };
+  saveTemporaryTriggerRegistry_(registry);
+}
+
+function unmarkTemporaryTrigger_(handlerName) {
+  const handler = String(handlerName || "").trim();
+  if (!handler) return;
+  const registry = loadTemporaryTriggerRegistry_();
+  if (!Object.prototype.hasOwnProperty.call(registry, handler)) return;
+  delete registry[handler];
+  saveTemporaryTriggerRegistry_(registry);
+}
+
+function clearTemporaryTriggerRegistry_() {
+  PropertiesService.getScriptProperties().deleteProperty(TEMP_TRIGGER_REGISTRY_KEY);
+}
+
+function consumeTemporaryTrigger_(handlerName) {
+  const handler = String(handlerName || "").trim();
+  if (!handler) return { ok: false, deleted: 0, reason: "empty_handler" };
+  try {
+    const deleted = deleteTriggersByHandler_(handler);
+    return { ok: true, handler: handler, deleted: deleted };
+  } catch (err) {
+    console.warn("[temporaryTrigger.consume] " + JSON.stringify({
+      handler: handler,
+      message: err && err.message ? err.message : String(err)
+    }));
+    return {
+      ok: false,
+      handler: handler,
+      deleted: 0,
+      error: err && err.message ? err.message : String(err)
+    };
+  }
+}
+
+function cleanupExpiredTemporaryTriggers_() {
+  const registry = loadTemporaryTriggerRegistry_();
+  const registeredHandlers = Object.keys(registry);
+  if (!registeredHandlers.length) {
+    return { ok: true, removedHandlers: [], removedTriggers: 0, registryPruned: 0, errors: [] };
+  }
+
+  const now = Date.now();
+  const triggersByHandler = {};
+  ScriptApp.getProjectTriggers().forEach(function(trigger) {
+    const handler = trigger.getHandlerFunction();
+    if (!triggersByHandler[handler]) triggersByHandler[handler] = [];
+    triggersByHandler[handler].push(trigger);
+  });
+
+  const removedHandlers = [];
+  const errors = [];
+  let removedTriggers = 0;
+  let registryPruned = 0;
+
+  registeredHandlers.forEach(function(handler) {
+    const entry = registry[handler] || {};
+    const triggers = triggersByHandler[handler] || [];
+
+    // トリガー自体がもう存在しない場合は、レジストリだけ掃除する。
+    if (!triggers.length) {
+      delete registry[handler];
+      registryPruned++;
+      return;
+    }
+
+    const expiresAtMs = Date.parse(entry.expiresAt || "");
+    if (!Number.isFinite(expiresAtMs) || now <= expiresAtMs) return;
+
+    let allDeleted = true;
+    triggers.forEach(function(trigger) {
+      try {
+        ScriptApp.deleteTrigger(trigger);
+        removedTriggers++;
+      } catch (err) {
+        allDeleted = false;
+        errors.push({
+          handler: handler,
+          message: err && err.message ? err.message : String(err)
+        });
+      }
+    });
+
+    if (allDeleted) {
+      delete registry[handler];
+      removedHandlers.push(handler);
+    }
+  });
+
+  saveTemporaryTriggerRegistry_(registry);
+  return {
+    ok: errors.length === 0,
+    removedHandlers: removedHandlers,
+    removedTriggers: removedTriggers,
+    registryPruned: registryPruned,
+    errors: errors
+  };
+}
+
 function scheduleRecoveryTriggerReplacing_(handlerName, delayMs) {
   const triggerDelayMs = Number.isFinite(delayMs) ? delayMs : GLOBAL_EXECUTION_WATCHDOG_REPAIR_AFTER_MS;
-  return replaceProjectTriggerTransactionally_(
+  const result = replaceProjectTriggerTransactionally_(
     handlerName,
     function() {
       return ScriptApp.newTrigger(handlerName).timeBased().after(triggerDelayMs).create();
     },
     { delayMs: triggerDelayMs, triggerType: "one_shot" }
   );
+  markTemporaryTriggerScheduled_(handlerName, triggerDelayMs);
+  return Object.assign({}, result, { temporaryTriggerRegistered: true });
 }
 
 function armGlobalWatchdogMarker_(markerKey, resumeHandler) {
@@ -1616,7 +1756,8 @@ function buildGlobalExecutionWatchdogJobs_(allProps) {
     {
       id: "ohlcv_main",
       handler: "resumeOHLCVFetch",
-      pending: !!allProps[GLOBAL_WATCHDOG_OHLCV_MAIN_ACTIVE_KEY],
+      pending: !!allProps[GLOBAL_WATCHDOG_OHLCV_MAIN_ACTIVE_KEY] ||
+        allProps[OHLCV_FRESH_START_PENDING_KEY] === "true",
       delayMs: 10 * 1000
     },
     {
@@ -1739,6 +1880,10 @@ function runGlobalExecutionWatchdog() {
     lock = LockService.getScriptLock();
     if (!lock.tryLock(1000)) return { ok: true, skipped: true, reason: "script_lock_busy" };
 
+    // 期限切れ・実体消失したワンショットトリガーを保険として掃除する。
+    // 通常は各一時ハンドラーが起動直後に自分自身を削除するため、ここは最終防衛線。
+    const temporaryCleanup = cleanupExpiredTemporaryTriggers_();
+
     const allProps = PropertiesService.getScriptProperties().getProperties();
     const handlers = new Set(ScriptApp.getProjectTriggers().map(function(trigger) { return trigger.getHandlerFunction(); }));
     const jobs = buildGlobalExecutionWatchdogJobs_(allProps);
@@ -1790,10 +1935,20 @@ function runGlobalExecutionWatchdog() {
       }
     }
 
-    if (repaired.length || errors.length) {
-      console.warn("[globalExecutionWatchdog] " + JSON.stringify({ repaired: repaired, errors: errors }));
+    if (temporaryCleanup.removedTriggers || temporaryCleanup.registryPruned || repaired.length || errors.length || temporaryCleanup.errors.length) {
+      console.warn("[globalExecutionWatchdog] " + JSON.stringify({
+        temporaryCleanup: temporaryCleanup,
+        repaired: repaired,
+        errors: errors
+      }));
     }
-    return { ok: errors.length === 0, repaired: repaired, errors: errors };
+
+    return {
+      ok: errors.length === 0 && temporaryCleanup.errors.length === 0,
+      temporaryCleanup: temporaryCleanup,
+      repaired: repaired,
+      errors: errors
+    };
   } finally {
     if (lock && lock.hasLock()) lock.releaseLock();
   }
@@ -1886,6 +2041,7 @@ function buildFixedExecutionTriggerDefinitions_(tz) {
 
 function setupAllTriggers() {
   ScriptApp.getProjectTriggers().forEach(function(trigger) { ScriptApp.deleteTrigger(trigger); });
+  clearTemporaryTriggerRegistry_();
   const definitions = buildFixedExecutionTriggerDefinitions_(CONFIG.TIMEZONE);
   definitions.forEach(function(definition) { definition.createTrigger(); });
   scheduleGlobalExecutionWatchdogTrigger_();
@@ -2097,6 +2253,7 @@ function purgeOldSignalArchiveRowsDaily() {
 }
 
 function resumePurgeOldSignalArchiveRowsDaily() {
+  consumeTemporaryTrigger_(GLOBAL_WATCHDOG_PURGE_ARCHIVE_RESUME_HANDLER);
   return purgeOldSignalArchiveRowsDaily();
 }
 
@@ -2296,6 +2453,7 @@ function purgeOldOhlcvDataDailyInternal_() {
  * purgeOldOhlcvDataDaily の再開用ラッパー（.after()トリガーから呼ばれる）
  */
 function purgeOldOhlcvResumeTrigger() {
+  consumeTemporaryTrigger_("purgeOldOhlcvResumeTrigger");
   purgeOldOhlcvDataDaily();
 }
 
@@ -2328,6 +2486,7 @@ function syncMarketHolidays() {
 }
 
 function resumeSyncMarketHolidays() {
+  consumeTemporaryTrigger_(GLOBAL_WATCHDOG_HOLIDAY_RESUME_HANDLER);
   return syncMarketHolidays();
 }
 function syncMarketHolidaysRange_(fromYear, toYear) {
@@ -2735,6 +2894,7 @@ const OHLCV_ADJACENT_DEDUP_CHUNK_ROWS = 10000;
 const PHASE3_SPLIT_ROW_CHUNK_SIZE = 1000;
 const OHLCV_TRACE_PROP_KEY = "OHLCV_TRACE_LAST";
 const OHLCV_REPAIR_SYMBOLS_PRESERVE_KEY = "OHLCV_REPAIR_SYMBOLS_PRESERVE_V1";
+const OHLCV_FRESH_START_PENDING_KEY = "OHLCV_FRESH_START_PENDING_V1";
 const OHLCV_MANUAL_BUSINESS_DATE_KEY = "OHLCV_MANUAL_BUSINESS_DATE";
 const OHLCV_MANUAL_BUSINESS_EXPIRES_KEY = "OHLCV_MANUAL_BUSINESS_EXPIRES_AT";
 const OHLCV_MANUAL_BUSINESS_TTL_MS = 16 * 60 * 60 * 1000;
@@ -3088,25 +3248,44 @@ function applySplitAdjustToRawRow_(row, splitInfo) {
 }
 
 function fetchOHLCVForNewAlerts() {
+  return runFetchOHLCVForNewAlerts_(false);
+}
+
+function runFetchOHLCVForNewAlerts_(resumeSavedState) {
   const entryTime = Date.now();
   let lock = null;
-  PropertiesService.getScriptProperties().setProperty(GLOBAL_WATCHDOG_OHLCV_MAIN_ACTIVE_KEY, new Date().toISOString());
+  const entryProps = PropertiesService.getScriptProperties();
+  if (resumeSavedState !== true) entryProps.setProperty(OHLCV_FRESH_START_PENDING_KEY, "true");
+  entryProps.setProperty(GLOBAL_WATCHDOG_OHLCV_MAIN_ACTIVE_KEY, new Date().toISOString());
   writeProcessLog_("OHLCV", "fetchOHLCVForNewAlertsを開始しました。休場日判定、ロック取得、PHASE進行の順に処理します。", {
     businessDate: getOhlcvBusinessDateKey_(),
-    isManual: !!getManualOhlcvBusinessDateKey_()
+    isManual: !!getManualOhlcvBusinessDateKey_(),
+    resumeSavedState: resumeSavedState === true
   });
-  traceOhlcv_("fetch.entry", { entryTime: new Date(entryTime).toISOString() });
   try {
     // 入口ログ後の初期処理で強制終了しても、再開だけは残るように先に保険を置く。
     scheduleOhlcvResume_("resumeOHLCVFetch", OHLCV_SAFETY_RESUME_AFTER_MS);
     deleteTriggersByHandler_(MIDDAY_RESUME_HANDLER);
-    logOhlcvRuntime_("entry", { triggeredAt: new Date(entryTime).toISOString() });
     lock = LockService.getScriptLock();
     if (!lock.tryLock(OHLCV_LOCK_WAIT_MS)) {
       logOhlcvRuntime_("lock_busy", { waitMs: OHLCV_LOCK_WAIT_MS });
       scheduleOhlcvResume_("resumeOHLCVFetch", OHLCV_LOCK_BUSY_RESUME_AFTER_MS);
       return { ok: false, skipped: true, reason: "lock_busy" };
     }
+    if (resumeSavedState !== true) {
+      const previousState = prepareFreshOhlcvMainRun_();
+      writeProcessLog_("OHLCV", "15:51本番の固定実行として保存済み進捗を初期化し、PHASE1から開始します。", {
+        previousState: previousState
+      });
+    }
+    traceOhlcv_("fetch.entry", {
+      entryTime: new Date(entryTime).toISOString(),
+      resumeSavedState: resumeSavedState === true
+    });
+    logOhlcvRuntime_("entry", {
+      triggeredAt: new Date(entryTime).toISOString(),
+      resumeSavedState: resumeSavedState === true
+    });
     finalizeMiddayOhlcvBeforeMainRun_();
     return fetchOHLCVForNewAlertsInternal_(entryTime);
   } catch (e) {
@@ -3188,6 +3367,7 @@ function fetchOHLCVForNewAlertsMidday() {
 }
 
 function resumeOHLCVFetchMidday() {
+  consumeTemporaryTrigger_(MIDDAY_RESUME_HANDLER);
   if (shouldStopMiddayOhlcvResume_()) {
     finalizeMiddayOhlcvBeforeMainRun_();
     writeProcessLog_("OHLCV-AM", "15:51本番処理の時間帯に入ったため、13:21先行取得の再開を停止しました。", {
@@ -4338,6 +4518,7 @@ function runMiddayOhlcvPostprocessChunks_(sheet, state, startedAt) {
 }
 
 function postprocessMiddayOhlcv() {
+  consumeTemporaryTrigger_(MIDDAY_POSTPROCESS_HANDLER);
   let lock = null;
   const startedAt = Date.now();
   try {
@@ -5115,6 +5296,7 @@ function rollbackMiddayOhlcvRun_(dateKey, dryRun, options) {
 }
 
 function resumeMiddayOhlcvRollback() {
+  consumeTemporaryTrigger_(MIDDAY_ROLLBACK_RESUME_HANDLER);
   const state = readMiddayRollbackState_();
   if (!state) {
     deleteTriggersByHandler_(MIDDAY_ROLLBACK_RESUME_HANDLER);
@@ -5900,7 +6082,9 @@ if (phase === "PHASE4") {
 
   resetProcessProperties_();
 
-  deleteTriggersByHandler_("resumeOHLCVFetch");
+  if (props.getProperty(OHLCV_FRESH_START_PENDING_KEY) !== "true") {
+    deleteTriggersByHandler_("resumeOHLCVFetch");
+  }
   deleteTriggersByHandler_("resumeOHLCVFetchMidday");
 
   writeProcessLog_("OHLCV", "OHLCV取得フローが完了しました。続いて日次メンテナンスを10秒後に起動します。", {
@@ -6231,8 +6415,8 @@ function isDailyCompatibleWithSessionRow_(daily, row) {
 
 // runDailyMaintenance を引数付きで起動するためのラッパー
 function runDailyMaintenanceTrigger() {
-  // GASの.after()トリガーは実行後も自動削除されないため、自分自身を明示的に削除
-  deleteTriggersByHandler_("runDailyMaintenanceTrigger");
+  consumeTemporaryTrigger_("runDailyMaintenanceTrigger");
+  // 起動したワンショットトリガーは関数冒頭の consumeTemporaryTrigger_ で削除済み。
   const props = PropertiesService.getScriptProperties();
   const newCount = props.getProperty(DAILY_MAINT_NEW_COUNT_KEY) || "0";
   const refreshId = props.getProperty(DAILY_MAINT_REFRESH_ID_KEY) || "unknown";
@@ -6244,6 +6428,7 @@ function runDailyMaintenanceTrigger() {
 
 // quickRepairRecentGaps を起動するためのラッパー
 function quickRepairTrigger() {
+  consumeTemporaryTrigger_("quickRepairTrigger");
   quickRepairRecentGaps();
 }
 
@@ -6340,6 +6525,22 @@ function processSplitQueueBatch_(startTime, limitMs) {
 
 function resetProcessProperties_() {
   const props = PropertiesService.getScriptProperties();
+  const freshStartPending = props.getProperty(OHLCV_FRESH_START_PENDING_KEY) === "true";
+  clearOhlcvMainProgressProperties_(props);
+  props.deleteProperty(GLOBAL_WATCHDOG_OHLCV_MAIN_ACTIVE_KEY);
+
+  // 修復対象銘柄は、全PHASEが正常終了してリセットされるタイミングで消す。
+  // ただし、実行中に繰り返し詰まった銘柄は次回の120日修復対象として残す。
+  const preserveRepairSymbols = props.getProperty(OHLCV_REPAIR_SYMBOLS_PRESERVE_KEY) === "true";
+  if (!preserveRepairSymbols) props.deleteProperty("OHLCV_REPAIR_SYMBOLS");
+  props.deleteProperty(OHLCV_REPAIR_SYMBOLS_PRESERVE_KEY);
+
+  // 固定15:51実行がロック待ちなら、その新規PHASE1要求と再開トリガーを旧run完了時に消さない。
+  if (!freshStartPending) deleteTriggersByHandler_("resumeOHLCVFetch");
+  clearMiddayOhlcvState_();
+}
+
+function clearOhlcvMainProgressProperties_(props) {
   props.deleteProperty(PHASE_KEY);
   props.deleteProperty(STATE_KEY);
   props.deleteProperty(SYMBOL_LIST_KEY);
@@ -6353,16 +6554,30 @@ function resetProcessProperties_() {
   props.deleteProperty("SPLIT_INDEX");
   props.deleteProperty("OHLCV_SPLIT_CACHE");
   props.deleteProperty(OHLCV_COMPLETION_NOTICE_PENDING_KEY);
-  props.deleteProperty(GLOBAL_WATCHDOG_OHLCV_MAIN_ACTIVE_KEY);
+}
 
-  // 修復対象銘柄は、全PHASEが正常終了してリセットされるタイミングで消す。
-  // ただし、実行中に繰り返し詰まった銘柄は次回の120日修復対象として残す。
-  const preserveRepairSymbols = props.getProperty(OHLCV_REPAIR_SYMBOLS_PRESERVE_KEY) === "true";
-  if (!preserveRepairSymbols) props.deleteProperty("OHLCV_REPAIR_SYMBOLS");
+function hasOhlcvMainResumeState_(props) {
+  return !!(props.getProperty(PHASE_KEY) ||
+    props.getProperty(STATE_KEY) ||
+    props.getProperty(SYMBOL_LIST_KEY) ||
+    props.getProperty(MAIN_PHASE1_FETCH_INFLIGHT_KEY) ||
+    props.getProperty("SPLIT_QUEUE") ||
+    props.getProperty(OHLCV_FRESH_START_PENDING_KEY) === "true" ||
+    props.getProperty(GLOBAL_WATCHDOG_OHLCV_MAIN_ACTIVE_KEY));
+}
+
+function prepareFreshOhlcvMainRun_() {
+  const props = PropertiesService.getScriptProperties();
+  const previousState = Object.assign({
+    hadResumeState: hasOhlcvMainResumeState_(props)
+  }, getOhlcvRuntimeState_());
+
+  // 固定15:51実行では前回の中断状態を引き継がない。
+  // OHLCV_REPAIR_SYMBOLS とウォッチドッグactive markerは新しいPHASE1で使うため保持する。
+  clearOhlcvMainProgressProperties_(props);
   props.deleteProperty(OHLCV_REPAIR_SYMBOLS_PRESERVE_KEY);
-
-  deleteTriggersByHandler_("resumeOHLCVFetch");
-  clearMiddayOhlcvState_();
+  props.deleteProperty(OHLCV_FRESH_START_PENDING_KEY);
+  return previousState;
 }
 
 function isValidOhlcvTimestamp_(ts) {
@@ -6660,6 +6875,19 @@ function setupResumeTrigger_(handlerName) {
  * fetchOHLCVForNewAlerts 自体がエラーで止まっても、自動リトライを仕掛けます。
  */
 function resumeOHLCVFetch() {
+  consumeTemporaryTrigger_("resumeOHLCVFetch");
+  const props = PropertiesService.getScriptProperties();
+  const freshStartPending = props.getProperty(OHLCV_FRESH_START_PENDING_KEY) === "true";
+  if (!hasOhlcvMainResumeState_(props)) {
+    const staleState = getOhlcvRuntimeState_();
+    writeProcessLog_("OHLCV", "再開状態がない古いresumeOHLCVFetchを検出したため、PHASE1を新規開始せず終了します。", {
+      reason: "stale_resume_without_state",
+      state: staleState
+    });
+    traceOhlcv_("resume.stale", { reason: "stale_resume_without_state" });
+    debugLogToSheet_("ohlcv.resume.stale", staleState);
+    return { ok: true, skipped: true, reason: "stale_resume_without_state" };
+  }
   writeProcessLog_("OHLCV", "resumeOHLCVFetchが起動しました。保存済みのフェーズとカーソルからOHLCV取得を再開します。", {
     businessDate: getOhlcvBusinessDateKey_(),
     isManual: !!getManualOhlcvBusinessDateKey_()
@@ -6667,7 +6895,7 @@ function resumeOHLCVFetch() {
   traceOhlcv_("resume.entry", {});
   debugLogToSheet_("ohlcv.resume.entry", getOhlcvRuntimeState_());
   try {
-    return fetchOHLCVForNewAlerts();
+    return runFetchOHLCVForNewAlerts_(!freshStartPending);
   } catch (e) {
     const errData = {
       message: e && e.message ? e.message : String(e),
@@ -7332,9 +7560,14 @@ function sendCompletionNotice_(newCount, totalCount, tag) {
   }
 }
 function deleteTriggersByHandler_(handlerName) {
-  getProjectTriggersByHandler_(handlerName).forEach(function(trigger) {
+  const handler = String(handlerName || "").trim();
+  if (!handler) return 0;
+  const triggers = getProjectTriggersByHandler_(handler);
+  triggers.forEach(function(trigger) {
     ScriptApp.deleteTrigger(trigger);
   });
+  unmarkTemporaryTrigger_(handler);
+  return triggers.length;
 }
 
 function isQuotaExhausted_(err) {
@@ -7458,6 +7691,7 @@ function fetchYahooFinanceDataAPI_(symbolCode) {
 function resetAllOhlcvProperties() {
   const props = PropertiesService.getScriptProperties();
   props.deleteProperty(GLOBAL_WATCHDOG_OHLCV_MAIN_ACTIVE_KEY);
+  props.deleteProperty(OHLCV_FRESH_START_PENDING_KEY);
   props.deleteProperty(PHASE_KEY);
   props.deleteProperty(STATE_KEY);
   props.deleteProperty(SYMBOL_LIST_KEY);
@@ -7970,6 +8204,7 @@ function previewHistoricalOhlcvVolumeRepair() {
 }
 
 function resumeHistoricalOhlcvVolumeRepair(event) {
+  consumeTemporaryTrigger_(HISTORICAL_VOLUME_REPAIR_RESUME_HANDLER);
   const props = PropertiesService.getScriptProperties();
   const isTimeDrivenResume = !!(event && event.triggerUid);
   const pause = readHistoricalOhlcvVolumeRepairPause_(props);
@@ -8616,6 +8851,7 @@ function repairHistoricalPmVolumeFromAlertsRaw() {
 }
 
 function resumeRepairHistoricalPmVolumeFromAlertsRaw() {
+  consumeTemporaryTrigger_("resumeRepairHistoricalPmVolumeFromAlertsRaw");
   return repairHistoricalAlertsRawVolume_("PM", { resume: true });
 }
 
@@ -8634,6 +8870,7 @@ function repairHistoricalAmVolumeFromAlertsRaw() {
 }
 
 function resumeRepairHistoricalAmVolumeFromAlertsRaw() {
+  consumeTemporaryTrigger_("resumeRepairHistoricalAmVolumeFromAlertsRaw");
   return repairHistoricalAlertsRawVolume_("AM", { resume: true });
 }
 
@@ -11303,6 +11540,7 @@ return finalizeQuickRepairWithPostCleanup_(props, state, completeSummary);
  * 再開用トリガーハンドラ
  */
 function resumeQuickRepair() {
+  consumeTemporaryTrigger_("resumeQuickRepair");
   try {
     return quickRepairRecentGaps();
   } catch (e) {
@@ -11462,6 +11700,7 @@ function repairEvaluationOhlcvCoverage120(options) {
 }
 
 function resumeEvaluationOhlcvCoverageRepair() {
+  consumeTemporaryTrigger_(EVAL_OHLCV_COVERAGE_RESUME_HANDLER);
   return repairEvaluationOhlcvCoverageInternal_({
     daysBack: OHLCV_DEFAULT_LOOKBACK_DAYS,
     minSessions: 2,
@@ -11776,6 +12015,7 @@ function startOhlcvRecoveryForDate_(dateKey) {
 }
 
 function resumeOhlcvRecoveryTimestampNormalization() {
+  consumeTemporaryTrigger_(OHLCV_RECOVERY_TS_RESUME_HANDLER);
   const props = PropertiesService.getScriptProperties();
   const state = readJsonProperty_(props, OHLCV_RECOVERY_TS_STATE_KEY, null);
   if (!state) {
@@ -12222,6 +12462,7 @@ function cleanupLegacyGapFailedAndEmptyTimestamps(dryRun) {
 }
 
 function resumeCleanupLegacyGapFailedAndEmptyTimestamps() {
+  consumeTemporaryTrigger_("resumeCleanupLegacyGapFailedAndEmptyTimestamps");
   let dryRun = true;
   try {
     const raw = PropertiesService.getScriptProperties().getProperty("CLEANUP_LEGACY_STATE_V1");
@@ -12307,6 +12548,7 @@ function toYmdKeySafe_(v) {
 function emergencyStopOhlcvTimeoutLoop() {
   const props = PropertiesService.getScriptProperties();
   props.deleteProperty(GLOBAL_WATCHDOG_OHLCV_MAIN_ACTIVE_KEY);
+  props.deleteProperty(OHLCV_FRESH_START_PENDING_KEY);
 
   props.deleteProperty(PHASE_KEY);
   props.deleteProperty(STATE_KEY);
@@ -13662,6 +13904,7 @@ function cleanupOhlcvDuplicatesNow() {
 // cleanupOhlcvDuplicatesNow に処理を委譲する。
 // Resume handler for cleanupOhlcvDuplicatesNow.
 function resumeCleanupOhlcvDuplicates() {
+  consumeTemporaryTrigger_(OHLCV_FULL_DEDUP_RESUME_HANDLER);
   const doneAt = PropertiesService.getScriptProperties().getProperty(OHLCV_FULL_DEDUP_DONE_KEY);
   if (doneAt) {
     deleteTriggersByHandler_(OHLCV_FULL_DEDUP_RESUME_HANDLER);
@@ -13675,6 +13918,7 @@ function stopOhlcvResumeLoopNow() {
   const props = PropertiesService.getScriptProperties();
   props.deleteProperty(GLOBAL_WATCHDOG_OHLCV_MAIN_ACTIVE_KEY);
   props.deleteProperty(GLOBAL_WATCHDOG_OHLCV_MIDDAY_ACTIVE_KEY);
+  props.deleteProperty(OHLCV_FRESH_START_PENDING_KEY);
   deleteTriggersByHandler_("resumeOHLCVFetch");
   deleteTriggersByHandler_("resumeOHLCVFetchMidday");
 
@@ -13849,6 +14093,7 @@ function scheduleOhlcvPostMaintenanceCleanup_(newCount, refreshId) {
 }
 
 function runOhlcvPostMaintenanceCleanupTrigger() {
+  consumeTemporaryTrigger_(OHLCV_POST_CLEANUP_HANDLER);
   return runOhlcvPostMaintenanceCleanup_();
 }
 
@@ -14285,6 +14530,7 @@ function scheduleOhlcvPostRepairCleanup_(quickRepairSummary) {
 }
 
 function resumeOhlcvPostRepairCleanup() {
+  consumeTemporaryTrigger_(OHLCV_POST_REPAIR_CLEANUP_HANDLER);
   return runOhlcvPostRepairCleanup_();
 }
 
@@ -15889,6 +16135,7 @@ function testOhlcvPostRepairFinalSortOnly() {
 }
 
 function resumeOhlcvPostRepairFinalSort() {
+  consumeTemporaryTrigger_(OHLCV_POST_REPAIR_FINAL_SORT_HANDLER);
   return runOhlcvPostRepairFinalSort_();
 }
 

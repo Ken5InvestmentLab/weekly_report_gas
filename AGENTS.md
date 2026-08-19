@@ -265,7 +265,7 @@ OVERLAP_DAYS = 3
 | `resumeOHLCVFetchMidday` | 13:21先行OHLCV取得の再開時 | `fetchOHLCVForNewAlertsMidday` を再起動 |
 | `postprocessMiddayOhlcv` | 旧13:21後処理状態が残る場合 | 追記後のtimestamp正規化・不正timestamp削除を小分けで再開 |
 | `resumeMiddayOhlcvRollback` | 13:21先行OHLCV戻し処理の再開時 | 触った銘柄の120日OHLCV削除を再開 |
-| `resumeOHLCVFetch` | 15:51 OHLCV本番取得の再開時 | `fetchOHLCVForNewAlerts` を再起動 |
+| `resumeOHLCVFetch` | 15:51 OHLCV本番取得の再開時 | 保存済みフェーズ・カーソルから本番取得を再開 |
 | `resumeDailyMaintenance` | 日次メンテナンス再開時 | `runDailyMaintenanceInternal_` を再開 |
 | `resumeQuickRepair` | GAP修復再開時 | `quickRepairRecentGaps` を再開 |
 | `resumeOhlcvPostRepairCleanup` | GAP修復後cleanup再開時 | timestamp正規化、AM保護マーキング、日付バケット重複整理を再開し、最後に最終sortトリガーへ委譲 |
@@ -275,7 +275,7 @@ OVERLAP_DAYS = 3
 | `resumeEvaluationOhlcvCoverageRepair` | 評価対象銘柄の120日OHLCV補填未完了時 | `repairEvaluationOhlcvCoverage120` を再開 |
 | `resumeHistoricalOhlcvVolumeRepair` | 過去OHLCV出来高補正未完了時 | `repairHistoricalOhlcvVolumes` を再開 |
 
-重要: ワンショットトリガーのラッパー関数は、冒頭で `deleteTriggersByHandler_("自分の関数名")` を呼び、自分自身のトリガーを削除してから本体処理を呼ぶ。
+重要: ワンショットトリガーのラッパー関数は、冒頭で `consumeTemporaryTrigger_("自分の関数名")` を呼び、自分自身のトリガーと一時トリガー登録簿を削除してから本体処理を呼ぶ。
 重要: 15:51本体のPHASE1/PHASE2で `isQuotaExhausted_()` を検知した場合は、保存済みカーソルから `resumeOHLCVFetch` を10秒後に再開する。4時間待機へ戻さない。
 重要: `.after(10 * 1000)` は10秒ぴったりの起動保証ではなく、GAS側の最小待機時間指定。実際の起動はGoogle側の時間主導トリガーキューにより遅れることがある。
 
@@ -472,6 +472,8 @@ fetchOHLCVForNewAlerts
 
 15:51開始時のルール。
 
+- 固定 `fetchOHLCVForNewAlerts` は、前回のPHASE・カーソル・シンボル一覧・分割キューを引き継がず、必ず新しいPHASE1として開始する。保存済み進捗を引き継げるのは `resumeOHLCVFetch` だけにする。
+- 固定15:51実行がScriptLock待ちになった場合は `OHLCV_FRESH_START_PENDING_V1` を残し、後続の `resumeOHLCVFetch` でもPHASE1新規開始要求を維持する。再開状態もfresh-start要求もない古いキュー済みresumeは、PHASE1を新規開始せず終了する。
 - 残っている `resumeOHLCVFetchMidday` を削除。
 - 13:21専用プロパティをクリア。
 - 13:21で書き込まれたOHLCV行はシート上の成果として引き継ぐ。

@@ -16,10 +16,22 @@ function loadTriggerSchedulingApi({ createFailures = 0 } = {}) {
     getHandlerFunction() { return "resumeJob"; }
   };
   let failuresLeft = createFailures;
+  const properties = new Map();
   const context = {
     Number,
     Object,
     String,
+    Date,
+    JSON,
+    PropertiesService: {
+      getScriptProperties() {
+        return {
+          getProperty(key) { return properties.has(key) ? properties.get(key) : null; },
+          setProperty(key, value) { properties.set(key, String(value)); },
+          deleteProperty(key) { properties.delete(key); }
+        };
+      }
+    },
     ScriptApp: {
       getProjectTriggers() { return [oldTrigger]; },
       deleteTrigger(trigger) { events.push(`delete:${trigger.id}`); },
