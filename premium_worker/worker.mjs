@@ -611,7 +611,7 @@ function buildEmbed(report) {
   const fieldMap = new Map();
   for (const field of report.fields || []) {
     const name = String(field.name || "").trim();
-    if (name) fieldMap.set(name, String(field.value || "").trim());
+    if (name) fieldMap.set(name, normalizeLinkFieldLineBreaks(name, field.value).trim());
   }
   if (!fieldMap.has(IMPACT_FIELD) && String(report.materialImpact || "").trim()) {
     fieldMap.set(IMPACT_FIELD, String(report.materialImpact || "").trim());
@@ -672,7 +672,7 @@ function buildEmbed(report) {
 }
 
 function formatEmbedFieldValue(name, value) {
-  const text = String(value || "").trim();
+  const text = normalizeLinkFieldLineBreaks(name, value).trim();
   if (!["開示リンク", "Sources"].includes(name)) return text;
   if (!hasUrl(text) || text === "開示リンク未確認") return text;
   return text.split(/\r?\n/).map(line => {
@@ -680,6 +680,12 @@ function formatEmbedFieldValue(name, value) {
     if (!trimmed || trimmed.startsWith(LIST_BULLET)) return trimmed;
     return `${LIST_BULLET}${trimmed}`;
   }).join("\n");
+}
+
+function normalizeLinkFieldLineBreaks(name, value) {
+  const text = String(value || "");
+  if (!["開示リンク", "Sources"].includes(String(name || "").trim())) return text;
+  return text.replace(/\\r\\n/g, "\n").replace(/\\n/g, "\n");
 }
 
 function assertMaterialImpact(alertId, fieldMap) {
@@ -2890,7 +2896,8 @@ function pruneExpiredClaims(state, now) {
 }
 
 function normalizeReports(data) {
-  const reports = Array.isArray(data) ? data : (Array.isArray(data.reports) ? data.reports : null);
+  const rawReports = Array.isArray(data) ? data : (Array.isArray(data.reports) ? data.reports : null);
+  const reports = rawReports && rawReports.map(normalizeReportLinkFieldLineBreaks);
   if (reports) {
     assertNoRepeatedNarrativeTemplates(reports);
     assertReportSourceCoverage(reports);
@@ -2898,6 +2905,17 @@ function normalizeReports(data) {
     return reports;
   }
   throw new Error("report file must be an array or { reports: [...] }");
+}
+
+function normalizeReportLinkFieldLineBreaks(report) {
+  if (!report || typeof report !== "object" || !Array.isArray(report.fields)) return report;
+  return {
+    ...report,
+    fields: report.fields.map(field => ({
+      ...field,
+      value: normalizeLinkFieldLineBreaks(field?.name, field?.value)
+    }))
+  };
 }
 
 function assertReportSourceCoverage(reports) {
@@ -3827,6 +3845,13 @@ function selfTest() {
   assert.equal(dedupeEmbed.fields.find(field => field.name === "開示リンク").value, `${LIST_BULLET}[2026-05-14 業績予想修正に関するお知らせ(15:30)](https://f.irbank.net/pdf/20260514/140120260514534210.pdf)`);
   assert.equal(formatEmbedFieldValue("Sources", "[IRニュース一覧](https://example.com/ir)").startsWith(LIST_BULLET), true);
   assert.equal(formatEmbedFieldValue("Sources", "[IRニュース一覧](https://example.com/ir)").includes("?"), false);
+  const escapedNewline = `${String.fromCharCode(92)}n`;
+  const escapedSources = `[テスト株式会社 IR情報](https://example.com/ir)${escapedNewline}[IRBANK テスト 開示一覧](https://irbank.net/1234/ir)`;
+  assert.equal(
+    formatEmbedFieldValue("Sources", escapedSources),
+    `${LIST_BULLET}[テスト株式会社 IR情報](https://example.com/ir)\n${LIST_BULLET}[IRBANK テスト 開示一覧](https://irbank.net/1234/ir)`
+  );
+  assert.equal(formatEmbedFieldValue("Sources", escapedSources).includes(escapedNewline), false);
   const logEvent = buildPostLogEvent({
     alertId: "a11",
     symbolCode: "1234",
