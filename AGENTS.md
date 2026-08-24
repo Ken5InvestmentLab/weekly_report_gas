@@ -114,6 +114,7 @@ OVERLAP_DAYS = 3
 - `collect` が `claimedCount: 0` の場合は何も投稿しない。
 - `post` はアクティブなclaimが残っている `alert_id` だけをDiscord投稿対象にする。
 - `post --dry-run` が複数の失敗 `alert_id` を返した場合は、列挙されたレポートを一度に修正し、列挙されていない有効レポートは変更しない。
+- 実投稿ではdry-run通過後にもライブ開示の再照合が走る。実投稿で新しい開示を指摘された場合は、該当銘柄だけ資料を読み直し、同じ入力でdry-runを再実行してから再投稿する。
 - 古い `premium_reports.json` や投稿済み `alert_id` はskipして再投稿しない。
 
 ### プレミアムEmbed・分析ルール
