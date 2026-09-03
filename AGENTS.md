@@ -240,6 +240,8 @@ OVERLAP_DAYS = 3
   - `migrateCurrentSchemaToMidtermTracking_()` を手動実行
 - `setupAllTriggers()` は既存プロジェクトトリガーを全削除して固定トリガーだけ再登録する。動的な再開トリガー実行中に不用意に実行しない。
 - `resetOhlcvFetchTriggersOnly()` は `fetchOHLCVForNewAlertsMidday` / `fetchOHLCVForNewAlerts` の固定トリガーだけを削除・再登録し、動的再開トリガーは触らない。
+- 13:21先行取得を頭からやり直す場合は、実行中の先行取得を終了してから `resetMiddayOhlcvProgress()` で先行取得の進捗・再開予約・watchdog稼働印・アラートキャッシュを解除し、`fetchOHLCVForNewAlertsMidday()` を実行する。実行のキャンセルや再開トリガー削除だけではwatchdogが再予約する。リセットは保存済みOHLCVと固定トリガーを維持し、別実行のロックや15:51本体の進捗がある場合は拒否する。
+- アラート未受信中にAM行が保存された後の復旧では、アラート再送を確認し、停止・リセット後に `repairTodayBottomSignalOhlcvCloseFromAlertsRaw()` で既存AM行の終値・出来高・保護マーカーを同期してから先行取得を開始する。リセット後の初期化は当日AM取得済み銘柄を除外するため、保存済み行を削除して全量再取得しない。
 
 ## 固定トリガー一覧
 

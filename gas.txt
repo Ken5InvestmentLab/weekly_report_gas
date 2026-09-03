@@ -5407,6 +5407,34 @@ function clearMiddayOhlcvState_(options) {
   if (opts.keepTrigger !== true) deleteTriggersByHandler_(MIDDAY_RESUME_HANDLER);
 }
 
+// 手動やり直し用。実行中の取得を停止してから実行し、アラート復旧後に
+// fetchOHLCVForNewAlertsMidday を実行する。保存済みOHLCVと固定トリガーは維持する。
+function resetMiddayOhlcvProgress() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(1000)) {
+    throw new Error("別のGAS処理が実行中です。終了または停止後に再実行してください。");
+  }
+  try {
+    const props = PropertiesService.getScriptProperties();
+    if (props.getProperty(GLOBAL_WATCHDOG_OHLCV_MAIN_ACTIVE_KEY) ||
+        props.getProperty(PHASE_KEY) || props.getProperty(MAIN_PHASE1_FETCH_INFLIGHT_KEY)) {
+      throw new Error("15:51本体の進捗が残っているため、共有キャッシュのリセットを中止しました。");
+    }
+    const previous = {
+      cursor: props.getProperty(MIDDAY_STATE_KEY) || "",
+      newAlertCount: props.getProperty(MIDDAY_NEW_ALERT_COUNT_KEY) || "",
+      refreshId: props.getProperty(MIDDAY_REFRESH_ID_KEY) || ""
+    };
+    clearMiddayOhlcvState_();
+    clearCachedRawAlertVolumeMap_();
+    const result = { ok: true, previous: previous, ohlcvRowsPreserved: true };
+    console.log("[OHLCV-AM] 手動やり直し用に先行取得の進捗・再開予約・当日アラートキャッシュを解除しました。" + JSON.stringify(result));
+    return result;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 function hasMiddayOhlcvState_() {
   const props = PropertiesService.getScriptProperties();
   return !!(props.getProperty(MIDDAY_STATE_KEY) ||
