@@ -395,9 +395,12 @@ Keep this as a source-grounded material impact label, not a trading action.
    `https://finance-frontend-pc-dist.*.storage-yahoo.jp/disclosure/...` in
    `開示リンク`; substitute the equivalent short `f.irbank.net/pdf/...` or TDnet
    `td_download.cgi` URL for the same document. Keep the assembled `開示リンク`
-   field (all link lines combined, including labels and newlines) under 1000
-   characters as a safety margin. If links would still exceed that, drop the
-   weakest disclosure rather than letting Discord cut a URL.
+   field (all link lines combined, including the Discord list bullets, labels,
+   URLs, and newlines) under 1000 characters as a safety margin. Include at
+   most four material disclosure links. If a fifth link or the 1000-character
+   cap would be needed, remove the weakest disclosure from both the analysis
+   and `開示リンク` rather than letting Discord cut a URL. The worker rejects an
+   over-limit report before any Discord post.
 
    Do NOT put IRBANK HTML disclosure pages such as
    `https://irbank.net/<code>/<document_id>` in `開示リンク`.
@@ -432,7 +435,9 @@ Keep this as a source-grounded material impact label, not a trading action.
    disclosure pages, or individual PR/disclosure detail pages in `Sources`;
    those direct disclosure links belong only in `開示リンク`. Source link labels
    must be page titles as closely as possible; do not use `出典1`, `Source1`,
-   `会社IR`, or similarly opaque labels.
+   `会社IR`, or similarly opaque labels. Keep the fully assembled `Sources`
+   field below 1,000 characters as well; the worker rejects an over-limit field
+   before posting so a reference URL is never cut midway through a Discord embed.
 9. Do not write buy/sell recommendations, target prices, or any additional score.
    Avoid wording such as `買い推奨`, `売り推奨`, `買うべき`, `売るべき`,
    `目標株価`, `利確`, or `損切り`.

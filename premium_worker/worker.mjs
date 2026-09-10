@@ -52,6 +52,9 @@ const REQUIRED_FIELDS = [IMPACT_FIELD, "事業概要", "足元材料", "ファ�
 const OPTIONAL_FIELDS = [];
 const MIN_REFERENCE_SOURCE_URLS = 2;
 const MAX_REFERENCE_SOURCE_URLS = 4;
+const MAX_DISCLOSURE_LINKS = 4;
+const MAX_LINK_FIELD_CHARS = 1000;
+const DISCORD_EMBED_FIELD_MAX_CHARS = 1024;
 const LARGE_BATCH_QUALITY_MIN_REPORTS = 10;
 const LARGE_BATCH_MAX_NO_DISCLOSURE_RATIO = 0.10;
 const LARGE_BATCH_MAX_SPARSE_RATIO = 0.10;
@@ -655,11 +658,16 @@ function buildEmbed(report) {
     ...OPTIONAL_FIELDS.filter(name => fieldMap.has(name) && fieldMap.get(name)),
     ...REQUIRED_FIELDS
   ];
-  const fields = fieldNames.map(name => ({
-    name,
-    value: truncate(formatEmbedFieldValue(name, fieldMap.get(name) || (name === "開示リンク" ? "開示リンク未確認" : "未確認")), 1024),
-    inline: false
-  }));
+  const fields = fieldNames.map(name => {
+    const value = formatEmbedFieldValue(name, fieldMap.get(name) || (name === "開示リンク" ? "開示リンク未確認" : "未確認"));
+    if (["開示リンク", "Sources"].includes(name)) {
+      // Links must remain whole Markdown lines. Discord's generic string truncation
+      // would otherwise cut a URL and leave a broken link in the embed.
+      assertLinkFieldFitsEmbed(alertId, name, value);
+      return { name, value, inline: false };
+    }
+    return { name, value: truncate(value, DISCORD_EMBED_FIELD_MAX_CHARS), inline: false };
+  });
 
   return {
     title,
@@ -1395,9 +1403,13 @@ function assertDisclosureLinksAreDirectDisclosures(alertId, fieldMap) {
   const value = String(fieldMap.get("開示リンク") || "").trim();
   if (value === "開示リンク未確認") return;
   const links = extractMarkdownLinks(value);
-  if (links.length > 8) {
-    throw new Error(`report ${alertId} field 開示リンク has too many disclosure links (${links.length}); include only material links used in the analysis`);
+  if (links.length > MAX_DISCLOSURE_LINKS) {
+    throw new Error(
+      `report ${alertId} field 開示リンク has too many disclosure links (${links.length}); ` +
+      `include at most ${MAX_DISCLOSURE_LINKS} material links used in the analysis`
+    );
   }
+  assertLinkFieldFitsEmbed(alertId, "開示リンク", value);
   for (const { label, url } of links) {
     if (!isDirectDisclosureLinkUrl(url)) {
       throw new Error(`report ${alertId} disclosure link must be a direct disclosure URL: ${label}`);
@@ -1405,6 +1417,16 @@ function assertDisclosureLinksAreDirectDisclosures(alertId, fieldMap) {
     if (!isTimestampedDisclosureLabel(label)) {
       throw new Error(`report ${alertId} disclosure link label must be "YYYY-MM-DD 開示タイトル(hh:mm)": ${label}`);
     }
+  }
+}
+
+function assertLinkFieldFitsEmbed(alertId, name, value) {
+  const formatted = formatEmbedFieldValue(name, value);
+  if (formatted.length > MAX_LINK_FIELD_CHARS) {
+    throw new Error(
+      `report ${alertId} field ${name} exceeds ${MAX_LINK_FIELD_CHARS} characters after Discord formatting; ` +
+      "use shorter verified URLs or remove the weakest link from the field"
+    );
   }
 }
 
@@ -3845,6 +3867,32 @@ function selfTest() {
   assert.equal(dedupeEmbed.fields.find(field => field.name === "開示リンク").value, `${LIST_BULLET}[2026-05-14 業績予想修正に関するお知らせ(15:30)](https://f.irbank.net/pdf/20260514/140120260514534210.pdf)`);
   assert.equal(formatEmbedFieldValue("Sources", "[IRニュース一覧](https://example.com/ir)").startsWith(LIST_BULLET), true);
   assert.equal(formatEmbedFieldValue("Sources", "[IRニュース一覧](https://example.com/ir)").includes("?"), false);
+  const compactDisclosureLinks = Array.from({ length: MAX_DISCLOSURE_LINKS }, (_, index) =>
+    `[2026-05-14 重要開示${index + 1}(15:30)](https://f.irbank.net/pdf/20260514/14012026051453421${index}.pdf)`
+  ).join("\n");
+  assert.doesNotThrow(() => assertDisclosureLinksAreDirectDisclosures(
+    "disclosure-links-at-limit",
+    new Map([["開示リンク", compactDisclosureLinks]])
+  ));
+  assert.throws(() => assertDisclosureLinksAreDirectDisclosures(
+    "disclosure-links-over-count",
+    new Map([["開示リンク", `${compactDisclosureLinks}\n[2026-05-14 重要開示5(15:30)](https://f.irbank.net/pdf/20260514/140120260514534215.pdf)`]])
+  ), /at most 4 material links/);
+  const overlongDisclosureLinks = Array.from({ length: MAX_DISCLOSURE_LINKS }, (_, index) =>
+    `[2026-05-14 ${"重要開示".repeat(60)}${index + 1}(15:30)](https://f.irbank.net/pdf/20260514/14012026051453421${index}.pdf)`
+  ).join("\n");
+  assert.throws(() => assertDisclosureLinksAreDirectDisclosures(
+    "disclosure-links-over-length",
+    new Map([["開示リンク", overlongDisclosureLinks]])
+  ), /exceeds 1000 characters/);
+  const overlongSourceLinks = Array.from({ length: MAX_REFERENCE_SOURCE_URLS }, (_, index) =>
+    `[${"参照ページ".repeat(60)}${index + 1}](https://example.com/reference/${index + 1})`
+  ).join("\n");
+  assert.throws(() => assertLinkFieldFitsEmbed(
+    "source-links-over-length",
+    "Sources",
+    overlongSourceLinks
+  ), /field Sources exceeds 1000 characters/);
   const escapedNewline = `${String.fromCharCode(92)}n`;
   const escapedSources = `[テスト株式会社 IR情報](https://example.com/ir)${escapedNewline}[IRBANK テスト 開示一覧](https://irbank.net/1234/ir)`;
   assert.equal(

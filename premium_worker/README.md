@@ -649,6 +649,14 @@ individual company/PR disclosure detail pages when no direct PDF exists
 
 Do not impose a one-link limit.
 
+Use at most four links in total. The fully assembled field, including the
+Discord list bullets, labels, URLs, and newlines, must stay below 1,000
+characters. The worker rejects an over-limit report before posting, so it never
+cuts a URL midway through a Discord embed.
+
+Apply the same 1,000-character limit to `Sources` after Discord list bullets
+are added. Keep its existing two-to-four reference pages within that limit.
+
 Include every recent important disclosure used to write:
 
 ```text
