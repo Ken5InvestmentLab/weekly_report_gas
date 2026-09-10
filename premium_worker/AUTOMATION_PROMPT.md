@@ -209,6 +209,25 @@ Guidance:
 - Use `様子見` when the disclosure is relevant but the financial impact,
   timing, amount, or sustainability is not yet clear.
 
+Apply this precedence consistently when current-period results and forward
+events point in different directions:
+
+1. Use `ネガティブ材料` for a forecast or dividend withdrawal/downward revision,
+   material restructuring or closure loss, dilution, regulatory risk, or a
+   similar known deterioration. Do not dilute that conclusion to
+   `混在/要確認` solely because the already-reported interim result was profitable
+   or growing.
+2. Use `ポジティブ材料` when margin/profit improvement or a completed cost
+   restructuring is evidenced in the disclosure, the outlook is maintained,
+   and no item in step 1 counterbalances it. Revenue decline alone does not
+   override a demonstrated improvement in operating profit and cash generation.
+3. Use `混在/要確認` only when a concrete new sales/monetization catalyst and a
+   weak current earnings or financial condition coexist without either side
+   meeting steps 1 or 2. State both sides in `材料インパクト`.
+
+In all cases, lead `足元材料` and the impact summary with the disclosure that
+decides this precedence, then support it with the relevant countervailing fact.
+
 The first sentence of `足元材料` should mention the disclosure content that
 supports the impact label, not just the disclosure title.
 When writing calendar dates in `足元材料`, use `M月D日` style such as `5月8日`,
