@@ -16,6 +16,8 @@ export const RISK_FLAGS = Object.freeze([
   'liquidity',
   'lawsuit',
   'regulatory',
+  'regulatory_issue',
+  'disclosure_issue',
   'listing_risk',
   'accounting_issue',
 ]);

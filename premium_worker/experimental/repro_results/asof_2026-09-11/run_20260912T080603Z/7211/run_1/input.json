@@ -1,0 +1,179 @@
+{
+  "rubric_version": 2,
+  "as_of": "2026-09-11",
+  "as_of_timezone": "Asia/Tokyo",
+  "japan_holidays": [
+    "2026-08-11"
+  ],
+  "sources": {
+    "7211_news_q1": {
+      "title": "2026年度第1四半期決算発表",
+      "url": "https://www.mitsubishi-motors.com/jp/newsroom/newsrelease/2026/20260803_1.html",
+      "published_at": "2026-08-03",
+      "primary": true,
+      "document_type": "issuer_release"
+    },
+    "7211_pdf_q1": {
+      "title": "2026年3月期第1四半期決算短信",
+      "url": "https://www.mitsubishi-motors.com/jp/investors/library/pdf/financial/2026/260803_FY26Q1_1j.pdf",
+      "published_at": "2026-08-03",
+      "primary": true,
+      "document_type": "issuer_financial_statement"
+    },
+    "7211_pdf_fy2026": {
+      "title": "2026年3月期決算短信",
+      "url": "https://www.mitsubishi-motors.com/jp/investors/library/pdf/financial/2026/260508_FY25Q4_1j.pdf",
+      "published_at": "2026-05-08",
+      "primary": true,
+      "document_type": "issuer_financial_statement"
+    }
+  },
+  "cases": [
+    {
+      "alertId": "TEST-7211-20260911",
+      "symbol": "7211",
+      "as_of": "2026-09-11",
+      "sources": [
+        "7211_news_q1",
+        "7211_pdf_q1",
+        "7211_pdf_fy2026"
+      ],
+      "evidence": {
+        "7211_material_observation": {
+          "source_ids": [
+            "7211_pdf_q1"
+          ],
+          "description": "会社計画の修正なし。Q1利益進捗に独立した市場予想比較はなく、売上規模比で重要な未織込受注なし。"
+        },
+        "7211_earnings_observation": {
+          "source_ids": [
+            "7211_pdf_q1",
+            "7211_pdf_fy2026"
+          ],
+          "description": "Q1損益と直近通期の営業CF、利益率、訴訟関連費用を分離して観測。"
+        },
+        "7211_growth_observation": {
+          "source_ids": [
+            "7211_pdf_q1"
+          ],
+          "description": "Q1売上・販売台数の前年同期比と通期売上計画に対する時間進捗。"
+        },
+        "7211_finance_observation": {
+          "source_ids": [
+            "7211_pdf_q1",
+            "7211_pdf_fy2026"
+          ],
+          "description": "現預金、有利子負債、自己資本比率、直近開示済み営業CF、支払利息。"
+        },
+        "7211_capital_observation": {
+          "source_ids": [
+            "7211_pdf_q1",
+            "7211_pdf_fy2026"
+          ],
+          "description": "発行済株式数・潜在株式の完全な最新残高は資料から確定できないため、希薄化率は未判定。"
+        },
+        "7211_governance_observation": {
+          "source_ids": [
+            "7211_pdf_q1",
+            "7211_pdf_fy2026"
+          ],
+          "description": "訴訟関連費用の記載はあるが、個別の係争内容・請求額・判決状態は開示資料で特定できない。"
+        },
+        "7211_catalyst_observation": {
+          "source_ids": [
+            "7211_news_q1",
+            "7211_pdf_q1"
+          ],
+          "description": "Q1決算発表日を基準に鮮度を営業日で計算。"
+        }
+      },
+      "observations": {
+        "material_impact": {
+          "evidence_ids": [
+            "7211_material_observation"
+          ],
+          "forecast_revision": "none",
+          "forecast_operating_profit_change_pct": null,
+          "repeated_or_already_disclosed": false,
+          "unforecast_contract_pct_annual_revenue": null,
+          "contract_already_in_guidance": false,
+          "period_operating_profit_gap_pct_annual_revenue": null
+        },
+        "earnings_quality": {
+          "evidence_ids": [
+            "7211_earnings_observation"
+          ],
+          "operating_profit": 10082,
+          "operating_margin_pct": 1.63,
+          "operating_profit_growth_pct": 78.8,
+          "net_income_positive": true,
+          "net_income_growth_pct": 91.2,
+          "latest_operating_cash_flow_positive": true,
+          "one_off_or_valuation_impact_pct_of_operating_profit": 14.35
+        },
+        "growth_visibility": {
+          "evidence_ids": [
+            "7211_growth_observation"
+          ],
+          "quantified_recurring_metric_growth_pct": null,
+          "secured_backlog_pct_annual_revenue": null,
+          "revenue_growth_pct": 1.8,
+          "revenue_progress_vs_time_elapsed_plan": 0.76,
+          "leading_activity_growth_pct": -8
+        },
+        "financial_strength": {
+          "evidence_ids": [
+            "7211_finance_observation"
+          ],
+          "business_model": "operating_company",
+          "cash": 307033,
+          "interest_bearing_debt": 413600,
+          "net_assets": 963318,
+          "equity_ratio_pct": 39.6,
+          "debt_due_within_12_months": null,
+          "latest_operating_cash_flow": 35755,
+          "interest_coverage": 12.38
+        },
+        "capital_structure": {
+          "evidence_ids": [
+            "7211_capital_observation"
+          ],
+          "issued_shares": null,
+          "unexercised_potential_shares": null,
+          "resettable_or_market_price_warrant": false
+        },
+        "governance_legal": {
+          "evidence_ids": [
+            "7211_governance_observation"
+          ],
+          "issues": [],
+          "going_concern_disclosed": false,
+          "listing_risk_disclosed": false
+        },
+        "catalyst_quality": {
+          "evidence_ids": [
+            "7211_catalyst_observation"
+          ],
+          "event_date": "2026-08-03",
+          "timing": "occurred",
+          "novelty": "new",
+          "amount_clarity": "exact",
+          "direction": "mixed",
+          "direct_near_term_business_link": true
+        }
+      },
+      "confidence_quality": {
+        "primary_financial_statement_missing": false,
+        "latest_cash_flow_missing": true,
+        "legal_impact_unquantified": true,
+        "legal_outcome_unresolved": false,
+        "capital_terms_incomplete": true,
+        "unquantified_material_amount": false,
+        "source_conflict": false,
+        "valuation_proxy_only": false,
+        "disclosure_scan_incomplete": false,
+        "comparative_period_missing": false
+      }
+    }
+  ]
+}

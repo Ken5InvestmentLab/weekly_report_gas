@@ -1,0 +1,263 @@
+{
+  "rubric_version": 2,
+  "as_of": "2026-09-11",
+  "as_of_timezone": "Asia/Tokyo",
+  "independent_process_count": 9,
+  "all_runs_validated_before_comparison": true,
+  "validators": [
+    "validate_fundamental_scores_v2.mjs",
+    "validate_fundamental_scores_v1.mjs"
+  ],
+  "thresholds": {
+    "total_score_max_delta": 5,
+    "component_max_delta": 3,
+    "component_abs_delta_sum_max": 10,
+    "confidence_max_delta": 0.05,
+    "risk_flags": "exact match"
+  },
+  "symbols": [
+    {
+      "symbol": "3121",
+      "runs": [
+        {
+          "run": 1,
+          "fundamental_score": 36,
+          "components": {
+            "material_impact": 10,
+            "earnings_quality": 5,
+            "growth_visibility": 4,
+            "financial_strength": 4,
+            "capital_structure": 3,
+            "governance_legal": 5,
+            "catalyst_quality": 5
+          },
+          "risk_flags": [
+            "dilution",
+            "liquidity"
+          ],
+          "confidence": 0.9
+        },
+        {
+          "run": 2,
+          "fundamental_score": 36,
+          "components": {
+            "material_impact": 10,
+            "earnings_quality": 5,
+            "growth_visibility": 4,
+            "financial_strength": 4,
+            "capital_structure": 3,
+            "governance_legal": 5,
+            "catalyst_quality": 5
+          },
+          "risk_flags": [
+            "dilution",
+            "liquidity"
+          ],
+          "confidence": 0.9
+        },
+        {
+          "run": 3,
+          "fundamental_score": 36,
+          "components": {
+            "material_impact": 10,
+            "earnings_quality": 5,
+            "growth_visibility": 4,
+            "financial_strength": 4,
+            "capital_structure": 3,
+            "governance_legal": 5,
+            "catalyst_quality": 5
+          },
+          "risk_flags": [
+            "dilution",
+            "liquidity"
+          ],
+          "confidence": 0.9
+        }
+      ],
+      "score_range": {
+        "min": 36,
+        "max": 36,
+        "delta": 0
+      },
+      "component_max_delta": {
+        "material_impact": 0,
+        "earnings_quality": 0,
+        "growth_visibility": 0,
+        "financial_strength": 0,
+        "capital_structure": 0,
+        "governance_legal": 0,
+        "catalyst_quality": 0
+      },
+      "component_abs_delta_sum_max": 0,
+      "risk_flags_consistent": true,
+      "confidence_range": {
+        "min": 0.9,
+        "max": 0.9,
+        "delta": 0
+      },
+      "stability_pass": true
+    },
+    {
+      "symbol": "6696",
+      "runs": [
+        {
+          "run": 1,
+          "fundamental_score": 30,
+          "components": {
+            "material_impact": 5,
+            "earnings_quality": 1,
+            "growth_visibility": 4,
+            "financial_strength": 11,
+            "capital_structure": 3,
+            "governance_legal": 3,
+            "catalyst_quality": 3
+          },
+          "risk_flags": [
+            "dilution",
+            "lawsuit"
+          ],
+          "confidence": 0.7
+        },
+        {
+          "run": 2,
+          "fundamental_score": 30,
+          "components": {
+            "material_impact": 5,
+            "earnings_quality": 1,
+            "growth_visibility": 4,
+            "financial_strength": 11,
+            "capital_structure": 3,
+            "governance_legal": 3,
+            "catalyst_quality": 3
+          },
+          "risk_flags": [
+            "dilution",
+            "lawsuit"
+          ],
+          "confidence": 0.7
+        },
+        {
+          "run": 3,
+          "fundamental_score": 30,
+          "components": {
+            "material_impact": 5,
+            "earnings_quality": 1,
+            "growth_visibility": 4,
+            "financial_strength": 11,
+            "capital_structure": 3,
+            "governance_legal": 3,
+            "catalyst_quality": 3
+          },
+          "risk_flags": [
+            "dilution",
+            "lawsuit"
+          ],
+          "confidence": 0.7
+        }
+      ],
+      "score_range": {
+        "min": 30,
+        "max": 30,
+        "delta": 0
+      },
+      "component_max_delta": {
+        "material_impact": 0,
+        "earnings_quality": 0,
+        "growth_visibility": 0,
+        "financial_strength": 0,
+        "capital_structure": 0,
+        "governance_legal": 0,
+        "catalyst_quality": 0
+      },
+      "component_abs_delta_sum_max": 0,
+      "risk_flags_consistent": true,
+      "confidence_range": {
+        "min": 0.7,
+        "max": 0.7,
+        "delta": 0
+      },
+      "stability_pass": true
+    },
+    {
+      "symbol": "7211",
+      "runs": [
+        {
+          "run": 1,
+          "fundamental_score": 51,
+          "components": {
+            "material_impact": 10,
+            "earnings_quality": 10,
+            "growth_visibility": 8,
+            "financial_strength": 8,
+            "capital_structure": 5,
+            "governance_legal": 5,
+            "catalyst_quality": 5
+          },
+          "risk_flags": [],
+          "confidence": 0.8
+        },
+        {
+          "run": 2,
+          "fundamental_score": 51,
+          "components": {
+            "material_impact": 10,
+            "earnings_quality": 10,
+            "growth_visibility": 8,
+            "financial_strength": 8,
+            "capital_structure": 5,
+            "governance_legal": 5,
+            "catalyst_quality": 5
+          },
+          "risk_flags": [],
+          "confidence": 0.8
+        },
+        {
+          "run": 3,
+          "fundamental_score": 51,
+          "components": {
+            "material_impact": 10,
+            "earnings_quality": 10,
+            "growth_visibility": 8,
+            "financial_strength": 8,
+            "capital_structure": 5,
+            "governance_legal": 5,
+            "catalyst_quality": 5
+          },
+          "risk_flags": [],
+          "confidence": 0.8
+        }
+      ],
+      "score_range": {
+        "min": 51,
+        "max": 51,
+        "delta": 0
+      },
+      "component_max_delta": {
+        "material_impact": 0,
+        "earnings_quality": 0,
+        "growth_visibility": 0,
+        "financial_strength": 0,
+        "capital_structure": 0,
+        "governance_legal": 0,
+        "catalyst_quality": 0
+      },
+      "component_abs_delta_sum_max": 0,
+      "risk_flags_consistent": true,
+      "confidence_range": {
+        "min": 0.8,
+        "max": 0.8,
+        "delta": 0
+      },
+      "stability_pass": true
+    }
+  ],
+  "overall": {
+    "pass_count": 3,
+    "fail_count": 0,
+    "worst_symbol": null,
+    "worst_score_delta": 0,
+    "worst_component": null,
+    "worst_component_delta": 0
+  },
+  "interpretation": "Measures deterministic scoring from identical frozen, source-cited normalized observations in isolated Node processes; it does not measure independent extraction of facts from raw documents."
+}

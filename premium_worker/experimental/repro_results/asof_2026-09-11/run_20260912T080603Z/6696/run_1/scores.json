@@ -1,0 +1,23 @@
+{
+  "scores": [
+    {
+      "alertId": "TEST-6696-20260911",
+      "symbol": "6696",
+      "as_of": "2026-09-11",
+      "material_impact": 5,
+      "earnings_quality": 1,
+      "growth_visibility": 4,
+      "financial_strength": 11,
+      "capital_structure": 3,
+      "governance_legal": 3,
+      "catalyst_quality": 3,
+      "fundamental_score": 30,
+      "confidence": 0.7,
+      "risk_flags": [
+        "dilution",
+        "lawsuit"
+      ],
+      "rationale": "Rubric V2 fixed bands: material_impact=moderate_negative; earnings_quality=strong_negative; growth_visibility=moderate_negative; financial_strength=moderate_positive; capital_structure=moderate_negative; governance_legal=moderate_negative; catalyst_quality=moderate_negative; evidence-linked and deterministic."
+    }
+  ]
+}

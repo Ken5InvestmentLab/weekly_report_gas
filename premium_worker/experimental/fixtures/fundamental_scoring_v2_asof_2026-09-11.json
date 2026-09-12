@@ -1,0 +1,162 @@
+{
+  "rubric_version": 2,
+  "as_of": "2026-09-11",
+  "as_of_timezone": "Asia/Tokyo",
+  "japan_holidays": ["2026-08-11"],
+  "sources": {
+    "7211_news_q1": {
+      "title": "2026年度第1四半期決算発表",
+      "url": "https://www.mitsubishi-motors.com/jp/newsroom/newsrelease/2026/20260803_1.html",
+      "published_at": "2026-08-03",
+      "primary": true,
+      "document_type": "issuer_release"
+    },
+    "7211_pdf_q1": {
+      "title": "2026年3月期第1四半期決算短信",
+      "url": "https://www.mitsubishi-motors.com/jp/investors/library/pdf/financial/2026/260803_FY26Q1_1j.pdf",
+      "published_at": "2026-08-03",
+      "primary": true,
+      "document_type": "issuer_financial_statement"
+    },
+    "7211_pdf_fy2026": {
+      "title": "2026年3月期決算短信",
+      "url": "https://www.mitsubishi-motors.com/jp/investors/library/pdf/financial/2026/260508_FY25Q4_1j.pdf",
+      "published_at": "2026-05-08",
+      "primary": true,
+      "document_type": "issuer_financial_statement"
+    },
+    "3121_pdf_q3": {
+      "title": "2026年10月期第3四半期決算短信",
+      "url": "https://mbkworld.co.jp/wp-content/uploads/2026/09/%E7%AC%AC103%E6%9C%9F3Q_%E6%B1%BA%E7%AE%97%E7%9F%AD%E4%BF%A1202609.pdf",
+      "published_at": "2026-09-11",
+      "primary": true,
+      "document_type": "issuer_financial_statement"
+    },
+    "3121_release_q3": {
+      "title": "2026年10月期第3四半期決算の概要について",
+      "url": "https://mbkworld.co.jp/press/9475/",
+      "published_at": "2026-09-11",
+      "primary": true,
+      "document_type": "issuer_release"
+    },
+    "3121_release_finance": {
+      "title": "営業外費用の計上に関するお知らせ",
+      "url": "https://mbkworld.co.jp/press/9471/",
+      "published_at": "2026-09-11",
+      "primary": true,
+      "document_type": "issuer_release"
+    },
+    "3121_capital_terms": {
+      "title": "第三者割当による新株式及び第18回新株予約権の発行",
+      "url": "https://mbkworld.co.jp/press/9187/",
+      "published_at": "2026-04-20",
+      "primary": true,
+      "document_type": "issuer_capital_disclosure"
+    },
+    "6696_pdf_q2": {
+      "title": "2027年1月期第2四半期決算短信",
+      "url": "https://www2.jpx.co.jp/disc/66960/140120260910534004.pdf",
+      "published_at": "2026-09-10",
+      "primary": true,
+      "document_type": "tdnet_issuer_filing"
+    },
+    "6696_edinet_fy": {
+      "title": "第32期有価証券報告書",
+      "url": "https://disclosure2dl.edinet-fsa.go.jp/searchdocument/pdf/S100Y0AL.pdf",
+      "published_at": "2026-04-22",
+      "primary": true,
+      "document_type": "edinet_annual_report"
+    },
+    "6696_pdf_lawsuit": {
+      "title": "当社に対する損害賠償請求訴訟の提起に関するお知らせ",
+      "url": "https://www2.jpx.co.jp/disc/66960/140120260824525110.pdf",
+      "published_at": "2026-08-24",
+      "primary": true,
+      "document_type": "tdnet_issuer_filing"
+    },
+    "6696_pdf_stb": {
+      "title": "STB（セットトップボックス）の受注に関するお知らせ",
+      "url": "https://www2.jpx.co.jp/disc/66960/140120260828527607.pdf",
+      "published_at": "2026-08-28",
+      "primary": true,
+      "document_type": "tdnet_issuer_filing"
+    }
+  },
+  "cases": [
+    {
+      "alertId": "TEST-7211-20260911",
+      "symbol": "7211",
+      "as_of": "2026-09-11",
+      "sources": ["7211_news_q1", "7211_pdf_q1", "7211_pdf_fy2026"],
+      "evidence": {
+        "7211_material_observation": {"source_ids": ["7211_pdf_q1"], "description": "会社計画の修正なし。Q1利益進捗に独立した市場予想比較はなく、売上規模比で重要な未織込受注なし。"},
+        "7211_earnings_observation": {"source_ids": ["7211_pdf_q1", "7211_pdf_fy2026"], "description": "Q1損益と直近通期の営業CF、利益率、訴訟関連費用を分離して観測。"},
+        "7211_growth_observation": {"source_ids": ["7211_pdf_q1"], "description": "Q1売上・販売台数の前年同期比と通期売上計画に対する時間進捗。"},
+        "7211_finance_observation": {"source_ids": ["7211_pdf_q1", "7211_pdf_fy2026"], "description": "現預金、有利子負債、自己資本比率、直近開示済み営業CF、支払利息。"},
+        "7211_capital_observation": {"source_ids": ["7211_pdf_q1", "7211_pdf_fy2026"], "description": "発行済株式数・潜在株式の完全な最新残高は資料から確定できないため、希薄化率は未判定。"},
+        "7211_governance_observation": {"source_ids": ["7211_pdf_q1", "7211_pdf_fy2026"], "description": "訴訟関連費用の記載はあるが、個別の係争内容・請求額・判決状態は開示資料で特定できない。"},
+        "7211_catalyst_observation": {"source_ids": ["7211_news_q1", "7211_pdf_q1"], "description": "Q1決算発表日を基準に鮮度を営業日で計算。"}
+      },
+      "observations": {
+        "material_impact": {"evidence_ids": ["7211_material_observation"], "forecast_revision": "none", "forecast_operating_profit_change_pct": null, "repeated_or_already_disclosed": false, "unforecast_contract_pct_annual_revenue": null, "contract_already_in_guidance": false, "period_operating_profit_gap_pct_annual_revenue": null},
+        "earnings_quality": {"evidence_ids": ["7211_earnings_observation"], "operating_profit": 10082, "operating_margin_pct": 1.63, "operating_profit_growth_pct": 78.8, "net_income_positive": true, "net_income_growth_pct": 91.2, "latest_operating_cash_flow_positive": true, "one_off_or_valuation_impact_pct_of_operating_profit": 14.35},
+        "growth_visibility": {"evidence_ids": ["7211_growth_observation"], "quantified_recurring_metric_growth_pct": null, "secured_backlog_pct_annual_revenue": null, "revenue_growth_pct": 1.8, "revenue_progress_vs_time_elapsed_plan": 0.76, "leading_activity_growth_pct": -8.0},
+        "financial_strength": {"evidence_ids": ["7211_finance_observation"], "business_model": "operating_company", "cash": 307033, "interest_bearing_debt": 413600, "net_assets": 963318, "equity_ratio_pct": 39.6, "debt_due_within_12_months": null, "latest_operating_cash_flow": 35755, "interest_coverage": 12.38},
+        "capital_structure": {"evidence_ids": ["7211_capital_observation"], "issued_shares": null, "unexercised_potential_shares": null, "resettable_or_market_price_warrant": false},
+        "governance_legal": {"evidence_ids": ["7211_governance_observation"], "issues": [], "going_concern_disclosed": false, "listing_risk_disclosed": false},
+        "catalyst_quality": {"evidence_ids": ["7211_catalyst_observation"], "event_date": "2026-08-03", "timing": "occurred", "novelty": "new", "amount_clarity": "exact", "direction": "mixed", "direct_near_term_business_link": true}
+      },
+      "confidence_quality": {"primary_financial_statement_missing": false, "latest_cash_flow_missing": true, "legal_impact_unquantified": true, "legal_outcome_unresolved": false, "capital_terms_incomplete": true, "unquantified_material_amount": false, "source_conflict": false, "valuation_proxy_only": false, "disclosure_scan_incomplete": false, "comparative_period_missing": false}
+    },
+    {
+      "alertId": "TEST-3121-20260911",
+      "symbol": "3121",
+      "as_of": "2026-09-11",
+      "sources": ["3121_pdf_q3", "3121_release_q3", "3121_release_finance", "3121_capital_terms"],
+      "evidence": {
+        "3121_material_observation": {"source_ids": ["3121_pdf_q3", "3121_release_q3", "3121_release_finance"], "description": "9か月実績、通期会社計画、評価損の売上規模比を比較。発表の新しさはこの項目に加点しない。"},
+        "3121_earnings_observation": {"source_ids": ["3121_pdf_q3", "3121_release_q3", "3121_release_finance"], "description": "9か月営業利益・利益率・純利益、投資先配当の一過性、暗号資産評価損、営業CF開示有無。"},
+        "3121_growth_observation": {"source_ids": ["3121_pdf_q3", "3121_release_q3"], "description": "9か月売上の前年同期比と定量的な受注残・継続収入の有無。"},
+        "3121_finance_observation": {"source_ids": ["3121_pdf_q3", "3121_release_finance", "3121_capital_terms"], "description": "現預金、12か月以内返済額、有利子負債、純資産、自己資本比率、支払利息、営業利益、簿価ベースの不動産資産proxy。"},
+        "3121_capital_observation": {"source_ids": ["3121_pdf_q3", "3121_capital_terms"], "description": "発行済株式32,806,190株と固定行使価額230円・潜在株式5,000,000株の第18回新株予約権。"},
+        "3121_governance_observation": {"source_ids": ["3121_pdf_q3"], "description": "評価対象の開示範囲で重大な未解決の訴訟・会計・規制・開示問題は特定されない。"},
+        "3121_catalyst_observation": {"source_ids": ["3121_release_q3", "3121_release_finance"], "description": "2026-09-11決算開示の鮮度、数値明確性、営業・経常・純利益の方向を別々に評価。"}
+      },
+      "observations": {
+        "material_impact": {"evidence_ids": ["3121_material_observation"], "forecast_revision": "none", "forecast_operating_profit_change_pct": null, "repeated_or_already_disclosed": false, "unforecast_contract_pct_annual_revenue": null, "contract_already_in_guidance": false, "period_operating_profit_gap_pct_annual_revenue": -1.96},
+        "earnings_quality": {"evidence_ids": ["3121_earnings_observation"], "operating_profit": 347.168, "operating_margin_pct": 17.75, "operating_profit_growth_pct": 29.5, "net_income_positive": true, "net_income_growth_pct": -56.1, "latest_operating_cash_flow_positive": null, "one_off_or_valuation_impact_pct_of_operating_profit": 63.1},
+        "growth_visibility": {"evidence_ids": ["3121_growth_observation"], "quantified_recurring_metric_growth_pct": null, "secured_backlog_pct_annual_revenue": null, "revenue_growth_pct": -17.0, "revenue_progress_vs_time_elapsed_plan": 0.58, "leading_activity_growth_pct": null},
+        "financial_strength": {"evidence_ids": ["3121_finance_observation"], "business_model": "property_investment", "cash": 767.762, "interest_bearing_debt": 9591.208, "net_assets": 4542.847, "equity_ratio_pct": 31.4, "debt_due_within_12_months": 2048.652, "property_asset_value_proxy": 11741.58, "latest_operating_cash_flow": null, "interest_coverage": 1.94},
+        "capital_structure": {"evidence_ids": ["3121_capital_observation"], "issued_shares": 32806190, "unexercised_potential_shares": 5000000, "resettable_or_market_price_warrant": false},
+        "governance_legal": {"evidence_ids": ["3121_governance_observation"], "issues": [], "going_concern_disclosed": false, "listing_risk_disclosed": false},
+        "catalyst_quality": {"evidence_ids": ["3121_catalyst_observation"], "event_date": "2026-09-11", "timing": "occurred", "novelty": "new", "amount_clarity": "exact", "direction": "mixed", "direct_near_term_business_link": true}
+      },
+      "confidence_quality": {"primary_financial_statement_missing": false, "latest_cash_flow_missing": true, "legal_impact_unquantified": false, "legal_outcome_unresolved": false, "capital_terms_incomplete": false, "unquantified_material_amount": false, "source_conflict": false, "valuation_proxy_only": true, "disclosure_scan_incomplete": false, "comparative_period_missing": false}
+    },
+    {
+      "alertId": "TEST-6696-20260911",
+      "symbol": "6696",
+      "as_of": "2026-09-11",
+      "sources": ["6696_pdf_q2", "6696_edinet_fy", "6696_pdf_lawsuit", "6696_pdf_stb"],
+      "evidence": {
+        "6696_material_observation": {"source_ids": ["6696_pdf_q2", "6696_pdf_stb"], "description": "中間営業利益と通期計画の時間按分差を売上規模比に変換。11百万円受注は通期計画織込済み。"},
+        "6696_earnings_observation": {"source_ids": ["6696_pdf_q2", "6696_edinet_fy"], "description": "中間営業損失・営業利益率・純損失と直近営業CF。前年同期比較の非開示も記録。"},
+        "6696_growth_observation": {"source_ids": ["6696_pdf_q2", "6696_pdf_stb"], "description": "前年同期比較不能、通期売上計画に対する中間進捗、受注の計画織込状況。"},
+        "6696_finance_observation": {"source_ids": ["6696_pdf_q2", "6696_edinet_fy"], "description": "現預金、短期・長期借入、純資産、自己資本比率、直近営業CF。"},
+        "6696_capital_observation": {"source_ids": ["6696_pdf_q2", "6696_edinet_fy"], "description": "発行済4,826,991株。第12回337,800株・第13回337,000株相当の固定行使価額型予約権は年次報告書記載値を使用し、潜在希薄化は約13.98%。"},
+        "6696_lawsuit_observation": {"source_ids": ["6696_pdf_lawsuit", "6696_pdf_q2"], "description": "係争中の請求額240.757百万円、訴訟状態、最新純資産294.158百万円との比率。会社開示では引当額を特定できない。"},
+        "6696_catalyst_observation": {"source_ids": ["6696_pdf_q2"], "description": "2026-09-10中間決算開示の営業日鮮度、金額明確性、損益方向。"}
+      },
+      "observations": {
+        "material_impact": {"evidence_ids": ["6696_material_observation"], "forecast_revision": "none", "forecast_operating_profit_change_pct": null, "repeated_or_already_disclosed": false, "unforecast_contract_pct_annual_revenue": 2.06, "contract_already_in_guidance": true, "period_operating_profit_gap_pct_annual_revenue": -9.44},
+        "earnings_quality": {"evidence_ids": ["6696_earnings_observation"], "operating_profit": -49, "operating_margin_pct": -28.99, "operating_profit_growth_pct": null, "net_income_positive": false, "net_income_growth_pct": null, "latest_operating_cash_flow_positive": false, "one_off_or_valuation_impact_pct_of_operating_profit": null},
+        "growth_visibility": {"evidence_ids": ["6696_growth_observation"], "quantified_recurring_metric_growth_pct": null, "secured_backlog_pct_annual_revenue": null, "revenue_growth_pct": null, "revenue_progress_vs_time_elapsed_plan": 0.6318, "leading_activity_growth_pct": null},
+        "financial_strength": {"evidence_ids": ["6696_finance_observation"], "business_model": "operating_company", "cash": 247.877, "interest_bearing_debt": 138.674, "net_assets": 294.158, "equity_ratio_pct": 63.2, "debt_due_within_12_months": 31.992, "property_asset_value_proxy": null, "latest_operating_cash_flow": -4.88, "interest_coverage": null},
+        "capital_structure": {"evidence_ids": ["6696_capital_observation"], "issued_shares": 4826991, "unexercised_potential_shares": 674800, "resettable_or_market_price_warrant": false},
+        "governance_legal": {"evidence_ids": ["6696_lawsuit_observation"], "issues": [{"type": "lawsuit", "evidence_id": "6696_lawsuit_observation", "status": "pending", "claim_pct_net_assets": 81.85, "provision_pct_claim": null}], "going_concern_disclosed": false, "listing_risk_disclosed": false},
+        "catalyst_quality": {"evidence_ids": ["6696_catalyst_observation"], "event_date": "2026-09-10", "timing": "occurred", "novelty": "new", "amount_clarity": "exact", "direction": "negative", "direct_near_term_business_link": true}
+      },
+      "confidence_quality": {"primary_financial_statement_missing": false, "latest_cash_flow_missing": false, "legal_impact_unquantified": true, "legal_outcome_unresolved": true, "capital_terms_incomplete": true, "unquantified_material_amount": false, "source_conflict": false, "valuation_proxy_only": false, "disclosure_scan_incomplete": false, "comparative_period_missing": true}
+    }
+  ]
+}

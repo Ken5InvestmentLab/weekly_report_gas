@@ -1,0 +1,12 @@
+{
+  "ok": true,
+  "symbol": "3121",
+  "total": 36,
+  "confidence": 0.9,
+  "risk_flags": [
+    "dilution",
+    "liquidity"
+  ],
+  "source_count": 4,
+  "evidence_count": 7
+}

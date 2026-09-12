@@ -20,6 +20,7 @@ const sample6696 = {
 const valid = validateFundamentalScore(sample6696);
 assert.equal(valid.ok, true, JSON.stringify(valid.errors));
 assert.equal(valid.calculatedTotal, 34);
+assert.equal(validateFundamentalScore({ ...sample6696, risk_flags: ['disclosure_issue', 'regulatory_issue'] }).ok, true);
 
 const bad = validateFundamentalScore({ ...sample6696, earnings_quality: 99, fundamental_score: 130 });
 assert.equal(bad.ok, false);

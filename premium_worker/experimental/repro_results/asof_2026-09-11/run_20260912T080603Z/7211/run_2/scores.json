@@ -1,0 +1,20 @@
+{
+  "scores": [
+    {
+      "alertId": "TEST-7211-20260911",
+      "symbol": "7211",
+      "as_of": "2026-09-11",
+      "material_impact": 10,
+      "earnings_quality": 10,
+      "growth_visibility": 8,
+      "financial_strength": 8,
+      "capital_structure": 5,
+      "governance_legal": 5,
+      "catalyst_quality": 5,
+      "fundamental_score": 51,
+      "confidence": 0.8,
+      "risk_flags": [],
+      "rationale": "Rubric V2 fixed bands: material_impact=neutral; earnings_quality=neutral; growth_visibility=neutral; financial_strength=neutral; capital_structure=neutral; governance_legal=neutral; catalyst_quality=neutral; evidence-linked and deterministic."
+    }
+  ]
+}

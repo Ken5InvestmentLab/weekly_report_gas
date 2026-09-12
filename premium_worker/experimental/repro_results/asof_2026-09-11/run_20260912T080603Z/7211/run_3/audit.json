@@ -1,0 +1,149 @@
+{
+  "rubric_version": 2,
+  "symbol": "7211",
+  "as_of": "2026-09-11",
+  "components": {
+    "material_impact": {
+      "band": "neutral",
+      "score": 10,
+      "reason_code": "no_incremental_company_scale_impact",
+      "evidence_ids": [
+        "7211_material_observation"
+      ]
+    },
+    "earnings_quality": {
+      "band": "neutral",
+      "score": 10,
+      "reason_code": "positive_operations_with_mixed_or_low_margin_evidence",
+      "evidence_ids": [
+        "7211_earnings_observation"
+      ]
+    },
+    "growth_visibility": {
+      "band": "neutral",
+      "score": 8,
+      "reason_code": "no_quantified_secured_expansion_or_material_decline",
+      "evidence_ids": [
+        "7211_growth_observation"
+      ]
+    },
+    "financial_strength": {
+      "band": "neutral",
+      "score": 8,
+      "reason_code": "adequate_equity_positive_cashflow_and_interest_cover",
+      "evidence_ids": [
+        "7211_finance_observation"
+      ]
+    },
+    "capital_structure": {
+      "band": "neutral",
+      "score": 5,
+      "reason_code": "potential_dilution_unknown_or_not_quantified",
+      "dilution_bucket": "unknown_or_not_quantified",
+      "evidence_ids": [
+        "7211_capital_observation"
+      ]
+    },
+    "governance_legal": {
+      "band": "neutral",
+      "score": 5,
+      "reason_code": "no_material_unresolved_governance_or_legal_issue",
+      "evidence_ids": [
+        "7211_governance_observation"
+      ]
+    },
+    "catalyst_quality": {
+      "band": "neutral",
+      "score": 5,
+      "reason_code": "age_timing_novelty_amount_and_business_link_then_direction_band",
+      "catalyst_strength": 2,
+      "age_business_sessions": 28,
+      "evidence_ids": [
+        "7211_catalyst_observation"
+      ]
+    }
+  },
+  "evidence_allocation": [
+    {
+      "evidence_id": "7211_material_observation",
+      "applied_component": "material_impact",
+      "source_ids": [
+        "7211_pdf_q1"
+      ],
+      "description": "会社計画の修正なし。Q1利益進捗に独立した市場予想比較はなく、売上規模比で重要な未織込受注なし。"
+    },
+    {
+      "evidence_id": "7211_earnings_observation",
+      "applied_component": "earnings_quality",
+      "source_ids": [
+        "7211_pdf_q1",
+        "7211_pdf_fy2026"
+      ],
+      "description": "Q1損益と直近通期の営業CF、利益率、訴訟関連費用を分離して観測。"
+    },
+    {
+      "evidence_id": "7211_growth_observation",
+      "applied_component": "growth_visibility",
+      "source_ids": [
+        "7211_pdf_q1"
+      ],
+      "description": "Q1売上・販売台数の前年同期比と通期売上計画に対する時間進捗。"
+    },
+    {
+      "evidence_id": "7211_finance_observation",
+      "applied_component": "financial_strength",
+      "source_ids": [
+        "7211_pdf_q1",
+        "7211_pdf_fy2026"
+      ],
+      "description": "現預金、有利子負債、自己資本比率、直近開示済み営業CF、支払利息。"
+    },
+    {
+      "evidence_id": "7211_capital_observation",
+      "applied_component": "capital_structure",
+      "source_ids": [
+        "7211_pdf_q1",
+        "7211_pdf_fy2026"
+      ],
+      "description": "発行済株式数・潜在株式の完全な最新残高は資料から確定できないため、希薄化率は未判定。"
+    },
+    {
+      "evidence_id": "7211_governance_observation",
+      "applied_component": "governance_legal",
+      "source_ids": [
+        "7211_pdf_q1",
+        "7211_pdf_fy2026"
+      ],
+      "description": "訴訟関連費用の記載はあるが、個別の係争内容・請求額・判決状態は開示資料で特定できない。"
+    },
+    {
+      "evidence_id": "7211_catalyst_observation",
+      "applied_component": "catalyst_quality",
+      "source_ids": [
+        "7211_news_q1",
+        "7211_pdf_q1"
+      ],
+      "description": "Q1決算発表日を基準に鮮度を営業日で計算。"
+    }
+  ],
+  "risk_flag_evidence": {},
+  "confidence": {
+    "base": 1,
+    "deductions": [
+      {
+        "reason": "latest_cash_flow_missing",
+        "amount": 0.05
+      },
+      {
+        "reason": "legal_impact_unquantified",
+        "amount": 0.05
+      },
+      {
+        "reason": "capital_terms_incomplete",
+        "amount": 0.1
+      }
+    ],
+    "raw": 0.8,
+    "value": 0.8
+  }
+}

@@ -1,0 +1,156 @@
+{
+  "rubric_version": 2,
+  "symbol": "3121",
+  "as_of": "2026-09-11",
+  "components": {
+    "material_impact": {
+      "band": "neutral",
+      "score": 10,
+      "reason_code": "no_incremental_company_scale_impact",
+      "evidence_ids": [
+        "3121_material_observation"
+      ]
+    },
+    "earnings_quality": {
+      "band": "moderate_negative",
+      "score": 5,
+      "reason_code": "loss_or_net_loss_or_oneoff_impact_ge_25pct",
+      "evidence_ids": [
+        "3121_earnings_observation"
+      ]
+    },
+    "growth_visibility": {
+      "band": "moderate_negative",
+      "score": 4,
+      "reason_code": "revenue_or_leading_activity_decline_or_plan_progress_below_75pct",
+      "evidence_ids": [
+        "3121_growth_observation"
+      ]
+    },
+    "financial_strength": {
+      "band": "moderate_negative",
+      "score": 4,
+      "reason_code": "property_cash_maturity_cover_below_0_5_or_interest_cover_below_2",
+      "evidence_ids": [
+        "3121_finance_observation"
+      ]
+    },
+    "capital_structure": {
+      "band": "moderate_negative",
+      "score": 3,
+      "reason_code": "potential_dilution_over_10_to_20pct",
+      "dilution_bucket": "over_10_to_20pct",
+      "evidence_ids": [
+        "3121_capital_observation"
+      ]
+    },
+    "governance_legal": {
+      "band": "neutral",
+      "score": 5,
+      "reason_code": "no_material_unresolved_governance_or_legal_issue",
+      "evidence_ids": [
+        "3121_governance_observation"
+      ]
+    },
+    "catalyst_quality": {
+      "band": "neutral",
+      "score": 5,
+      "reason_code": "age_timing_novelty_amount_and_business_link_then_direction_band",
+      "catalyst_strength": 5,
+      "age_business_sessions": 0,
+      "evidence_ids": [
+        "3121_catalyst_observation"
+      ]
+    }
+  },
+  "evidence_allocation": [
+    {
+      "evidence_id": "3121_material_observation",
+      "applied_component": "material_impact",
+      "source_ids": [
+        "3121_pdf_q3",
+        "3121_release_q3",
+        "3121_release_finance"
+      ],
+      "description": "9か月実績、通期会社計画、評価損の売上規模比を比較。発表の新しさはこの項目に加点しない。"
+    },
+    {
+      "evidence_id": "3121_earnings_observation",
+      "applied_component": "earnings_quality",
+      "source_ids": [
+        "3121_pdf_q3",
+        "3121_release_q3",
+        "3121_release_finance"
+      ],
+      "description": "9か月営業利益・利益率・純利益、投資先配当の一過性、暗号資産評価損、営業CF開示有無。"
+    },
+    {
+      "evidence_id": "3121_growth_observation",
+      "applied_component": "growth_visibility",
+      "source_ids": [
+        "3121_pdf_q3",
+        "3121_release_q3"
+      ],
+      "description": "9か月売上の前年同期比と定量的な受注残・継続収入の有無。"
+    },
+    {
+      "evidence_id": "3121_finance_observation",
+      "applied_component": "financial_strength",
+      "source_ids": [
+        "3121_pdf_q3",
+        "3121_release_finance",
+        "3121_capital_terms"
+      ],
+      "description": "現預金、12か月以内返済額、有利子負債、純資産、自己資本比率、支払利息、営業利益、簿価ベースの不動産資産proxy。"
+    },
+    {
+      "evidence_id": "3121_capital_observation",
+      "applied_component": "capital_structure",
+      "source_ids": [
+        "3121_pdf_q3",
+        "3121_capital_terms"
+      ],
+      "description": "発行済株式32,806,190株と固定行使価額230円・潜在株式5,000,000株の第18回新株予約権。"
+    },
+    {
+      "evidence_id": "3121_governance_observation",
+      "applied_component": "governance_legal",
+      "source_ids": [
+        "3121_pdf_q3"
+      ],
+      "description": "評価対象の開示範囲で重大な未解決の訴訟・会計・規制・開示問題は特定されない。"
+    },
+    {
+      "evidence_id": "3121_catalyst_observation",
+      "applied_component": "catalyst_quality",
+      "source_ids": [
+        "3121_release_q3",
+        "3121_release_finance"
+      ],
+      "description": "2026-09-11決算開示の鮮度、数値明確性、営業・経常・純利益の方向を別々に評価。"
+    }
+  ],
+  "risk_flag_evidence": {
+    "dilution": [
+      "3121_capital_observation"
+    ],
+    "liquidity": [
+      "3121_finance_observation"
+    ]
+  },
+  "confidence": {
+    "base": 1,
+    "deductions": [
+      {
+        "reason": "latest_cash_flow_missing",
+        "amount": 0.05
+      },
+      {
+        "reason": "valuation_proxy_only",
+        "amount": 0.05
+      }
+    ],
+    "raw": 0.9,
+    "value": 0.9
+  }
+}

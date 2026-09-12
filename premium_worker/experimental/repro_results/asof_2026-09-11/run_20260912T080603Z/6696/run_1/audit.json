@@ -1,0 +1,162 @@
+{
+  "rubric_version": 2,
+  "symbol": "6696",
+  "as_of": "2026-09-11",
+  "components": {
+    "material_impact": {
+      "band": "moderate_negative",
+      "score": 5,
+      "reason_code": "period_profit_gap_le_minus_5pct_revenue",
+      "evidence_ids": [
+        "6696_material_observation"
+      ]
+    },
+    "earnings_quality": {
+      "band": "strong_negative",
+      "score": 1,
+      "reason_code": "operating_loss_margin_le_minus_20_net_loss_negative_cfo",
+      "evidence_ids": [
+        "6696_earnings_observation"
+      ]
+    },
+    "growth_visibility": {
+      "band": "moderate_negative",
+      "score": 4,
+      "reason_code": "revenue_or_leading_activity_decline_or_plan_progress_below_75pct",
+      "evidence_ids": [
+        "6696_growth_observation"
+      ]
+    },
+    "financial_strength": {
+      "band": "moderate_positive",
+      "score": 11,
+      "reason_code": "high_equity_net_cash_and_liquidity",
+      "evidence_ids": [
+        "6696_finance_observation"
+      ]
+    },
+    "capital_structure": {
+      "band": "moderate_negative",
+      "score": 3,
+      "reason_code": "potential_dilution_over_10_to_20pct",
+      "dilution_bucket": "over_10_to_20pct",
+      "evidence_ids": [
+        "6696_capital_observation"
+      ]
+    },
+    "governance_legal": {
+      "band": "moderate_negative",
+      "score": 3,
+      "reason_code": "large_pending_claim_with_provision_or_unreported_provision",
+      "issue_id": "6696_lawsuit_observation",
+      "evidence_ids": [
+        "6696_lawsuit_observation"
+      ]
+    },
+    "catalyst_quality": {
+      "band": "moderate_negative",
+      "score": 3,
+      "reason_code": "age_timing_novelty_amount_and_business_link_then_direction_band",
+      "catalyst_strength": 5,
+      "age_business_sessions": 1,
+      "evidence_ids": [
+        "6696_catalyst_observation"
+      ]
+    }
+  },
+  "evidence_allocation": [
+    {
+      "evidence_id": "6696_material_observation",
+      "applied_component": "material_impact",
+      "source_ids": [
+        "6696_pdf_q2",
+        "6696_pdf_stb"
+      ],
+      "description": "中間営業利益と通期計画の時間按分差を売上規模比に変換。11百万円受注は通期計画織込済み。"
+    },
+    {
+      "evidence_id": "6696_earnings_observation",
+      "applied_component": "earnings_quality",
+      "source_ids": [
+        "6696_pdf_q2",
+        "6696_edinet_fy"
+      ],
+      "description": "中間営業損失・営業利益率・純損失と直近営業CF。前年同期比較の非開示も記録。"
+    },
+    {
+      "evidence_id": "6696_growth_observation",
+      "applied_component": "growth_visibility",
+      "source_ids": [
+        "6696_pdf_q2",
+        "6696_pdf_stb"
+      ],
+      "description": "前年同期比較不能、通期売上計画に対する中間進捗、受注の計画織込状況。"
+    },
+    {
+      "evidence_id": "6696_finance_observation",
+      "applied_component": "financial_strength",
+      "source_ids": [
+        "6696_pdf_q2",
+        "6696_edinet_fy"
+      ],
+      "description": "現預金、短期・長期借入、純資産、自己資本比率、直近営業CF。"
+    },
+    {
+      "evidence_id": "6696_capital_observation",
+      "applied_component": "capital_structure",
+      "source_ids": [
+        "6696_pdf_q2",
+        "6696_edinet_fy"
+      ],
+      "description": "発行済4,826,991株。第12回337,800株・第13回337,000株相当の固定行使価額型予約権は年次報告書記載値を使用し、潜在希薄化は約13.98%。"
+    },
+    {
+      "evidence_id": "6696_lawsuit_observation",
+      "applied_component": "governance_legal",
+      "source_ids": [
+        "6696_pdf_lawsuit",
+        "6696_pdf_q2"
+      ],
+      "description": "係争中の請求額240.757百万円、訴訟状態、最新純資産294.158百万円との比率。会社開示では引当額を特定できない。"
+    },
+    {
+      "evidence_id": "6696_catalyst_observation",
+      "applied_component": "catalyst_quality",
+      "source_ids": [
+        "6696_pdf_q2"
+      ],
+      "description": "2026-09-10中間決算開示の営業日鮮度、金額明確性、損益方向。"
+    }
+  ],
+  "risk_flag_evidence": {
+    "dilution": [
+      "6696_capital_observation"
+    ],
+    "lawsuit": [
+      "6696_lawsuit_observation"
+    ]
+  },
+  "confidence": {
+    "base": 1,
+    "deductions": [
+      {
+        "reason": "legal_impact_unquantified",
+        "amount": 0.05
+      },
+      {
+        "reason": "legal_outcome_unresolved",
+        "amount": 0.1
+      },
+      {
+        "reason": "capital_terms_incomplete",
+        "amount": 0.1
+      },
+      {
+        "reason": "comparative_period_missing",
+        "amount": 0.05
+      }
+    ],
+    "raw": 0.7,
+    "value": 0.7
+  }
+}

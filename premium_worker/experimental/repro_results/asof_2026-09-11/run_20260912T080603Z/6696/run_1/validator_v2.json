@@ -1,0 +1,12 @@
+{
+  "ok": true,
+  "symbol": "6696",
+  "total": 30,
+  "confidence": 0.7,
+  "risk_flags": [
+    "dilution",
+    "lawsuit"
+  ],
+  "source_count": 4,
+  "evidence_count": 7
+}
